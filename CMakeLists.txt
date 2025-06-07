@@ -39,7 +39,7 @@ find_package(Catch2 REQUIRED)
 
 # Collect source files qquickgitLib
 file(GLOB qquickgit_CPP_FILES "src/*.cpp")
-file(GLOB qquickgitlib_H_FILES "src/*.h")
+file(GLOB qquickgit_H_FILES "src/*.h")
 
 # Make the file paths relative to the project directory
 set(qquickgit_RELATIVE_CPP_FILES "")
@@ -55,14 +55,11 @@ foreach(file ${qquickgit_H_FILES})
 endforeach()
 
 # Get all QML and JS files
-file(GLOB qquickgit_QML_FILES "*.qml" "*.js")
+file(GLOB qquickgit_QML_FILES "qml/*.qml" "qml/*.js")
 
 # Define the list of QML singletons
 set(qml_singletons
     # "UnitDefaults.qml"
-    # "GlobalShadowTextInput.qml"
-    # "RootPopupItem.qml"
-    # "YanoneKaffeesatz.qml"
 )
 
 # Remove the singleton files from the regular QML file list
@@ -73,7 +70,7 @@ endforeach()
 # Make the remaining QML files relative to the project directory
 set(qquickgit_RELATIVE_QML_FILES "")
 foreach(file ${qquickgit_QML_FILES})
-    file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}/qml" "${file}")
+    file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}" "${file}")
     message(STATUS "Adding QML file: ${relFile}")
     list(APPEND qquickgit_RELATIVE_QML_FILES "${relFile}")
 endforeach()
@@ -110,21 +107,8 @@ target_include_directories(qquickgit
 )
 
 # Collect source files qquickgitLib
-file(GLOB qquickgit-test_CPP_FILES "tests//*.cpp")
+file(GLOB qquickgit-test_CPP_FILES "tests/*.cpp")
 file(GLOB qquickgit-testlib_H_FILES "tests/*.h")
-
-# # Make the file paths relative to the project directory
-# set(qquickgit-test_RELATIVE_CPP_FILES "")
-# foreach(file ${qquickgit-test_CPP_FILES})
-#     file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}" "${file}")
-#     list(APPEND qquickgit-test_RELATIVE_CPP_FILES "${relFile}")
-# endforeach()
-
-# set(qquickgit-test_RELATIVE_H_FILES "")
-# foreach(file ${qquickgit-test_H_FILES})
-#     file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}" "${file}")
-#     list(APPEND qquickgit-test_RELATIVE_H_FILES "${relFile}")
-# endforeach()
 
 qt_add_executable(qquickgit-test
     ${qquickgit-test_CPP_FILES}
