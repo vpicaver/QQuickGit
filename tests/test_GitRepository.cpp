@@ -661,7 +661,7 @@ TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     GitRepository repository;
     repository.setDirectory(cloneDir);
 
-    auto future = repository.clone(QUrl("ssh://git@github.com/vpicaver/marbleRange.git"));
+    auto future = repository.clone(QUrl("ssh://git@github.com/vpicaver/QQuickGit.git"));
 
     //Much bigger repository
 //    auto future = repository.clone(QUrl("ssh://git@gitlab.com/caves-org/btcp/gros-vertre-east.git"));

@@ -13,8 +13,9 @@ using namespace SignalSpyChecker;
 //Qt includes
 #include <QDir>
 
-const int timeout = 10000;
+const int timeout = 30000;
 
+//This test case is flakey
 TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[GitFutureWatcher]") {
 
     QDir cloneDir("clone-test");
@@ -25,7 +26,11 @@ TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[Gi
     GitRepository repository;
     repository.setDirectory(cloneDir);
 
-    auto future = repository.clone(QUrl("ssh://git@github.com/vpicaver/marbleRange.git"));
+    //Need a bigger repo
+    auto future = repository.clone(QUrl("ssh://git@github.com/cavewhere/cavewhere.git"));
+
+    //If this fails, the clone could have happened before getting here
+    CHECK(!future.isFinished());
 
     GitFutureWatcher watcher;
     auto checker = Constant::makeChecker(&watcher);
@@ -40,6 +45,7 @@ TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[Gi
     checker[checker.findSpy(&GitFutureWatcher::futureChanged)]++;
     checker.checkSpies();
 
+    //If this timeout is too short, it might cause a crash
     REQUIRE(AsyncFuture::waitForFinished(future, timeout));
 
     checker[checker.findSpy(&GitFutureWatcher::stateChanged)]++;
@@ -50,6 +56,7 @@ TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[Gi
 
     CHECK(watcher.progress() == 1.0);
     CHECK(watcher.state() == GitFutureWatcher::Ready);
+    INFO("Error message:" << watcher.errorMessage().toStdString());
     CHECK(watcher.errorMessage().isEmpty());
 }
 

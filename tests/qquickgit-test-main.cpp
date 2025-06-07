@@ -19,7 +19,7 @@ int main( int argc, char* argv[] )
     QGuiApplication::setApplicationName("qquickgit-test");
     QGuiApplication::setApplicationVersion("1.0");
 
-     GitRepository::initGitEngine();
+    GitRepository::initGitEngine();
 
     {
         QSettings settings;

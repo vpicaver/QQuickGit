@@ -30,7 +30,6 @@ public:
 signals:
     void progressChanged();
     void progressTextChanged();
-    void futureChanged();
     void initialProgressTextChanged();
 
 private:
