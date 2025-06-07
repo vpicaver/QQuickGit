@@ -1,0 +1,9 @@
+[submodule "monad"]
+	path = monad
+	url = git@github.com:vpicaver/monad.git
+[submodule "asyncfuture"]
+	path = asyncfuture
+	url = git@github.com:vpicaver/asyncfuture.git
+[submodule "SignalSpyChecker"]
+	path = SignalSpyChecker
+	url = git@github.com:vpicaver/SignalSpyChecker.git
