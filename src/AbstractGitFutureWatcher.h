@@ -9,6 +9,8 @@
 //Qt includes
 #include <QObject>
 
+namespace QQuickGit {
+
 class AbstractGitFutureWatcher : public AbstractResultFutureWatcher
 {
     Q_OBJECT
@@ -49,11 +51,11 @@ protected:
         watchProgress(future, [=]() {
             watchFuture(future,
                         [this](const Monad::ResultBase& result)
-            {
-                Q_UNUSED(result)
-                setProgress(ProgressState("Done", 1, 1));
-            }
-            );
+                        {
+                            Q_UNUSED(result)
+                            setProgress(ProgressState("Done", 1, 1));
+                        }
+                        );
         });
     }
 
@@ -68,7 +70,7 @@ protected:
         setProgress(ProgressState(initialProgressText(), 0, 1));
 
         AsyncFuture::observe(future)
-                .onProgress(updateProgress);
+            .onProgress(updateProgress);
     }
 };
 
@@ -76,5 +78,6 @@ inline QString AbstractGitFutureWatcher::initialProgressText() const {
     return mInitialProgressText;
 }
 
+};
 
 #endif // ABSTRACTGITFUTUREWATCHER_H

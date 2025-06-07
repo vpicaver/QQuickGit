@@ -11,6 +11,8 @@
 //Std includes
 #include <iostream>
 
+using namespace QQuickGit;
+
 TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConnection]") {
     auto testConnection = [](const QUrl& url, const QString& message) {
         INFO("Url:" << url.toString().toStdString());

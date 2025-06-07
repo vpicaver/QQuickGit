@@ -6,7 +6,7 @@
 
 //Qt includes
 #include <QObject>
-
+namespace QQuickGit {
 class GitMergeFutureWatcher : public AbstractGitFutureWatcher
 {
     Q_OBJECT
@@ -28,6 +28,7 @@ private:
 
 inline GitRepository::MergeFuture GitMergeFutureWatcher::future() const {
     return mMergeFuture;
+}
 }
 
 #endif // GITMERGEFUTUREWATCHER_H

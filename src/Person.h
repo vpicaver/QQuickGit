@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QUrl>
 
+namespace QQuickGit {
+
 class Person : public QObject
 {
     Q_OBJECT
@@ -57,6 +59,7 @@ inline QString Person::email() const {
 
 inline bool Person::isValid() const {
     return !name().isEmpty() && isEmailValid(email());
+}
 }
 
 #endif // PERSON_H

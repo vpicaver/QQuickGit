@@ -4,7 +4,9 @@
 //Our inculdes
 #include "Account.h"
 #include <SignalSpyChecker.h>
+
 using namespace SignalSpyChecker;
+using namespace QQuickGit;
 
 TEST_CASE("Account should have a openSSH RSA public key", "[Account]") {
     Account account;

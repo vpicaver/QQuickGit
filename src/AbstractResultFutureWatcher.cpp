@@ -3,6 +3,8 @@
 //Async includes
 #include "asyncfuture.h"
 
+using namespace QQuickGit;
+
 AbstractResultFutureWatcher::AbstractResultFutureWatcher(QObject *parent) : QObject(parent)
 {
 

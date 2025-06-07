@@ -11,6 +11,8 @@
 //Async includes
 #include "asyncfuture.h"
 
+namespace QQuickGit {
+
 class AbstractResultFutureWatcher : public QObject
 {
     Q_OBJECT
@@ -54,14 +56,14 @@ protected:
         setErrorMessage(QString());
 
         mFuture = AsyncFuture::observe(future)
-                .context(this, [future, completed, this]()->void
-        {
-
-            auto result = future.result();
-            setErrorMessage(result.errorMessage());
-            completed(result);
-            setState(Ready);
-        }).future();
+                      .context(this,
+                               [future, completed, this]()->void
+                               {
+                                   auto result = future.result();
+                                   setErrorMessage(result.errorMessage());
+                                   completed(result);
+                                   setState(Ready);
+                               }).future();
     }
 
     void setErrorMessage(QString message);
@@ -84,6 +86,7 @@ inline QString AbstractResultFutureWatcher::errorMessage() const {
 
 inline bool AbstractResultFutureWatcher::hasError() const {
     return !errorMessage().isEmpty();
+}
 }
 
 #endif // ABSTRACTRESULTFUTUREWATCHER_H

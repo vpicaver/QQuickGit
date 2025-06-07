@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QUrl>
 
+namespace QQuickGit {
 class GitRemoteInfo
 {
     Q_GADGET
@@ -32,7 +33,6 @@ private:
     QUrl mUrl; //!<
 };
 
-Q_DECLARE_METATYPE(GitRemoteInfo)
 
 inline QString GitRemoteInfo::name() const {
     return mName;
@@ -41,7 +41,9 @@ inline QString GitRemoteInfo::name() const {
 inline QUrl GitRemoteInfo::url() const {
     return mUrl;
 }
+}
 
+Q_DECLARE_METATYPE(QQuickGit::GitRemoteInfo)
 
 
 #endif // GITREMOTEINFO_H

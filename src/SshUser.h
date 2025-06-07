@@ -5,6 +5,7 @@
 #include <QString>
 #include <QObject>
 
+namespace QQuickGit {
 class SshUser {
     Q_GADGET
 
@@ -81,7 +82,8 @@ private:
     QString mComment;
     QString mKey;
 };
+}
 
-Q_DECLARE_METATYPE(SshUser);
+Q_DECLARE_METATYPE(QQuickGit::SshUser);
 
 #endif // SSHUSER_H

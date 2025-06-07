@@ -8,6 +8,9 @@ class QFileDevice;
 
 //Our includes
 #include "SshUser.h"
+
+namespace QQuickGit {
+
 class Account;
 
 class AuthorizedKeysModel : public QAbstractListModel
@@ -65,11 +68,13 @@ private:
 
 };
 
-Q_DECLARE_METATYPE(QVector<SshUser>)
 
 inline QString AuthorizedKeysModel::filename() const {
     return mFilename;
 }
+}
+
+Q_DECLARE_METATYPE(QVector<QQuickGit::SshUser>)
 
 
 #endif // AUTHORIZEDKEYSMODEL_H

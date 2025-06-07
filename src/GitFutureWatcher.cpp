@@ -1,6 +1,8 @@
 //Our includes
 #include "GitFutureWatcher.h"
 
+using namespace QQuickGit;
+
 GitFutureWatcher::GitFutureWatcher(QObject *parent) : AbstractGitFutureWatcher(parent)
 {
 

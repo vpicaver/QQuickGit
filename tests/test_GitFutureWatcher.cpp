@@ -15,6 +15,8 @@ using namespace SignalSpyChecker;
 
 const int timeout = 30000;
 
+using namespace QQuickGit;
+
 //This test case is flakey
 TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[GitFutureWatcher]") {
 

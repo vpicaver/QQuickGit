@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QDir>
 
+namespace QQuickGit {
+
 class GitTransfer : public QObject
 {
     Q_OBJECT
@@ -69,5 +71,6 @@ inline QDir GitTransfer::directory() const {
 
 inline double GitTransfer::progress() const {
     return mProgress;
+}
 }
 #endif // GITTRANSFER_H

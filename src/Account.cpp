@@ -1,5 +1,7 @@
 #include "Account.h"
 
+using namespace QQuickGit;
+
 Account::Account(QObject *parent) : Person(parent)
 {
     mKeys.loadOrGenerate();

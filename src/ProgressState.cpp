@@ -8,6 +8,8 @@ static const QString textKey = QStringLiteral("text");
 static const QString currentKey = QStringLiteral("current");
 static const QString totalKey = QStringLiteral("total");
 
+using namespace QQuickGit;
+
 ProgressState::ProgressState(QString text, size_t current, size_t total) :
     mText(text),
     mCurrent(current),

@@ -3,6 +3,8 @@
 //Qt includes
 #include <QRegularExpression>
 
+using namespace QQuickGit;
+
 Person::Person(QObject *parent) :
     QObject(parent)
 {

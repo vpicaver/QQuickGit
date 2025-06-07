@@ -1,5 +1,7 @@
 #include "GitRemotesModel.h"
 
+using namespace QQuickGit;
+
 GitRemotesModel::GitRemotesModel(QObject *parent) : QAbstractListModel(parent)
 {
 

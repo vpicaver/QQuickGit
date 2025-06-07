@@ -4,6 +4,8 @@
 
 #include "asyncfuture.h"
 
+using namespace QQuickGit;
+
 GitTestConnection::GitTestConnection(QObject *parent) : QObject(parent)
 {
 

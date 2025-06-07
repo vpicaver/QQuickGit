@@ -6,6 +6,7 @@
 #include <QString>
 #include <QUrl>
 
+namespace QQuickGit {
 class GitUtilities : public QObject
 {
     Q_OBJECT
@@ -18,6 +19,7 @@ public:
 
 signals:
 
+};
 };
 
 #endif // GITUTILITIES_H

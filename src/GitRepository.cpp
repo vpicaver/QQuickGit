@@ -25,6 +25,7 @@
 #include "asyncfuture.h"
 
 using namespace Monad;
+using namespace QQuickGit;
 
 template<typename ProgressInterface>
 void setProgress(ProgressInterface* interface, const QString& text) {

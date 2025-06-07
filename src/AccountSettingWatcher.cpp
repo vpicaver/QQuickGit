@@ -10,6 +10,8 @@
 #include <QDir>
 #include <QFileInfo>
 
+using namespace QQuickGit;
+
 static QString AccountGroup = QStringLiteral("account");
 static QString PhotoUrlKey = QStringLiteral("photo");
 static QString NameKey = QStringLiteral("name");

@@ -5,6 +5,8 @@
 #include <QUrl>
 #include <QFuture>
 
+namespace QQuickGit {
+
 class GitTestConnection : public QObject
 {
     Q_OBJECT
@@ -58,6 +60,7 @@ inline GitTestConnection::State GitTestConnection::state() const {
 */
 inline QString GitTestConnection::errorMessage() const {
     return mErrorMessage;
+}
 }
 
 #endif // GITTESTCONNECTION_H

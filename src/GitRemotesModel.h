@@ -8,6 +8,7 @@
 //Our includes
 #include "GitRemoteInfo.h"
 
+namespace QQuickGit {
 class GitRemotesModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -47,6 +48,7 @@ inline QVector<GitRemoteInfo> GitRemotesModel::remotes() const {
 
 inline int GitRemotesModel::count() const {
     return mRemotes.size();
+}
 }
 
 #endif // GITREMOTESMODEL_H

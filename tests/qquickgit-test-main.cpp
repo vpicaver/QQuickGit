@@ -10,6 +10,8 @@
 //Our inculdes
 #include "GitRepository.h"
 
+using namespace QQuickGit;
+
 int main( int argc, char* argv[] )
 {
     QGuiApplication app(argc, argv);

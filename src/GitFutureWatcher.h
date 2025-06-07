@@ -9,6 +9,8 @@
 //Qt includes
 #include <QObject>
 
+namespace QQuickGit {
+
 class GitFutureWatcher : public AbstractGitFutureWatcher
 {
     Q_OBJECT
@@ -29,6 +31,7 @@ private:
 
 inline GitRepository::GitFuture GitFutureWatcher::future() const {
     return mFuture;
+}
 }
 
 #endif // GITFUTUREWATCHER_H

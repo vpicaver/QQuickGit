@@ -6,6 +6,7 @@
 #include <QList>
 #include <QDir>
 
+namespace QQuickGit {
 class RSAKeyGenerator
 {
 public:
@@ -34,5 +35,6 @@ private:
 
 
 };
+}
 
 #endif // RSAKEYGENERATOR_H

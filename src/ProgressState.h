@@ -5,6 +5,7 @@
 #include <QString>
 #include <QVariantMap>
 
+namespace QQuickGit {
 class ProgressState
 {
 public:
@@ -26,6 +27,7 @@ private:
     size_t mCurrent = 0;
     size_t mTotal = 0;
 
+};
 };
 
 #endif // PROGRESSSTATE_H

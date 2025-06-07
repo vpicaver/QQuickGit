@@ -1,5 +1,7 @@
 #include "SshUser.h"
 
+using namespace QQuickGit;
+
 QString SshUser::toString() const
 {
     auto commentedLine = [](const QString& value, const QString& key) {

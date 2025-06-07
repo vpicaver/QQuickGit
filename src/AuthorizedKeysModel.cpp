@@ -14,6 +14,8 @@
 //const auto nameKey = QStringLiteral("name");
 //const auto emailKey = QStringLiteral("email");
 
+using namespace QQuickGit;
+
 AuthorizedKeysModel::AuthorizedKeysModel(QObject *parent) : QAbstractListModel(parent)
 {
 

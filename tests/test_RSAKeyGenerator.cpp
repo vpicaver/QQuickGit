@@ -7,6 +7,8 @@
 //Qt includes
 #include <QFileInfo>
 
+using namespace QQuickGit;
+
 TEST_CASE("RSAKeyGenerator should generate keys", "[RSAKeyGenerator]") {
     RSAKeyGenerator key;
 

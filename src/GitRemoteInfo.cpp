@@ -1,5 +1,7 @@
 #include "GitRemoteInfo.h"
 
+using namespace QQuickGit;
+
 GitRemoteInfo::GitRemoteInfo()
 {
 

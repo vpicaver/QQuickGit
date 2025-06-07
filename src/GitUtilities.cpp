@@ -1,6 +1,8 @@
 #include "GitUtilities.h"
 #include "git2.h"
 
+using namespace QQuickGit;
+
 GitUtilities::GitUtilities(QObject *parent) : QObject(parent)
 {
 

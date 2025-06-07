@@ -7,6 +7,8 @@
 //Qt includes
 #include <QSignalSpy>
 
+using namespace QQuickGit;
+
 TEST_CASE("GitRemotesModel should set and get correctly", "[GitRemotesModel]") {
     GitRemotesModel model;
 

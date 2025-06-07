@@ -9,6 +9,8 @@
 #include <QString>
 #include <QUrl>
 
+using namespace QQuickGit;
+
 TEST_CASE("GitUtilities should fix up ssh url correctly", "[GitUtilities]") {
 
     GitUtilities utils;

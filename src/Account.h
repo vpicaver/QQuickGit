@@ -5,6 +5,8 @@
 #include "RSAKeyGenerator.h"
 #include "AuthorizedKeysModel.h"
 
+namespace QQuickGit {
+
 class Account : public Person
 {
     Q_OBJECT
@@ -26,5 +28,7 @@ signals:
 private:
     RSAKeyGenerator mKeys;
 };
+
+}
 
 #endif // ACCOUNT_H

@@ -1,5 +1,7 @@
 #include "GitMergeFutureWatcher.h"
 
+using namespace QQuickGit;
+
 GitMergeFutureWatcher::GitMergeFutureWatcher(QObject *parent) : AbstractGitFutureWatcher(parent)
 {
 

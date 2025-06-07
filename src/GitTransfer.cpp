@@ -1,5 +1,7 @@
 #include "GitTransfer.h"
 
+using namespace QQuickGit;
+
 GitTransfer::GitTransfer(QObject *parent) : QObject(parent)
 {
 

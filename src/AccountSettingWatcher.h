@@ -6,7 +6,9 @@
 #include <QPointer>
 
 //Our includes
-class Person;
+#include "Person.h"
+
+namespace QQuickGit {
 
 class AccountSettingWatcher : public QObject
 {
@@ -26,6 +28,7 @@ signals:
 private:
     QPointer<Person> mPerson;
 
+};
 };
 
 #endif // ACCOUNTSETTINGWATCHER_H

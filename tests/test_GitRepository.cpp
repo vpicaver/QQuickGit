@@ -28,6 +28,8 @@ using namespace Monad;
 
 const int defaultTimeout = 10000;
 
+using namespace QQuickGit;
+
 auto waitForClone(QFuture<ResultBase> future, int timeout = defaultTimeout) {
     REQUIRE(AsyncFuture::waitForFinished(future, timeout));
     INFO("Clone error:" << future.result().errorMessage().toStdString() << "code:" << future.result().errorCode());

@@ -16,6 +16,7 @@ class GitRepositoryData;
 #include <QUrl>
 #include <QFuture>
 
+namespace QQuickGit {
 class GitRepository : public QObject
 {
     Q_OBJECT
@@ -214,7 +215,8 @@ private:
 
     GitRepositoryData* d;
 };
+}
 
-Q_DECLARE_METATYPE(QFuture<Monad::Result<GitRepository::MergeResult>>)
+Q_DECLARE_METATYPE(QFuture<Monad::Result<QQuickGit::GitRepository::MergeResult>>)
 
 #endif // GITREPOSITORY_H
