@@ -7,6 +7,9 @@
 #include <QThread>
 #include <QSettings>
 
+//Our inculdes
+#include "GitRepository.h"
+
 int main( int argc, char* argv[] )
 {
     QGuiApplication app(argc, argv);
@@ -15,6 +18,8 @@ int main( int argc, char* argv[] )
     QGuiApplication::setOrganizationDomain("cavewhere.com");
     QGuiApplication::setApplicationName("qquickgit-test");
     QGuiApplication::setApplicationVersion("1.0");
+
+     GitRepository::initGitEngine();
 
     {
         QSettings settings;
