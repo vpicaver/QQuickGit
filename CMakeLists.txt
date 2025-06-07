@@ -67,13 +67,13 @@ set(qml_singletons
 
 # Remove the singleton files from the regular QML file list
 foreach(singleton ${qml_singletons})
-    list(REMOVE_ITEM qquickgit_QML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/${singleton}")
+    list(REMOVE_ITEM qquickgit_QML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/qml/${singleton}")
 endforeach()
 
 # Make the remaining QML files relative to the project directory
 set(qquickgit_RELATIVE_QML_FILES "")
 foreach(file ${qquickgit_QML_FILES})
-    file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}" "${file}")
+    file(RELATIVE_PATH relFile "${CMAKE_CURRENT_SOURCE_DIR}/qml" "${file}")
     message(STATUS "Adding QML file: ${relFile}")
     list(APPEND qquickgit_RELATIVE_QML_FILES "${relFile}")
 endforeach()
