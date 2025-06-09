@@ -36,6 +36,7 @@ qt_standard_project_setup(REQUIRES 6.8)
 
 find_package(libgit2)
 find_package(Catch2 REQUIRED)
+find_package(openssl)
 
 # Collect source files qquickgitLib
 file(GLOB qquickgit_CPP_FILES "src/*.cpp")
@@ -100,6 +101,7 @@ target_link_libraries(qquickgit
     monad
     asyncfuture
     libgit2::libgit2
+    openssl::openssl
 )
 
 target_include_directories(qquickgit
