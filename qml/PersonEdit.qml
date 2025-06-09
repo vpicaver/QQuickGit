@@ -2,58 +2,67 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
 import QtQuick.Dialogs
+import QQuickGit
 
 ColumnLayout {
+    id: layoutId
     objectName: "PersonEdit"
 
-    PhotoEdit {
-        Layout.alignment: Qt.AlignHCenter
-        source: root.account.image
-        defaultSource: "qrc:/icons/photoAccount.svg"
-        onSourceChanged: {
-            root.account.image = source
-        }
-    }
+    required property Account account
 
-    Spacer {}
+    property Item nextTab;
+
+    // PhotoEdit {
+    //     Layout.alignment: Qt.AlignHCenter
+    //     source: account.image
+    //     defaultSource: "qrc:/icons/photoAccount.svg"
+    //     onSourceChanged: {
+    //         account.image = source
+    //     }
+    // }
+
+    // Spacer {}
 
     TextFieldWithError {
         objectName: "PersonNameTextEdit"
         Layout.fillWidth: true
         ignoreErrorUntilNextFocus: true
         textField.placeholderText: "Your name"
-        textField.text: root.account.name
+        textField.text: account.name
         textField.onTextEdited: {
-            root.account.name = textField.text
+            account.name = textField.text
         }
         errorMessage: {
-            if(root.account.name.length <= 0) {
+            if(account.name.length <= 0) {
                 return "No name found. Enter a name"
             }
             return ""
         }
+        // KeyNavigation.tab: emailId
 
     }
 
     Spacer {}
 
     TextFieldWithError {
+        id: emailId
         objectName: "EmailTextEdit"
         Layout.fillWidth: true
         ignoreErrorUntilNextFocus: true
         textField.placeholderText: "your@email.com"
-        textField.text: root.account.email
+        textField.text: account.email
         textField.onTextChanged: {
-            root.account.email = textField.text
+            account.email = textField.text
         }
 
         errorMessage: {
-            if(root.account.email.length < 0
-                    || !root.account.isEmailValid(root.account.email)) {
+            if(account.email.length < 0
+                    || !account.isEmailValid(account.email)) {
                 return "Enter a valid Email address ex. your@email.com"
             }
 
             return ""
         }
+        textField.KeyNavigation.tab: layoutId.nextTab
     }
 }

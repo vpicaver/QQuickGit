@@ -4,12 +4,14 @@
 //Qt includes
 #include <QObject>
 #include <QUrl>
+#include <QQmlEngine>
 
 namespace QQuickGit {
 
 class Person : public QObject
 {
     Q_OBJECT
+    QML_ELEMENT
 
     Q_PROPERTY(QUrl image READ image WRITE setImage NOTIFY imageChanged)
     Q_PROPERTY(QString name READ name WRITE setName NOTIFY nameChanged)

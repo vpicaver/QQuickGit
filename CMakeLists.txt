@@ -78,6 +78,7 @@ endforeach()
 qt_add_qml_module(qquickgit
     URI QQuickGit
     VERSION 1.0
+    STATIC
     OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/QQuickGit
     DEPENDENCIES
         QtQuick
