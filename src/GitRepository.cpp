@@ -13,6 +13,7 @@
 //LibGit2 includes
 #include "git2.h"
 #include <git2/index.h>
+#include <libssh2.h>
 
 //Qt includes
 #include <QDebug>
@@ -381,7 +382,46 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                 if(!dir.exists()) {
                     git_repository* repo = nullptr;
 
+                    // Callback signature
+                    auto hostkey_cb = [](git_cert *cert, int valid, const char *host, void *payload)->int {
+                        // Only care about SSH hostkeys
+                        if (cert->cert_type == GIT_CERT_HOSTKEY_LIBSSH2) {
+                            // auto *ssh_cert = (git_cert_hostkey *)cert;
+                            // // 'payload' must be a LIBSSH2_SESSION* initialized beforehand
+                            // LIBSSH2_SESSION *session = (LIBSSH2_SESSION *)payload;
+                            // LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
+                            // unsigned int check;
+
+                            // // 1) Declare a pointer-to-knownhost and initialize to nullptr
+                            // struct libssh2_knownhost *hostinfo = nullptr;
+
+                            // // 2) Call libssh2_knownhost_checkp, passing &hostinfo
+                            // int rc = libssh2_knownhost_checkp(
+                            //     kh,                                        // your known-hosts collection
+                            //     host, strlen(host),                        // server name and length
+                            //     (const char*)ssh_cert->hostkey,            // raw key blob pointer
+                            //     ssh_cert->hostkey_len,                     // key length
+                            //     LIBSSH2_KNOWNHOST_TYPE_PLAIN               // typemask: plain hostname…
+                            //         | LIBSSH2_KNOWNHOST_KEYENC_RAW,          // …and raw key data
+                            //     &hostinfo                                  // <<-- note: &hostinfo, not &check
+                            //     );
+
+                            // libssh2_knownhost_free(kh);
+
+                            // // Match==0 means OK
+                            // return (rc == LIBSSH2_KNOWNHOST_CHECK_MATCH) ? 0 : GIT_ECERTIFICATE;
+
+                            //always accept the cert, could open the door for man in the middle attack
+                            return GIT_OK;
+                        }
+                        return 0;  // allow other cert types
+                    };
+
+                    // Initialize your libssh2 session and store pointer in payload
+                    LIBSSH2_SESSION *session = libssh2_session_init();
+
                     git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
+                    clone_opts.fetch_opts.callbacks.certificate_check = hostkey_cb;
                     clone_opts.fetch_opts.callbacks.credentials = GitRepositoryData::credentailCallBack;
                     clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
                     clone_opts.fetch_opts.callbacks.payload = static_cast<void*>(&progressInterface);
@@ -394,6 +434,8 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     auto repoDirectory = dir.absolutePath().toLocal8Bit();
 
                     check(git_clone(&repo, urlByteArray, repoDirectory, &clone_opts));
+
+                    qDebug() << "Finished checking out!";
 
                     return Result<Repo>(Repo({repo}));
                 } else {
