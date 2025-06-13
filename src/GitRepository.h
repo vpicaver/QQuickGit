@@ -105,6 +105,8 @@ public:
 
     GitFuture clone(const QUrl& url);
 
+    static bool isRepository(const QDir &dir);
+
 signals:
     void directoryChanged();
     void modifiedFileCountChanged();

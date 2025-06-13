@@ -255,7 +255,8 @@ void GitRepository::initRepository()
     auto path = d->mDirectory.absolutePath().toLocal8Bit();
     int error = git_repository_open(&(d->repo), path);
     if(error != GIT_OK) {
-        check(git_repository_init(&(d->repo), path, false));
+        bool bare = false;
+        check(git_repository_init(&(d->repo), path, bare));
     }
 }
 
@@ -353,6 +354,25 @@ void GitRepository::initGitEngine()
 void GitRepository::shutdownGitEngine()
 {
     git_libgit2_shutdown();
+}
+
+bool GitRepository::isRepository(const QDir& dir)
+{
+    git_repository *repo = nullptr;
+    int err = git_repository_open_ext(
+        &repo,
+        dir.absolutePath().toLatin1().constData(),
+        GIT_REPOSITORY_OPEN_NO_SEARCH,
+        nullptr
+        );
+
+    if (err == 0) {
+        git_repository_free(repo);
+        return true;
+    }
+
+    // err < 0: could be GIT_ENOTFOUND (not a repo) or another error
+    return false;
 }
 
 QFuture<ResultBase> GitRepository::clone(const QUrl &url)
