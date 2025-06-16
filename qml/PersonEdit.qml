@@ -8,7 +8,7 @@ ColumnLayout {
     id: layoutId
     objectName: "PersonEdit"
 
-    required property Account account
+    required property Person account
 
     property Item nextTab;
 
