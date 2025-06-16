@@ -11,6 +11,9 @@ ColumnLayout {
     required property Person account
 
     property Item nextTab;
+    property bool showErrors: false
+
+    spacing: 4
 
     // PhotoEdit {
     //     Layout.alignment: Qt.AlignHCenter
@@ -26,7 +29,7 @@ ColumnLayout {
     TextFieldWithError {
         objectName: "PersonNameTextEdit"
         Layout.fillWidth: true
-        ignoreErrorUntilNextFocus: true
+        ignoreErrorUntilNextFocus: !showErrors
         textField.placeholderText: "Your name"
         textField.text: account.name
         textField.onTextEdited: {
@@ -42,13 +45,13 @@ ColumnLayout {
 
     }
 
-    Spacer {}
+    // Spacer {}
 
     TextFieldWithError {
         id: emailId
         objectName: "EmailTextEdit"
         Layout.fillWidth: true
-        ignoreErrorUntilNextFocus: true
+        ignoreErrorUntilNextFocus: !showErrors
         textField.placeholderText: "your@email.com"
         textField.text: account.email
         textField.onTextChanged: {

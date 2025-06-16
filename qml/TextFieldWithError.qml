@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
 
-ColumnLayout {
+Item {
     id: columnLayoutId
 
     property alias errorMessage: errorLabelId.text
@@ -14,24 +14,13 @@ ColumnLayout {
     //private
     property bool _hadFocus: false;
 
-    spacing: 1
+    implicitHeight: textFieldId.implicitHeight + errorLabelId.implicitHeight + errorLabelId.anchors.topMargin
 
     TextField {
         id: textFieldId
         objectName: "TextField"
-        Layout.fillWidth: true
-
-//        background: Rectangle {
-//            implicitWidth: 200
-//            implicitHeight: 40
-//            border.width: textFieldId.activeFocus || hasError ? 2 : 1
-//            border.color: {
-//                if(hasError) {
-//                    return errorColor
-//                }
-//                return textFieldId.activeFocus ? textFieldId.palette.highlight : textFieldId.palette.mid
-//            }
-//        }
+        anchors.left: parent.left
+        anchors.right: parent.right
 
         onActiveFocusChanged: {
             if(!activeFocus && ignoreErrorUntilNextFocus) {
@@ -43,8 +32,11 @@ ColumnLayout {
     ErrorLabel {
         id: errorLabelId
         hasError: errorMessage.length > 0
-        Layout.fillWidth: true
-        Layout.leftMargin: 5
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: textFieldId.bottom
+        anchors.topMargin: 1
+        anchors.leftMargin: 5
     }
 }
 
