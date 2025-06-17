@@ -185,8 +185,7 @@ public:
     static void check(int error) {
         if(error != GIT_OK) {
             const git_error *err = git_error_last();
-            QString error = QString::fromLocal8Bit(err->message);
-            throw(std::runtime_error(error.toStdString()));
+            throw(std::runtime_error(std::string(err->message)));
         }
     }
 
