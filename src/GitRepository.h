@@ -75,6 +75,7 @@ public:
     static QString repositoryNameFromUrl(const QUrl& url);
 
     int modifiedFileCount() const;
+    bool hasCommits() const;
 
     Q_INVOKABLE void checkStatus();
 

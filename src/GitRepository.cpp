@@ -489,6 +489,24 @@ int GitRepository::modifiedFileCount() const {
     return d->mModifiedFilesCount;
 }
 
+bool GitRepository::hasCommits() const
+{
+    if (!d->repo) {
+        return false;
+    }
+
+    int emptyResult = git_repository_is_empty(d->repo);
+    if (emptyResult == 0) {
+        return true;
+    }
+    if (emptyResult == 1) {
+        return false;
+    }
+
+    // Treat unexpected errors as "no commits" so callers stay conservative.
+    return false;
+}
+
 void GitRepository::checkStatus()
 {
     if(d->repo) {
@@ -1170,4 +1188,3 @@ void GitRepository::setAccount(Account* account) {
 Account* GitRepository::account() const {
     return d->mAccount;
 }
-

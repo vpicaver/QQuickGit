@@ -15,6 +15,8 @@
 #include <QDebug>
 #include <QSignalSpy>
 #include <QFuture>
+#include <QTemporaryDir>
+#include <QFile>
 
 //Std includes
 #include <iostream>
@@ -75,6 +77,37 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
     GitRepository repository2;
     repository2.setDirectory(cloneDir2);
     waitForClone(repository2.clone(repository.remoteUrl()));
+
+    SECTION("hasCommits should reflect repository history") {
+        CHECK(repository.hasCommits());
+        CHECK(repository2.hasCommits());
+
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+
+        GitRepository emptyRepository;
+        emptyRepository.setDirectory(QDir(tempDir.path()));
+        emptyRepository.initRepository();
+
+        CHECK(emptyRepository.hasCommits() == false);
+
+        {
+            QFile file(tempDir.filePath("initial.txt"));
+            REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+            file.write("initial commit\n");
+        }
+
+        emptyRepository.checkStatus();
+
+        Account account;
+        account.setName("Tester");
+        account.setEmail("tester@example.com");
+        emptyRepository.setAccount(&account);
+
+        REQUIRE_NOTHROW(emptyRepository.commitAll("Initial", "Created repo"));
+
+        CHECK(emptyRepository.hasCommits());
+    }
 
     SECTION("Test add remote") {
         auto remotes = repository.remotes();
