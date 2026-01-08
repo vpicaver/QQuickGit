@@ -12,6 +12,7 @@ class GitRepositoryData;
 
 //Qt inculdes
 #include <QObject>
+#include <QQmlEngine>
 #include <QDir>
 #include <QUrl>
 #include <QFuture>
@@ -20,6 +21,7 @@ namespace QQuickGit {
 class GitRepository : public QObject
 {
     Q_OBJECT
+    QML_ELEMENT
 
     Q_PROPERTY(QDir directory READ directory WRITE setDirectory NOTIFY directoryChanged)
     Q_PROPERTY(int modifiedFileCount READ modifiedFileCount NOTIFY modifiedFileCountChanged)
@@ -104,7 +106,7 @@ public:
     static void initGitEngine();
     static void shutdownGitEngine();
 
-    GitFuture clone(const QUrl& url);
+    Q_INVOKABLE GitFuture clone(const QUrl& url);
 
     static bool isRepository(const QDir &dir);
 

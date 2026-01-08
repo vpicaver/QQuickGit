@@ -8,12 +8,14 @@
 
 //Qt includes
 #include <QObject>
+#include <QQmlEngine>
 
 namespace QQuickGit {
 
 class GitFutureWatcher : public AbstractGitFutureWatcher
 {
     Q_OBJECT
+    QML_ELEMENT
 
     Q_PROPERTY(GitRepository::GitFuture future READ future WRITE setFuture NOTIFY futureChanged)
 public:
