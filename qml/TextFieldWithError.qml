@@ -21,6 +21,7 @@ Item {
         objectName: "TextField"
         anchors.left: parent.left
         anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
 
         onActiveFocusChanged: {
             if(!activeFocus && ignoreErrorUntilNextFocus) {
