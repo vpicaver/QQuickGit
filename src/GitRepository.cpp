@@ -29,18 +29,18 @@ using namespace Monad;
 using namespace QQuickGit;
 
 template<typename ProgressInterface>
-void setProgress(ProgressInterface* interface, const QString& text) {
+void setProgress(ProgressInterface* progressInterface, const QString& text) {
     if(!text.isEmpty()) {
         //We have to increment the progress by one to signal that the text changes
-        interface->setProgressValueAndText(interface->progressValue()+1, text);
+        progressInterface->setProgressValueAndText(progressInterface->progressValue()+1, text);
     }
 }
 
 template<typename ProgressInterface>
-void setProgress(ProgressInterface* interface, const ProgressState& progress) {
+void setProgress(ProgressInterface* progressInterface, const ProgressState& progress) {
     //We have to increment the progress by one to signal that the text changes
-    interface->setProgressRange(0, progress.total());
-    setProgress(interface, progress.toJsonString());
+    progressInterface->setProgressRange(0, progress.total());
+    setProgress(progressInterface, progress.toJsonString());
 }
 
 
@@ -113,11 +113,11 @@ public:
                                 void* payload)
     {
 
-        auto interface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
+        auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
         auto progress = ProgressState(QStringLiteral("Transfering ... ") + bytesToString(bytes),
                                       current,
                                       total);
-        setProgress(interface, progress);
+        setProgress(progressInterface, progress);
         qDebug() << "Current progress:" << bytes << current << total << current / static_cast<double>(total) * 100;
         return GIT_OK;
     }
@@ -140,11 +140,11 @@ public:
                 return bytesToString(stats->received_bytes);
             };
 
-            auto interface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
+            auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
             auto progress = ProgressState(QStringLiteral("Fetching ... ") + recieved(),
                                           current(),
                                           total());
-            setProgress(interface, progress);
+            setProgress(progressInterface, progress);
         }
 
         //        qDebug() << "Clone fetch progress:"
@@ -173,12 +173,12 @@ public:
         //                 << payload;
 
         if(payload) {
-            auto interface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
+            auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
             auto progress = ProgressState(QStringLiteral("Checkout ... ") + path,
                                           current,
                                           total);
             //We have to increment the progress by one to singal that the text changed
-            setProgress(interface, std::move(progress));
+            setProgress(progressInterface, std::move(progress));
         }
     }
 
@@ -1188,3 +1188,4 @@ void GitRepository::setAccount(Account* account) {
 Account* GitRepository::account() const {
     return d->mAccount;
 }
+
