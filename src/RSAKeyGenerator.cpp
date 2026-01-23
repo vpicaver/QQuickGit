@@ -27,6 +27,9 @@ using std::unique_ptr;
 #include <QStandardPaths>
 #include <QFileInfo>
 #include <QDebug>
+#include <QFile>
+#include <QTextStream>
+#include <QRegularExpression>
 
 using namespace QQuickGit;
 
@@ -172,34 +175,142 @@ RSAKeyGenerator::RSAKeyGenerator()
 
 }
 
+QStringList RSAKeyGenerator::defaultPrivateKeyFilenames()
+{
+    return {
+        QStringLiteral("id_ed25519"),
+        QStringLiteral("id_ecdsa"),
+        QStringLiteral("id_rsa")
+    };
+}
+
 //will load $HOME/.ssh/rsa_id.pub or application/.ssh keys or create new ones
 void RSAKeyGenerator::loadOrGenerate()
 {
-    auto setKeyPaths = [this](const QDir& keyDir) {
-        auto fullPrivateKeyPath = keyDir.absoluteFilePath(defaultPrivateKeyFilename());
-        auto fullPublicKeyPath = keyDir.absoluteFilePath(defaultPublicKeyFilename());
-
-        auto keysExist = [=]() {
-            return QFile::exists(fullPrivateKeyPath)
-                    && QFile::exists(fullPublicKeyPath);
-        };
-
-        if(keysExist()) {
-            mPrivateKeyPath = fullPrivateKeyPath;
-            mPublicKeyPath = fullPublicKeyPath;
-            return true;
-        } else {
-            return false;
-        }
-    };
-
-    if(setKeyPaths(homeKeyDirectory())) {
+    if(setKeyPathsFromDirectory(homeKeyDirectory())) {
         return;
-    } else if(setKeyPaths(appKeyDirectory())) {
+    } else if(setKeyPathsFromDirectory(appKeyDirectory())) {
         return;
     } else {
         generate();
     }
+}
+
+bool RSAKeyGenerator::loadFromSshConfigHost(const QString& host)
+{
+    if(host.isEmpty()) {
+        return false;
+    }
+
+    auto identityFile = identityFileFromSshConfig(host);
+    if(identityFile.isEmpty()) {
+        return false;
+    }
+
+    return setKeyPathsFromPrivateKey(identityFile);
+}
+
+bool RSAKeyGenerator::setKeyPathsFromPrivateKey(const QString& privateKeyPath)
+{
+    if(privateKeyPath.isEmpty()) {
+        return false;
+    }
+
+    QFileInfo privateInfo(privateKeyPath);
+    if(!privateInfo.exists()) {
+        return false;
+    }
+
+    mPrivateKeyPath = privateInfo.absoluteFilePath();
+
+    QFileInfo publicInfo(mPrivateKeyPath + ".pub");
+    if(publicInfo.exists()) {
+        mPublicKeyPath = publicInfo.absoluteFilePath();
+    } else {
+        mPublicKeyPath.clear();
+    }
+
+    return true;
+}
+
+bool RSAKeyGenerator::setKeyPathsFromDirectory(const QDir& keyDir)
+{
+    for(const auto& filename : defaultPrivateKeyFilenames()) {
+        auto fullPrivateKeyPath = keyDir.absoluteFilePath(filename);
+        if(setKeyPathsFromPrivateKey(fullPrivateKeyPath)) {
+            return true;
+        }
+    }
+
+    auto fullPrivateKeyPath = keyDir.absoluteFilePath(defaultPrivateKeyFilename());
+    if(setKeyPathsFromPrivateKey(fullPrivateKeyPath)) {
+        return true;
+    }
+
+    return false;
+}
+
+QString RSAKeyGenerator::identityFileFromSshConfig(const QString& host)
+{
+    auto configPath = homeKeyDirectory().absoluteFilePath(QStringLiteral("config"));
+    QFile configFile(configPath);
+    if(!configFile.exists() || !configFile.open(QFile::ReadOnly | QFile::Text)) {
+        return QString();
+    }
+
+    QTextStream stream(&configFile);
+    bool inMatchingHostBlock = false;
+
+    auto hostMatches = [](const QStringList& patterns, const QString& hostname) {
+        for(const auto& pattern : patterns) {
+            auto regex = QRegularExpression::wildcardToRegularExpression(pattern.trimmed());
+            QRegularExpression re(regex, QRegularExpression::CaseInsensitiveOption);
+            if(re.match(hostname).hasMatch()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    while(!stream.atEnd()) {
+        auto line = stream.readLine().trimmed();
+        if(line.isEmpty() || line.startsWith('#')) {
+            continue;
+        }
+
+        if(line.startsWith(QStringLiteral("Host "), Qt::CaseInsensitive)) {
+            auto hostList = line.mid(5).trimmed();
+            inMatchingHostBlock = hostMatches(hostList.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts), host);
+            continue;
+        }
+
+        if(!inMatchingHostBlock) {
+            continue;
+        }
+
+        if(line.startsWith(QStringLiteral("IdentityFile"), Qt::CaseInsensitive)) {
+            auto value = line.mid(QStringLiteral("IdentityFile").size()).trimmed();
+            if(value.startsWith('"') && value.endsWith('"') && value.size() >= 2) {
+                value = value.mid(1, value.size() - 2);
+            }
+
+            value = expandUserPath(value);
+            if(QFileInfo(value).isRelative()) {
+                value = homeKeyDirectory().absoluteFilePath(value);
+            }
+            return value;
+        }
+    }
+
+    return QString();
+}
+
+QString RSAKeyGenerator::expandUserPath(const QString& path)
+{
+    if(path.startsWith(QStringLiteral("~"))) {
+        return QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + path.mid(1);
+    }
+    return path;
 }
 
 //Regenerates the keys and updates the public and private key path
@@ -285,4 +396,3 @@ QDir RSAKeyGenerator::appKeyDirectory()
 {
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/.ssh");
 }
-

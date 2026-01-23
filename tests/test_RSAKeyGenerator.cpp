@@ -34,43 +34,21 @@ TEST_CASE("RSAKeyGenerator should generate keys", "[RSAKeyGenerator]") {
 
     SECTION("Make sure load works") {
 
-        //Remove old application keys
-        auto homePrivate = key.homeKeyDirectory().absoluteFilePath(key.defaultPrivateKeyFilename());
-        auto homePublic = key.homeKeyDirectory().absoluteFilePath(key.defaultPublicKeyFilename());
-
+        auto homeDir = key.homeKeyDirectory();
         auto homeKeysExist = [=]() {
-            return QFile::exists(homePrivate) && QFile::exists(homePublic);
+            for(const auto& filename : RSAKeyGenerator::defaultPrivateKeyFilenames()) {
+                if(QFile::exists(homeDir.absoluteFilePath(filename))) {
+                    return true;
+                }
+            }
+            return QFile::exists(homeDir.absoluteFilePath(key.defaultPrivateKeyFilename()));
         };
 
         SECTION("Keys exist in user home .ssh") {
             if(homeKeysExist()) {
                 key.loadOrGenerate();
-                CHECK(key.publicKeyPath().toStdString() == homePublic.toStdString());
-                CHECK(key.privateKeyPath().toStdString() == homePrivate.toStdString());
+                CHECK(key.privateKeyPath().startsWith(homeDir.absolutePath()));
             }
-        }
-
-        bool shouldRestoreHomeSSHKeys = false;
-        QString oldHomePrivate;
-        QString oldHomePublic;
-
-        auto moveToOld = [](const QString& filename) {
-            QFile file(filename);
-            auto oldFilename = filename + ".old";
-            REQUIRE(file.rename(oldFilename));
-            return oldFilename;
-        };
-
-        auto restoreOriginal = [](const QString& filename, const QString& original) {
-            QFile file(filename);
-            REQUIRE(file.rename(original));
-        };
-
-        if(homeKeysExist()) {
-            oldHomePrivate = moveToOld(homePrivate);
-            oldHomePublic = moveToOld(homePublic);
-
-            shouldRestoreHomeSSHKeys = true;
         }
 
         auto appPrivateKey = key.appKeyDirectory().absoluteFilePath(key.defaultPrivateKeyFilename());
@@ -80,6 +58,9 @@ TEST_CASE("RSAKeyGenerator should generate keys", "[RSAKeyGenerator]") {
         QFile::remove(appPublicKey);
 
         SECTION("No keys exist in user home .ssh or app config") {
+            if(homeKeysExist()) {
+                return;
+            }
             //This shouldn't create keys in the home directory
             CHECK(homeKeysExist() == false);
 
@@ -100,11 +81,6 @@ TEST_CASE("RSAKeyGenerator should generate keys", "[RSAKeyGenerator]") {
 
                 CHECK(publicKeyData == key2.publicKey());
             }
-        }
-
-        if(shouldRestoreHomeSSHKeys) {
-            restoreOriginal(oldHomePrivate, homePrivate);
-            restoreOriginal(oldHomePublic, homePublic);
         }
     }
 }

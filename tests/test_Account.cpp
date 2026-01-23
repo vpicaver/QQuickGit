@@ -8,12 +8,14 @@
 using namespace SignalSpyChecker;
 using namespace QQuickGit;
 
-TEST_CASE("Account should have a openSSH RSA public key", "[Account]") {
+TEST_CASE("Account should have a openSSH public key", "[Account]") {
     Account account;
     auto key = account.publicKey();
 
     CHECK(key.isEmpty() == false);
-    CHECK(key.left(7) == "ssh-rsa");
+    CHECK((key.startsWith("ssh-ed25519")
+           || key.startsWith("ssh-ecdsa")
+           || key.startsWith("ssh-rsa")));
 }
 
 TEST_CASE("Account should return a valid user AuthorizedKeyModel::User", "[Account]") {

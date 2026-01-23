@@ -28,6 +28,37 @@
 using namespace Monad;
 using namespace QQuickGit;
 
+namespace {
+QString extractHostFromUrl(const char *url)
+{
+    if(url == nullptr) {
+        return QString();
+    }
+
+    QString urlText = QString::fromUtf8(url);
+    if(urlText.contains("://")) {
+        QUrl parsed(urlText);
+        return parsed.host();
+    }
+
+    // scp-like: user@host:path
+    auto atIndex = urlText.indexOf('@');
+    if(atIndex >= 0) {
+        auto hostStart = atIndex + 1;
+        auto hostEnd = urlText.indexOf(':', hostStart);
+        if(hostEnd == -1) {
+            hostEnd = urlText.indexOf('/', hostStart);
+        }
+        if(hostEnd == -1) {
+            hostEnd = urlText.size();
+        }
+        return urlText.mid(hostStart, hostEnd - hostStart);
+    }
+
+    return QString();
+}
+}
+
 template<typename ProgressInterface>
 void setProgress(ProgressInterface* progressInterface, const QString& text) {
     if(!text.isEmpty()) {
@@ -63,13 +94,28 @@ public:
                                   unsigned int allowed_types,
                                   void *payload)
     {
+        const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
+
+        if(allowed_types & GIT_CREDENTIAL_SSH_KEY) {
+            int agentResult = git_credential_ssh_key_from_agent(out, userName);
+            if(agentResult == GIT_OK) {
+                return GIT_OK;
+            }
+        }
+
         RSAKeyGenerator key;
-        key.loadOrGenerate();
+        auto host = extractHostFromUrl(url);
+        if(!key.loadFromSshConfigHost(host)) {
+            key.loadOrGenerate();
+        }
 
         auto publicKeyPath = key.publicKeyPath().toLocal8Bit();
         auto privateKeyPath = key.privateKeyPath().toLocal8Bit();
 
-        return git_credential_ssh_key_new(out, username_from_url, publicKeyPath, privateKeyPath, "");
+        const char* publicKey = publicKeyPath.isEmpty() ? nullptr : publicKeyPath.constData();
+        const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
+
+        return git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
     }
 
     static QString bytesToString(size_t bytes) {
@@ -177,7 +223,7 @@ public:
             auto progress = ProgressState(QStringLiteral("Checkout ... ") + path,
                                           current,
                                           total);
-            //We have to increment the progress by one to singal that the text changed
+            //We have to incremrent the progress by one to singal that the text changed
             setProgress(progressInterface, std::move(progress));
         }
     }
@@ -1188,4 +1234,3 @@ void GitRepository::setAccount(Account* account) {
 Account* GitRepository::account() const {
     return d->mAccount;
 }
-
