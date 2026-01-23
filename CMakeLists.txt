@@ -91,6 +91,8 @@ qt_add_qml_module(qquickgit
         ${qml_singletons}
 )
 
+set_target_properties(qquickgit PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_sources(qquickgit PRIVATE ${cavewherelib_CPP_FILES} ${cavewherelib_H_FILES})
 
 target_link_libraries(qquickgit
@@ -125,6 +127,5 @@ target_link_libraries(qquickgit-test
     Qt6::Test
     SignalSpyChecker
 )
-
 
 
