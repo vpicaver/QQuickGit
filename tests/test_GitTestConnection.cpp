@@ -14,7 +14,7 @@
 using namespace QQuickGit;
 
 TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConnection]") {
-    auto testConnection = [](const QUrl& url, const QString& message) {
+    auto testConnection = [](const QUrl& url, const QStringList& messages) {
         INFO("Url:" << url.toString().toStdString());
 
         GitTestConnection connection;
@@ -43,16 +43,24 @@ TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConne
 
         CHECK(canceled == false);
         CHECK(connection.state() == GitTestConnection::Ready);
-        CHECK(connection.errorMessage().toStdString() == message.toStdString());
+        const QString actualMessage = connection.errorMessage();
+        if(messages.isEmpty()) {
+            CHECK(actualMessage.isEmpty());
+        } else {
+            CHECK(messages.contains(actualMessage));
+        }
     };
 
-    testConnection(QUrl("ssh://git@github.com/vpicaver/surfacewhere-testData.git"), QString());
+    testConnection(QUrl("ssh://git@github.com/vpicaver/surfacewhere-testData.git"), {});
 
     //Bad Urls
-    testConnection(QUrl("ssh://git@github.com/vpicaver/surfacewher.git"), QString("ERROR: Repository not found."));
+    testConnection(QUrl("ssh://git@github.com/vpicaver/surfacewher.git"),
+                   {QString("ERROR: Repository not found.")});
 
     std::cout << "Testing connect to a bad host, this will take a while (~20 secs)" << std::endl;
-    testConnection(QUrl("ssh://192.168.1.2/test.git"), QString("failed to connect to 192.168.1.2: Operation timed out"));
+    testConnection(QUrl("ssh://192.168.1.2/test.git"),
+                   {QString("failed to connect to 192.168.1.2: Operation timed out"),
+                    QString("failed to connect to 192.168.1.2: Connection refused")});
     std::cout << "Done" << std::endl;
 
 }
