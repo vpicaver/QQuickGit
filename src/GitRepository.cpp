@@ -57,6 +57,22 @@ QString extractHostFromUrl(const char *url)
 
     return QString();
 }
+
+struct SshCallbackPayload {
+    QFutureInterface<ResultBase>* progressInterface = nullptr;
+    int agentMaxAttempts = 1;
+    int agentAttempts = 0;
+    bool allowAgent = true;
+};
+
+QFutureInterface<ResultBase>* progressFromPayload(void* payload)
+{
+    auto typed = reinterpret_cast<SshCallbackPayload*>(payload);
+    if(!typed) {
+        return nullptr;
+    }
+    return typed->progressInterface;
+}
 }
 
 template<typename ProgressInterface>
@@ -88,24 +104,16 @@ public:
         }
     }
 
-    static int credentailCallBack(git_credential **out,
-                                  const char *url,
-                                  const char *username_from_url,
-                                  unsigned int allowed_types,
-                                  void *payload)
+    static int fileBasedCredential(git_credential **out,
+                                   const char *url,
+                                   const char *username_from_url)
     {
         const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
 
-        if(allowed_types & GIT_CREDENTIAL_SSH_KEY) {
-            int agentResult = git_credential_ssh_key_from_agent(out, userName);
-            if(agentResult == GIT_OK) {
-                return GIT_OK;
-            }
-        }
-
         RSAKeyGenerator key;
         auto host = extractHostFromUrl(url);
-        if(!key.loadFromSshConfigHost(host)) {
+        bool usedSshConfig = key.loadFromSshConfigHost(host);
+        if(!usedSshConfig) {
             key.loadOrGenerate();
         }
 
@@ -116,6 +124,34 @@ public:
         const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
 
         return git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
+    }
+
+    static int credentailCallBack(git_credential **out,
+                                  const char *url,
+                                  const char *username_from_url,
+                                  unsigned int allowed_types,
+                                  void *payload)
+    {
+        const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
+
+        if(allowed_types & GIT_CREDENTIAL_SSH_KEY) {
+            auto callbackPayload = reinterpret_cast<SshCallbackPayload*>(payload);
+            const bool allowAgent = callbackPayload ? callbackPayload->allowAgent : true;
+            const int maxAttempts = callbackPayload ? callbackPayload->agentMaxAttempts : 1;
+            int* attempts = callbackPayload ? &callbackPayload->agentAttempts : nullptr;
+
+            if(allowAgent && attempts && *attempts < maxAttempts) {
+                int agentResult = git_credential_ssh_key_from_agent(out, userName);
+                if(agentResult == GIT_OK) {
+                    if(attempts) {
+                        (*attempts)++;
+                    }
+                    return GIT_OK;
+                }
+            }
+        }
+
+        return fileBasedCredential(out, url, username_from_url);
     }
 
     static QString bytesToString(size_t bytes) {
@@ -159,11 +195,13 @@ public:
                                 void* payload)
     {
 
-        auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
-        auto progress = ProgressState(QStringLiteral("Transfering ... ") + bytesToString(bytes),
-                                      current,
-                                      total);
-        setProgress(progressInterface, progress);
+        auto progressInterface = progressFromPayload(payload);
+        if(progressInterface) {
+            auto progress = ProgressState(QStringLiteral("Transfering ... ") + bytesToString(bytes),
+                                          current,
+                                          total);
+            setProgress(progressInterface, progress);
+        }
         qDebug() << "Current progress:" << bytes << current << total << current / static_cast<double>(total) * 100;
         return GIT_OK;
     }
@@ -186,11 +224,13 @@ public:
                 return bytesToString(stats->received_bytes);
             };
 
-            auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
-            auto progress = ProgressState(QStringLiteral("Fetching ... ") + recieved(),
-                                          current(),
-                                          total());
-            setProgress(progressInterface, progress);
+            auto progressInterface = progressFromPayload(payload);
+            if(progressInterface) {
+                auto progress = ProgressState(QStringLiteral("Fetching ... ") + recieved(),
+                                              current(),
+                                              total());
+                setProgress(progressInterface, progress);
+            }
         }
 
         //        qDebug() << "Clone fetch progress:"
@@ -219,12 +259,14 @@ public:
         //                 << payload;
 
         if(payload) {
-            auto progressInterface = reinterpret_cast<QFutureInterface<ResultBase>*>(payload);
-            auto progress = ProgressState(QStringLiteral("Checkout ... ") + path,
-                                          current,
-                                          total);
-            //We have to incremrent the progress by one to singal that the text changed
-            setProgress(progressInterface, std::move(progress));
+            auto progressInterface = progressFromPayload(payload);
+            if(progressInterface) {
+                auto progress = ProgressState(QStringLiteral("Checkout ... ") + path,
+                                              current,
+                                              total);
+                //We have to incremrent the progress by one to singal that the text changed
+                setProgress(progressInterface, std::move(progress));
+            }
         }
     }
 
@@ -447,58 +489,101 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                 if(!dir.exists()) {
                     git_repository* repo = nullptr;
 
-                    // Callback signature
-                    auto hostkey_cb = [](git_cert *cert, int valid, const char *host, void *payload)->int {
-                        // Only care about SSH hostkeys
-                        if (cert->cert_type == GIT_CERT_HOSTKEY_LIBSSH2) {
-                            // auto *ssh_cert = (git_cert_hostkey *)cert;
-                            // // 'payload' must be a LIBSSH2_SESSION* initialized beforehand
-                            // LIBSSH2_SESSION *session = (LIBSSH2_SESSION *)payload;
-                            // LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(session);
-                            // unsigned int check;
-
-                            // // 1) Declare a pointer-to-knownhost and initialize to nullptr
-                            // struct libssh2_knownhost *hostinfo = nullptr;
-
-                            // // 2) Call libssh2_knownhost_checkp, passing &hostinfo
-                            // int rc = libssh2_knownhost_checkp(
-                            //     kh,                                        // your known-hosts collection
-                            //     host, strlen(host),                        // server name and length
-                            //     (const char*)ssh_cert->hostkey,            // raw key blob pointer
-                            //     ssh_cert->hostkey_len,                     // key length
-                            //     LIBSSH2_KNOWNHOST_TYPE_PLAIN               // typemask: plain hostname…
-                            //         | LIBSSH2_KNOWNHOST_KEYENC_RAW,          // …and raw key data
-                            //     &hostinfo                                  // <<-- note: &hostinfo, not &check
-                            //     );
-
-                            // libssh2_knownhost_free(kh);
-
-                            // // Match==0 means OK
-                            // return (rc == LIBSSH2_KNOWNHOST_CHECK_MATCH) ? 0 : GIT_ECERTIFICATE;
-
-                            //always accept the cert, could open the door for man in the middle attack
-                            return GIT_OK;
+                    auto shouldRetryWithFiles = [](int errorCode, int errorClass, const QString& message) {
+                        if(errorCode == GIT_EAUTH) {
+                            return true;
                         }
-                        return 0;  // allow other cert types
+                        if(errorClass == GIT_ERROR_SSH || errorClass == GIT_ERROR_NET) {
+                            return true;
+                        }
+                        auto lowered = message.toLower();
+                        return lowered.contains(QStringLiteral("auth"))
+                               || lowered.contains(QStringLiteral("publickey"))
+                               || lowered.contains(QStringLiteral("permission denied"))
+                               || lowered.contains(QStringLiteral("credentials"))
+                               || lowered.contains(QStringLiteral("failed getting response"));
                     };
 
-                    // Initialize your libssh2 session and store pointer in payload
-                    LIBSSH2_SESSION *session = libssh2_session_init();
+                    auto cloneWithCredentials = [&](bool allowAgent,
+                                                    QString* errorMessage,
+                                                    int* errorClass,
+                                                    int* errorCode) -> git_repository* {
+                        git_repository* localRepo = nullptr;
 
-                    git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
-                    clone_opts.fetch_opts.callbacks.certificate_check = hostkey_cb;
-                    clone_opts.fetch_opts.callbacks.credentials = GitRepositoryData::credentailCallBack;
-                    clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
-                    clone_opts.fetch_opts.callbacks.payload = static_cast<void*>(&progressInterface);
+                        // Callback signature
+                        auto hostkey_cb = [](git_cert *cert, int valid, const char *host, void *payload)->int {
+                            Q_UNUSED(valid)
+                            Q_UNUSED(host)
+                            Q_UNUSED(payload)
+                            // Only care about SSH hostkeys
+                            if (cert->cert_type == GIT_CERT_HOSTKEY_LIBSSH2) {
+                                //always accept the cert, could open the door for man in the middle attack
+                                return GIT_OK;
+                            }
+                            return 0;  // allow other cert types
+                        };
 
-                    clone_opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
-                    clone_opts.checkout_opts.progress_cb = GitRepositoryData::cloneCheckoutProgress;
-                    clone_opts.checkout_opts.progress_payload = static_cast<void*>(&progressInterface);
+                        git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
+                        clone_opts.fetch_opts.callbacks.certificate_check = hostkey_cb;
+                        clone_opts.fetch_opts.callbacks.credentials = GitRepositoryData::credentailCallBack;
+                        clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
+                        SshCallbackPayload callbackPayload;
+                        callbackPayload.progressInterface = &progressInterface;
+                        callbackPayload.allowAgent = allowAgent;
+                        callbackPayload.agentMaxAttempts = 1;
+                        callbackPayload.agentAttempts = 0;
 
-                    auto urlByteArray = url.toString().toLocal8Bit();
-                    auto repoDirectory = dir.absolutePath().toLocal8Bit();
+                        clone_opts.fetch_opts.callbacks.payload = static_cast<void*>(&callbackPayload);
 
-                    check(git_clone(&repo, urlByteArray, repoDirectory, &clone_opts));
+                        clone_opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+                        clone_opts.checkout_opts.progress_cb = GitRepositoryData::cloneCheckoutProgress;
+                        clone_opts.checkout_opts.progress_payload = static_cast<void*>(&callbackPayload);
+
+                        auto urlByteArray = url.toString().toLocal8Bit();
+                        auto repoDirectory = dir.absolutePath().toLocal8Bit();
+
+                        int err = git_clone(&localRepo, urlByteArray, repoDirectory, &clone_opts);
+                        if(err == GIT_OK) {
+                            return localRepo;
+                        }
+
+                        const git_error *errInfo = git_error_last();
+                        if(errorMessage) {
+                            if(errInfo && errInfo->message) {
+                                *errorMessage = QString::fromUtf8(errInfo->message);
+                            } else {
+                                *errorMessage = QStringLiteral("Unknown git error");
+                            }
+                        }
+                        if(errorClass) {
+                            *errorClass = errInfo ? errInfo->klass : 0;
+                        }
+                        if(errorCode) {
+                            *errorCode = err;
+                        }
+
+                        if(localRepo) {
+                            git_repository_free(localRepo);
+                        }
+                        return nullptr;
+                    };
+
+                    QString errorMessage;
+                    int errorClass = 0;
+                    int errorCode = 0;
+
+                    repo = cloneWithCredentials(true, &errorMessage, &errorClass, &errorCode);
+                    if(!repo && shouldRetryWithFiles(errorCode, errorClass, errorMessage)) {
+                        if(dir.exists()) {
+                            QDir cleanupDir(dir.absolutePath());
+                            cleanupDir.removeRecursively();
+                        }
+                        repo = cloneWithCredentials(false, &errorMessage, &errorClass, &errorCode);
+                    }
+
+                    if(!repo) {
+                        throw std::runtime_error(errorMessage.toStdString());
+                    }
 
                     qDebug() << "Finished checking out!";
 
@@ -664,7 +749,12 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                     check(git_push_options_init(&options, GIT_PUSH_OPTIONS_VERSION ));
                     options.callbacks.credentials = GitRepositoryData::credentailCallBack;
                     options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
-                    options.callbacks.payload = static_cast<void*>(&progressInterface);
+                    SshCallbackPayload callbackPayload;
+                    callbackPayload.progressInterface = &progressInterface;
+                    callbackPayload.allowAgent = true;
+                    callbackPayload.agentMaxAttempts = 1;
+                    callbackPayload.agentAttempts = 0;
+                    options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
                     check(git_remote_push(gitRemote, &refspecs, &options));
 
@@ -771,7 +861,12 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
                             git_fetch_options options = GIT_FETCH_OPTIONS_INIT;
                             options.callbacks.credentials = GitRepositoryData::credentailCallBack;
                             options.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
-                            options.callbacks.payload = static_cast<void*>(&progressInterface);
+                            SshCallbackPayload callbackPayload;
+                            callbackPayload.progressInterface = &progressInterface;
+                            callbackPayload.allowAgent = true;
+                            callbackPayload.agentMaxAttempts = 1;
+                            callbackPayload.agentAttempts = 0;
+                            options.callbacks.payload = static_cast<void*>(&callbackPayload);
                             check(git_remote_fetch(gitRemote, nullptr, &options, nullptr));
 
                             return ResultBase();
