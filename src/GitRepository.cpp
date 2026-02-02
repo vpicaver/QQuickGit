@@ -425,23 +425,30 @@ void GitRepository::ensureLfsAttributes()
     }
 
     QStringList managed;
-    managed.append(beginMarker);
     const QStringList extensions = d->mLfsPolicy.trackedExtensions();
     for (const QString& ext : extensions) {
         if (ext.isEmpty()) {
             continue;
         }
+        if (managed.isEmpty()) {
+            managed.append(beginMarker);
+        }
         managed.append(QStringLiteral("*.%1 filter=lfs diff=lfs merge=lfs -text").arg(ext));
     }
-    managed.append(endMarker);
+
+    if (!managed.isEmpty()) {
+        managed.append(endMarker);
+    }
 
     QStringList combined;
     combined.reserve(before.size() + managed.size() + after.size());
     combined.append(before);
-    if (!combined.isEmpty() && !combined.last().isEmpty()) {
-        combined.append(QString());
+    if (!managed.isEmpty()) {
+        if (!combined.isEmpty() && !combined.last().isEmpty()) {
+            combined.append(QString());
+        }
+        combined.append(managed);
     }
-    combined.append(managed);
     if (!after.isEmpty()) {
         if (!combined.isEmpty() && !combined.last().isEmpty()) {
             combined.append(QString());

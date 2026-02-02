@@ -447,11 +447,6 @@ TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
-    LfsPolicy emptyPolicy;
-    emptyPolicy.setAttributesSectionTag(QStringLiteral("qquickgit-test"));
-    emptyPolicy.setDefaultRule([](const QString&, const QByteArray*) { return false; });
-    repository.setLfsPolicy(emptyPolicy);
-
     const QString attributesPath = repoDir.filePath(QStringLiteral(".gitattributes"));
     const QByteArray initialContents = readFileBytes(attributesPath);
     const QByteArray beginMarker = QByteArray("# qquickgit-test:begin-lfs");
@@ -459,7 +454,8 @@ TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     REQUIRE(initialContents.contains(beginMarker));
     REQUIRE(initialContents.contains(endMarker));
 
-    LfsPolicy updatedPolicy = emptyPolicy;
+    LfsPolicy updatedPolicy;
+    updatedPolicy.setAttributesSectionTag(QStringLiteral("qquickgit-test"));
     updatedPolicy.setRule(QStringLiteral("png"), [](const QString&, const QByteArray*) { return true; });
     updatedPolicy.setRule(QStringLiteral("pdf"), [](const QString&, const QByteArray*) { return true; });
     repository.setLfsPolicy(updatedPolicy);
@@ -469,6 +465,21 @@ TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     REQUIRE(updatedContents.contains(endMarker));
     CHECK(updatedContents.contains(QByteArray("*.png filter=lfs diff=lfs merge=lfs -text")));
     CHECK(updatedContents.contains(QByteArray("*.pdf filter=lfs diff=lfs merge=lfs -text")));
+}
+
+TEST_CASE("Lfs empty policy does not write managed .gitattributes section", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.initRepository();
+
+    const QString attributesPath = repoDir.filePath(QStringLiteral(".gitattributes"));
+    const QByteArray contents = readFileBytes(attributesPath);
+    CHECK(!contents.contains(QByteArray("begin-lfs")));
+    CHECK(!contents.contains(QByteArray("end-lfs")));
 }
 
 TEST_CASE("GitRepository resetHard discards local changes", "[GitRepository]") {
