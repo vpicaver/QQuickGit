@@ -16,8 +16,11 @@ class GitRepositoryData;
 #include <QDir>
 #include <QUrl>
 #include <QFuture>
+#include <memory>
 
 namespace QQuickGit {
+class LfsStore;
+class LfsPolicy;
 class GitRepository : public QObject
 {
     Q_OBJECT
@@ -67,6 +70,8 @@ public:
     void setAccount(Account* account);
 
     void initRepository();
+    void setLfsPolicy(const LfsPolicy& policy);
+    std::shared_ptr<LfsStore> lfsStore() const;
 
     Q_INVOKABLE QString addRemote(const QString& name, const QUrl& url) noexcept;
     QUrl remoteUrl(QString name = QString()) const;
@@ -100,6 +105,7 @@ public:
     bool remoteBranchExists(const QString& refSpec) const;
 
     void checkout(const QString& refSpec);
+    void resetHard(const QString& refSpec);
 
     QString headBranchName() const;
 
@@ -217,6 +223,7 @@ private:
     static QString fixUpRemote(const QString& remote);
 
     void addRemoteHelper(const QString& name, const QUrl& url);
+    void ensureLfsAttributes();
 
     GitRepositoryData* d;
 };

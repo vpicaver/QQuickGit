@@ -6,6 +6,9 @@
 #include "GitRepository.h"
 #include "RSAKeyGenerator.h"
 #include "Account.h"
+#include "LfsFilter.h"
+#include "LfsPolicy.h"
+#include "LfsStore.h"
 #include "Monad/Result.h"
 #include "ProgressState.h"
 #include "Monad/Monad.h"
@@ -17,6 +20,7 @@
 
 //Qt includes
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
 #include <QPointer>
 #include <QtConcurrent>
@@ -97,6 +101,8 @@ public:
     git_repository *repo = nullptr;
     int mModifiedFilesCount = 0;
     QPointer<Account> mAccount; //!<
+    LfsPolicy mLfsPolicy = LfsPolicy::defaultPolicy();
+    std::shared_ptr<LfsStore> mLfsStore;
 
     ~GitRepositoryData() {
         if(repo) {
@@ -321,6 +327,10 @@ GitRepository::GitRepository(QObject *parent) :
 
 GitRepository::~GitRepository()
 {
+    if (d->mLfsStore) {
+        LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
+        d->mLfsStore.reset();
+    }
     delete d;
 }
 
@@ -345,6 +355,110 @@ void GitRepository::initRepository()
         bool bare = false;
         check(git_repository_init(&(d->repo), path, bare));
     }
+
+    if (d->repo) {
+        const char* gitPath = git_repository_path(d->repo);
+        if (gitPath) {
+            d->mLfsStore = std::make_shared<LfsStore>(QString::fromUtf8(gitPath), d->mLfsPolicy);
+            LfsStoreRegistry::registerStore(d->mLfsStore);
+        }
+    }
+
+    ensureLfsAttributes();
+}
+
+void GitRepository::setLfsPolicy(const LfsPolicy& policy)
+{
+    d->mLfsPolicy = policy;
+    if (d->mLfsStore) {
+        d->mLfsStore->setPolicy(policy);
+    }
+    ensureLfsAttributes();
+}
+
+std::shared_ptr<LfsStore> GitRepository::lfsStore() const
+{
+    return d->mLfsStore;
+}
+
+void GitRepository::ensureLfsAttributes()
+{
+    if (!d->repo || !d->mLfsStore) {
+        return;
+    }
+
+    const QString workDir = d->mDirectory.absolutePath();
+    const QString attributesPath = QDir(workDir).filePath(QStringLiteral(".gitattributes"));
+
+    QByteArray existingContents;
+    if (QFile::exists(attributesPath)) {
+        QFile readFile(attributesPath);
+        if (readFile.open(QIODevice::ReadOnly)) {
+            existingContents = readFile.readAll();
+        }
+    }
+
+    const QString tag = d->mLfsPolicy.attributesSectionTag();
+    const QString beginMarker = QStringLiteral("# %1:begin-lfs").arg(tag);
+    const QString endMarker = QStringLiteral("# %1:end-lfs").arg(tag);
+
+    QStringList lines = QString::fromUtf8(existingContents).split('\n');
+    QStringList before;
+    QStringList after;
+    int beginIndex = -1;
+    int endIndex = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString trimmed = lines.at(i).trimmed();
+        if (trimmed == beginMarker) {
+            beginIndex = i;
+        } else if (trimmed == endMarker) {
+            endIndex = i;
+            break;
+        }
+    }
+
+    if (beginIndex >= 0 && endIndex >= beginIndex) {
+        before = lines.mid(0, beginIndex);
+        after = lines.mid(endIndex + 1);
+    } else {
+        before = lines;
+    }
+
+    QStringList managed;
+    managed.append(beginMarker);
+    const QStringList extensions = d->mLfsPolicy.trackedExtensions();
+    for (const QString& ext : extensions) {
+        if (ext.isEmpty()) {
+            continue;
+        }
+        managed.append(QStringLiteral("*.%1 filter=lfs diff=lfs merge=lfs -text").arg(ext));
+    }
+    managed.append(endMarker);
+
+    QStringList combined;
+    combined.reserve(before.size() + managed.size() + after.size());
+    combined.append(before);
+    if (!combined.isEmpty() && !combined.last().isEmpty()) {
+        combined.append(QString());
+    }
+    combined.append(managed);
+    if (!after.isEmpty()) {
+        if (!combined.isEmpty() && !combined.last().isEmpty()) {
+            combined.append(QString());
+        }
+        combined.append(after);
+    }
+
+    const QByteArray newContents = combined.join('\n').toUtf8();
+    if (newContents == existingContents) {
+        return;
+    }
+
+    QFile writeFile(attributesPath);
+    if (!writeFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    writeFile.write(newContents);
 }
 
 //Returns an error message
@@ -436,10 +550,12 @@ QString GitRepository::repositoryNameFromUrl(const QUrl &url)
 void GitRepository::initGitEngine()
 {
     git_libgit2_init();
+    LfsFilter::registerFilter();
 }
 
 void GitRepository::shutdownGitEngine()
 {
+    LfsFilter::unregisterFilter();
     git_libgit2_shutdown();
 }
 
@@ -1264,6 +1380,18 @@ void GitRepository::checkout(const QString &refSpec)
 
     auto id = git_object_id(object);
     d->checkout(id, refSpec);
+
+    git_object_free(object);
+}
+
+void GitRepository::resetHard(const QString &refSpec)
+{
+    git_object* object = nullptr;
+    check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
+
+    git_checkout_options checkoutOptions = GIT_CHECKOUT_OPTIONS_INIT;
+    checkoutOptions.checkout_strategy = GIT_CHECKOUT_FORCE;
+    check(git_reset(d->repo, object, GIT_RESET_HARD, &checkoutOptions));
 
     git_object_free(object);
 }
