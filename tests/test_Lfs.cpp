@@ -13,8 +13,10 @@
 // Qt includes
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QTemporaryDir>
+#include <memory>
 
 using namespace QQuickGit;
 
@@ -36,6 +38,34 @@ QByteArray readFileBytes(const QString& path)
         return QByteArray();
     }
     return file.readAll();
+}
+
+LfsPolicy makeCustomPolicy(const QString& tag)
+{
+    LfsPolicy policy;
+    policy.setAttributesSectionTag(tag);
+    policy.setRule(QStringLiteral("png"), [](const QString&, const QByteArray*) { return true; });
+    policy.setRule(QStringLiteral("jpg"), [](const QString&, const QByteArray*) { return true; });
+    policy.setRule(QStringLiteral("jpeg"), [](const QString&, const QByteArray*) { return true; });
+    policy.setRule(QStringLiteral("pdf"), [](const QString&, const QByteArray*) { return true; });
+    policy.setRule(QStringLiteral("svg"), [](const QString& path, const QByteArray* data) {
+        if (data) {
+            if (data->size() > 250 * 1024) {
+                return true;
+            }
+            return data->toLower().contains(QByteArray("data:image/"));
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        if (QFileInfo(path).size() > 250 * 1024) {
+            return true;
+        }
+        return file.readAll().toLower().contains(QByteArray("data:image/"));
+    });
+    policy.setDefaultRule([](const QString&, const QByteArray*) { return false; });
+    return policy;
 }
 
 QByteArray readBlobFromHead(git_repository* repo, const char* path)
@@ -175,6 +205,9 @@ TEST_CASE("Lfs filter clean/smudge round trip", "[LFS]") {
     git_repository* repo = nullptr;
     REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
     REQUIRE(repo != nullptr);
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    auto store = std::make_shared<LfsStore>(gitDirPath, makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    LfsStoreRegistry::registerStore(store);
 
     const QString repoPath = tempDir.path();
     const QString attributesPath = QDir(repoPath).filePath(QStringLiteral(".gitattributes"));
@@ -196,7 +229,6 @@ TEST_CASE("Lfs filter clean/smudge round trip", "[LFS]") {
     CHECK(pointer.size == payload.size());
     CHECK(!pointer.oid.isEmpty());
 
-    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
     const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
     CHECK(QFile::exists(objectPath));
 
@@ -217,6 +249,7 @@ TEST_CASE("Lfs filter clean/smudge round trip", "[LFS]") {
     git_buf_dispose(&smudgeOut);
     git_filter_list_free(cleanFilters);
     git_filter_list_free(smudgeFilters);
+    LfsStoreRegistry::unregisterStore(gitDirPath, store);
     git_repository_free(repo);
 }
 
@@ -227,6 +260,9 @@ TEST_CASE("Lfs filter keeps working tree PNG and stores pointer in ODB", "[LFS]"
     git_repository* repo = nullptr;
     REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
     REQUIRE(repo != nullptr);
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    auto store = std::make_shared<LfsStore>(gitDirPath, makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    LfsStoreRegistry::registerStore(store);
 
     const QString repoPath = tempDir.path();
     const QString attributesPath = QDir(repoPath).filePath(QStringLiteral(".gitattributes"));
@@ -256,7 +292,6 @@ TEST_CASE("Lfs filter keeps working tree PNG and stores pointer in ODB", "[LFS]"
     REQUIRE(LfsPointer::parse(QByteArray(cleanOut.ptr, static_cast<int>(cleanOut.size)), &pointer));
     CHECK(pointer.size == workingTreeBytes.size());
 
-    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
     const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
     CHECK(QFile::exists(objectPath));
 
@@ -281,6 +316,7 @@ TEST_CASE("Lfs filter keeps working tree PNG and stores pointer in ODB", "[LFS]"
     git_buf_dispose(&smudgeOut);
     git_filter_list_free(cleanFilters);
     git_filter_list_free(smudgeFilters);
+    LfsStoreRegistry::unregisterStore(gitDirPath, store);
     git_repository_free(repo);
 }
 
@@ -291,6 +327,7 @@ TEST_CASE("Lfs commit via GitRepository stores pointer and checkout restores PNG
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
     const QString attributesPath = repoDir.filePath(QStringLiteral(".gitattributes"));
@@ -350,6 +387,7 @@ TEST_CASE("Lfs commits keep working tree PNG for multiple commits", "[LFS]") {
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
     const QString attributesPath = repoDir.filePath(QStringLiteral(".gitattributes"));
@@ -406,6 +444,7 @@ TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
     LfsPolicy emptyPolicy;
@@ -439,6 +478,7 @@ TEST_CASE("GitRepository resetHard discards local changes", "[GitRepository]") {
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
     Account account;
@@ -493,6 +533,7 @@ TEST_CASE("Lfs filter streams large files without buffering", "[LFS]") {
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
     Account account;
@@ -542,11 +583,10 @@ TEST_CASE("Lfs filter svg eligibility fails with relative path when CWD differs"
     const QDir repoDir(tempDir.path());
     GitRepository repository;
     repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
     repository.initRepository();
 
-    LfsPolicy policy = LfsPolicy::defaultPolicy();
-    policy.setAttributesSectionTag(QStringLiteral("qquickgit-test"));
-    repository.setLfsPolicy(policy);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
 
     const QString svgPath = repoDir.filePath(QStringLiteral("test.svg"));
     const QByteArray svgData =

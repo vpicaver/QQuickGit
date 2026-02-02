@@ -101,7 +101,7 @@ public:
     git_repository *repo = nullptr;
     int mModifiedFilesCount = 0;
     QPointer<Account> mAccount; //!<
-    LfsPolicy mLfsPolicy = LfsPolicy::defaultPolicy();
+    LfsPolicy mLfsPolicy;
     std::shared_ptr<LfsStore> mLfsStore;
 
     ~GitRepositoryData() {

@@ -1,57 +1,13 @@
 #include "LfsPolicy.h"
 
-#include <QFile>
 #include <QFileInfo>
-#include <QSet>
 #include <algorithm>
 
 namespace {
 
-constexpr qint64 SvgSizeThresholdBytes = 250 * 1024;
-
 QString normalizeExtension(const QString& path)
 {
     return QFileInfo(path).suffix().toLower();
-}
-
-bool svgHasEmbeddedRasterData(const QByteArray& data)
-{
-    return data.toLower().contains(QByteArray("data:image/"));
-}
-
-bool svgHasEmbeddedRaster(const QString& filePath)
-{
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return false;
-    }
-
-    const QByteArray needle("data:image/");
-    const int overlap = needle.size() - 1;
-    QByteArray carry;
-
-    while (!file.atEnd()) {
-        QByteArray chunk = file.read(1024 * 64);
-        if (chunk.isEmpty()) {
-            break;
-        }
-
-        if (!carry.isEmpty()) {
-            chunk.prepend(carry);
-        }
-
-        if (chunk.toLower().contains(needle)) {
-            return true;
-        }
-
-        if (chunk.size() >= overlap) {
-            carry = chunk.right(overlap);
-        } else {
-            carry = chunk;
-        }
-    }
-
-    return false;
 }
 
 } // namespace
@@ -110,50 +66,6 @@ void LfsPolicy::setAttributesSectionTag(const QString& tag)
 QString LfsPolicy::attributesSectionTag() const
 {
     return mAttributesSectionTag;
-}
-
-LfsPolicy LfsPolicy::defaultPolicy()
-{
-    LfsPolicy policy;
-
-    const QSet<QString> binaryExtensions = {
-        QStringLiteral("png"),
-        QStringLiteral("jpg"),
-        QStringLiteral("jpeg"),
-        QStringLiteral("tif"),
-        QStringLiteral("tiff"),
-        QStringLiteral("gif"),
-        QStringLiteral("bmp"),
-        QStringLiteral("webp"),
-        QStringLiteral("pdf"),
-        QStringLiteral("glb"),
-        QStringLiteral("gltf")
-    };
-
-    for (const QString& ext : binaryExtensions) {
-        policy.setRule(ext, [](const QString&, const QByteArray*) { return true; });
-    }
-
-    policy.setRule(QStringLiteral("svg"), [](const QString& path, const QByteArray* data) {
-        if (data) {
-            if (data->size() > SvgSizeThresholdBytes) {
-                return true;
-            }
-            return svgHasEmbeddedRasterData(*data);
-        }
-
-        const QFileInfo info(path);
-        if (!info.exists()) {
-            return false;
-        }
-        if (info.size() > SvgSizeThresholdBytes) {
-            return true;
-        }
-        return svgHasEmbeddedRaster(path);
-    });
-
-    policy.setDefaultRule([](const QString&, const QByteArray*) { return false; });
-    return policy;
 }
 
 } // namespace QQuickGit

@@ -25,7 +25,7 @@ struct LfsPointer {
 class LfsStore
 {
 public:
-    explicit LfsStore(QString gitDirPath, LfsPolicy policy = LfsPolicy::defaultPolicy());
+    explicit LfsStore(QString gitDirPath, LfsPolicy policy = LfsPolicy());
 
     const QString& gitDirPath() const { return mGitDirPath; }
     const LfsPolicy& policy() const { return mPolicy; }

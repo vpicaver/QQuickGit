@@ -119,7 +119,7 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
         if (!state->store) {
             state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
             if (!state->store) {
-                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
             }
         }
         const QString filePath = resolvePathForSource(state->source);
@@ -169,7 +169,7 @@ int lfsStreamClose(git_writestream* stream)
             }
             state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
             if (!state->store) {
-                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
             }
             const QString filePath = resolvePathForSource(state->source);
             if (!state->store->isLfsEligible(filePath)) {
@@ -219,7 +219,7 @@ int lfsStreamClose(git_writestream* stream)
     }
     state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
     if (!state->store) {
-        state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+        state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
     }
 
     const QString objectPath = QQuickGit::LfsStore::objectPath(gitDirPath, state->pointer.oid);

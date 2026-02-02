@@ -25,8 +25,6 @@ public:
     void setAttributesSectionTag(const QString& tag);
     QString attributesSectionTag() const;
 
-    static LfsPolicy defaultPolicy();
-
 private:
     QHash<QString, EligibilityFn> mRules;
     EligibilityFn mDefaultRule;
