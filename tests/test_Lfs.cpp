@@ -414,7 +414,6 @@ TEST_CASE("Lfs commits keep working tree PNG for multiple commits", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
     tempDir.setAutoRemove(false);
-    qDebug() << "Temp dir:" << tempDir.path();
 
     const QDir repoDir(tempDir.path());
     GitRepository repository;
