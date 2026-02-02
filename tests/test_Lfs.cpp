@@ -153,6 +153,38 @@ QByteArray createPngFile(const QString& path, const QColor& color)
     return readFileBytes(path);
 }
 
+struct CountingWriteStream {
+    git_writestream parent;
+    size_t totalBytes = 0;
+    size_t maxWrite = 0;
+    size_t writeCalls = 0;
+    bool closed = false;
+};
+
+int countingStreamWrite(git_writestream* stream, const char* buffer, size_t len)
+{
+    (void)buffer;
+    auto* state = reinterpret_cast<CountingWriteStream*>(stream);
+    state->totalBytes += len;
+    state->writeCalls += 1;
+    if (len > state->maxWrite) {
+        state->maxWrite = len;
+    }
+    return GIT_OK;
+}
+
+int countingStreamClose(git_writestream* stream)
+{
+    auto* state = reinterpret_cast<CountingWriteStream*>(stream);
+    state->closed = true;
+    return GIT_OK;
+}
+
+void countingStreamFree(git_writestream* stream)
+{
+    delete reinterpret_cast<CountingWriteStream*>(stream);
+}
+
 }
 
 TEST_CASE("LfsPointer round trip", "[LFS]") {
@@ -634,4 +666,58 @@ TEST_CASE("Lfs filter svg eligibility fails with relative path when CWD differs"
     git_repository_free(repo);
 
     QDir::setCurrent(oldCwd);
+}
+
+TEST_CASE("Lfs smudge streams non-pointer file without buffering", "[LFS]") {
+    // Note: GitRepository::initGitEngine() in tests/qquickgit-test-main.cpp
+    // registers QQuickGit's LFS filter with libgit2. This test uses libgit2
+    // streaming APIs directly, but it still exercises QQuickGit::LfsFilter.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    const QString repoPath = tempDir.path();
+    const QString attributesPath = QDir(repoPath).filePath(QStringLiteral(".gitattributes"));
+    REQUIRE(writeTextFile(attributesPath, QByteArray("*.bin filter=lfs diff=lfs merge=lfs -text\n")));
+
+    const QString fileName = QStringLiteral("not-pointer.bin");
+    const QString filePath = QDir(repoPath).filePath(fileName);
+    const int chunkSize = 128 * 1024;
+    const int chunkCount = 20;
+    const QByteArray header("not-lfs\n");
+    {
+        QFile file(filePath);
+        REQUIRE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        REQUIRE(file.write(header) == header.size());
+        QByteArray chunk(chunkSize, 'x');
+        for (int i = 0; i < chunkCount; ++i) {
+            REQUIRE(file.write(chunk) == chunk.size());
+        }
+    }
+
+    const size_t expectedSize = static_cast<size_t>(header.size() + chunkSize * chunkCount);
+    REQUIRE(static_cast<size_t>(QFileInfo(filePath).size()) == expectedSize);
+
+    git_filter_list* smudgeFilters = nullptr;
+    REQUIRE(git_filter_list_load(&smudgeFilters, repo, nullptr, "not-pointer.bin", GIT_FILTER_TO_WORKTREE, GIT_FILTER_DEFAULT) == GIT_OK);
+    REQUIRE(smudgeFilters != nullptr);
+    CHECK(git_filter_list_contains(smudgeFilters, "lfs") == 1);
+
+    auto* sink = new CountingWriteStream{};
+    sink->parent.write = countingStreamWrite;
+    sink->parent.close = countingStreamClose;
+    sink->parent.free = countingStreamFree;
+
+    REQUIRE(git_filter_list_stream_file(smudgeFilters, repo, "not-pointer.bin", &sink->parent) == GIT_OK);
+
+    CHECK(sink->totalBytes == expectedSize);
+    CHECK(sink->writeCalls > 1);
+    CHECK(sink->maxWrite <= static_cast<size_t>(chunkSize));
+
+    sink->parent.free(&sink->parent);
+    git_filter_list_free(smudgeFilters);
+    git_repository_free(repo);
 }

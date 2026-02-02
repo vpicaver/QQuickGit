@@ -17,6 +17,7 @@
 namespace {
 
 constexpr const char* LfsFilterName = "lfs";
+constexpr int LfsPointerMaxBytes = 1024;
 
 struct LfsFilterStream {
     git_writestream parent;
@@ -102,8 +103,32 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
 
     const git_filter_mode_t mode = git_filter_source_mode(state->source);
     if (mode == GIT_FILTER_SMUDGE) {
-        state->pointerBuffer.append(buffer, static_cast<int>(len));
-        return GIT_OK;
+        if (state->passthrough) {
+            return state->next->write(state->next, buffer, len);
+        }
+
+        const int incoming = static_cast<int>(len);
+        const int buffered = state->pointerBuffer.size();
+        if (buffered + incoming <= LfsPointerMaxBytes) {
+            state->pointerBuffer.append(buffer, incoming);
+            return GIT_OK;
+        }
+
+        if (!state->next) {
+            return GIT_ERROR;
+        }
+
+        state->passthrough = true;
+        if (!state->pointerBuffer.isEmpty()) {
+            int result = state->next->write(state->next,
+                                            state->pointerBuffer.constData(),
+                                            static_cast<size_t>(state->pointerBuffer.size()));
+            if (result < 0) {
+                return result;
+            }
+            state->pointerBuffer.clear();
+        }
+        return state->next->write(state->next, buffer, len);
     }
 
     if (state->passthrough) {
@@ -201,6 +226,10 @@ int lfsStreamClose(git_writestream* stream)
         if (result < 0) {
             return result;
         }
+        return state->next ? state->next->close(state->next) : GIT_OK;
+    }
+
+    if (state->passthrough) {
         return state->next ? state->next->close(state->next) : GIT_OK;
     }
 
