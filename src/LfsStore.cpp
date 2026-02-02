@@ -1,12 +1,15 @@
 #include "LfsStore.h"
 
 #include <QCryptographicHash>
+#include <QByteArrayView>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QFile>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QUuid>
 #include <algorithm>
 
 namespace {
@@ -84,6 +87,100 @@ LfsStore::LfsStore(QString gitDirPath, LfsPolicy policy)
     : mGitDirPath(std::move(gitDirPath)),
     mPolicy(std::move(policy))
 {
+}
+
+LfsStore::StreamWriter::StreamWriter(QString gitDirPath, std::shared_ptr<QFile> file, QString tempPath)
+    : mGitDirPath(std::move(gitDirPath)),
+    mFile(std::move(file)),
+    mHasher(std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256)),
+    mSize(0),
+    mTempPath(std::move(tempPath))
+{
+}
+
+LfsStore::StreamWriter::StreamWriter()
+    : mHasher(std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256)),
+    mSize(0)
+{
+}
+
+bool LfsStore::StreamWriter::isValid() const
+{
+    return mFile && mFile->isOpen();
+}
+
+Monad::ResultBase LfsStore::StreamWriter::write(const char* data, size_t len)
+{
+    if (!isValid()) {
+        return Monad::ResultBase(QStringLiteral("LFS stream writer is not open"));
+    }
+    if (len == 0) {
+        return Monad::ResultBase();
+    }
+    mHasher->addData(QByteArrayView(data, static_cast<qsizetype>(len)));
+    const qint64 written = mFile->write(data, static_cast<qint64>(len));
+    if (written != static_cast<qint64>(len)) {
+        return Monad::ResultBase(QStringLiteral("Failed to write LFS stream data"));
+    }
+    mSize += written;
+    return Monad::ResultBase();
+}
+
+Monad::Result<LfsPointer> LfsStore::StreamWriter::finalize()
+{
+    if (!isValid()) {
+        return Monad::Result<LfsPointer>(QStringLiteral("LFS stream writer is not open"));
+    }
+
+    const QString oid = QString::fromLatin1(mHasher->result().toHex());
+    const QString objectPath = oidToObjectPath(mGitDirPath, oid);
+    if (objectPath.isEmpty()) {
+        return Monad::Result<LfsPointer>(QStringLiteral("Invalid LFS object path"));
+    }
+
+    if (!ensureDirForObjectPath(objectPath)) {
+        return Monad::Result<LfsPointer>(QStringLiteral("Failed to create LFS object directory"));
+    }
+
+    mFile->close();
+
+    if (QFileInfo::exists(objectPath)) {
+        QFile::remove(mTempPath);
+    } else {
+        if (!QFile::rename(mTempPath, objectPath)) {
+            if (!QFile::copy(mTempPath, objectPath)) {
+                return Monad::Result<LfsPointer>(QStringLiteral("Failed to move LFS object data"));
+            }
+            QFile::remove(mTempPath);
+        }
+    }
+
+    LfsPointer pointer;
+    pointer.oid = oid;
+    pointer.size = mSize;
+    return Monad::Result<LfsPointer>(pointer);
+}
+
+Monad::Result<LfsStore::StreamWriter> LfsStore::beginStore(qint64 sizeHint) const
+{
+    if (mGitDirPath.isEmpty()) {
+        return Monad::Result<LfsStore::StreamWriter>(QStringLiteral("Missing git directory"));
+    }
+
+    const QString tempDirPath = QDir(mGitDirPath).filePath(QStringLiteral("lfs/tmp"));
+    if (!QDir().mkpath(tempDirPath)) {
+        return Monad::Result<LfsStore::StreamWriter>(QStringLiteral("Failed to create LFS temp directory"));
+    }
+
+    Q_UNUSED(sizeHint);
+    const QString tempFilePath = QDir(tempDirPath).filePath(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    auto file = std::make_shared<QFile>(tempFilePath);
+    if (!file->open(QIODevice::WriteOnly)) {
+        return Monad::Result<LfsStore::StreamWriter>(file->errorString());
+    }
+
+    StreamWriter writer(mGitDirPath, std::move(file), tempFilePath);
+    return Monad::Result<LfsStore::StreamWriter>(writer);
 }
 
 void LfsStore::setPolicy(const LfsPolicy& policy)
@@ -203,8 +300,30 @@ Monad::Result<LfsPointer> LfsStore::storeFile(const QString& filePath) const
             return Monad::Result<LfsPointer>(QStringLiteral("Failed to create LFS object directory"));
         }
 
-        if (!QFile::copy(filePath, objectPath)) {
-            return Monad::Result<LfsPointer>(QStringLiteral("Failed to write LFS object"));
+        QSaveFile file(objectPath);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return Monad::Result<LfsPointer>(file.errorString());
+        }
+
+        QFile source(filePath);
+        if (!source.open(QIODevice::ReadOnly)) {
+            return Monad::Result<LfsPointer>(source.errorString());
+        }
+
+        while (!source.atEnd()) {
+            const QByteArray chunk = source.read(1024 * 128);
+            if (chunk.isEmpty() && source.error() != QFile::NoError) {
+                return Monad::Result<LfsPointer>(source.errorString());
+            }
+            if (!chunk.isEmpty()) {
+                if (file.write(chunk) != chunk.size()) {
+                    return Monad::Result<LfsPointer>(QStringLiteral("Failed to write LFS object"));
+                }
+            }
+        }
+
+        if (!file.commit()) {
+            return Monad::Result<LfsPointer>(QStringLiteral("Failed to commit LFS object"));
         }
     }
 

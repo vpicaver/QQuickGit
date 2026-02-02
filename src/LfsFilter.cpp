@@ -4,7 +4,10 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QString>
+#include <memory>
 
 #include "git2/errors.h"
 #include "git2/repository.h"
@@ -19,7 +22,12 @@ struct LfsFilterStream {
     git_writestream parent;
     git_writestream* next = nullptr;
     const git_filter_source* source = nullptr;
-    QByteArray buffer;
+    std::shared_ptr<QQuickGit::LfsStore> store;
+    QQuickGit::LfsStore::StreamWriter writer;
+    QQuickGit::LfsPointer pointer;
+    bool writerReady = false;
+    bool passthrough = false;
+    QByteArray pointerBuffer;
 };
 
 int writeToNext(git_writestream* next, const QByteArray& data)
@@ -52,11 +60,93 @@ QString gitDirPathForSource(const git_filter_source* source)
     return QDir(QString::fromUtf8(path)).absolutePath();
 }
 
+QString workDirPathForSource(const git_filter_source* source)
+{
+    if (!source) {
+        return QString();
+    }
+    git_repository* repo = git_filter_source_repo(source);
+    if (!repo) {
+        return QString();
+    }
+    const char* path = git_repository_workdir(repo);
+    if (!path) {
+        return QString();
+    }
+    return QDir(QString::fromUtf8(path)).absolutePath();
+}
+
+QString resolvePathForSource(const git_filter_source* source)
+{
+    const char* path = git_filter_source_path(source);
+    if (!path) {
+        return QString();
+    }
+    const QString filePath = QString::fromUtf8(path);
+    if (QDir::isAbsolutePath(filePath)) {
+        return filePath;
+    }
+    const QString workDir = workDirPathForSource(source);
+    if (workDir.isEmpty()) {
+        return filePath;
+    }
+    return QDir(workDir).filePath(filePath);
+}
+
 int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
 {
     auto* state = reinterpret_cast<LfsFilterStream*>(stream);
-    if (len > 0 && buffer) {
-        state->buffer.append(buffer, static_cast<int>(len));
+    if (len == 0 || !buffer) {
+        return GIT_OK;
+    }
+
+    const git_filter_mode_t mode = git_filter_source_mode(state->source);
+    if (mode == GIT_FILTER_SMUDGE) {
+        state->pointerBuffer.append(buffer, static_cast<int>(len));
+        return GIT_OK;
+    }
+
+    if (state->passthrough) {
+        return state->next->write(state->next, buffer, len);
+    }
+
+    if (!state->writerReady) {
+        const QString gitDirPath = gitDirPathForSource(state->source);
+        if (gitDirPath.isEmpty()) {
+            git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
+            return GIT_ERROR;
+        }
+        if (!state->store) {
+            state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
+            if (!state->store) {
+                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+            }
+        }
+        const QString filePath = resolvePathForSource(state->source);
+        if (!state->store->isLfsEligible(filePath)) {
+            state->passthrough = true;
+            return state->next->write(state->next, buffer, len);
+        }
+
+        auto beginResult = state->store->beginStore();
+        if (beginResult.hasError()) {
+            const QString error = beginResult.errorMessage();
+            if (!error.isEmpty()) {
+                git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
+            }
+            return GIT_ERROR;
+        }
+        state->writer = beginResult.value();
+        state->writerReady = true;
+    }
+
+    auto writeResult = state->writer.write(buffer, len);
+    if (writeResult.hasError()) {
+        const QString error = writeResult.errorMessage();
+        if (!error.isEmpty()) {
+            git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
+        }
+        return GIT_ERROR;
     }
     return GIT_OK;
 }
@@ -65,40 +155,48 @@ int lfsStreamClose(git_writestream* stream)
 {
     auto* state = reinterpret_cast<LfsFilterStream*>(stream);
     const git_filter_mode_t mode = git_filter_source_mode(state->source);
-    const QString gitDirPath = gitDirPathForSource(state->source);
-
-    if (gitDirPath.isEmpty()) {
-        git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
-        return GIT_ERROR;
-    }
-
-    const char* path = git_filter_source_path(state->source);
-    const QString filePath = path ? QString::fromUtf8(path) : QString();
-    auto store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
-    if (!store) {
-        store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
-    }
 
     if (mode == GIT_FILTER_CLEAN) {
-        if (!store->isLfsEligibleData(filePath, state->buffer)) {
-            int result = writeToNext(state->next, state->buffer);
-            if (result < 0) {
-                return result;
-            }
+        if (state->passthrough) {
             return state->next ? state->next->close(state->next) : GIT_OK;
         }
 
-        auto storeResult = store->storeBytes(state->buffer);
-        if (storeResult.hasError()) {
-            const QString error = storeResult.errorMessage();
+        if (!state->writerReady) {
+            const QString gitDirPath = gitDirPathForSource(state->source);
+            if (gitDirPath.isEmpty()) {
+                git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
+                return GIT_ERROR;
+            }
+            state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
+            if (!state->store) {
+                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+            }
+            const QString filePath = resolvePathForSource(state->source);
+            if (!state->store->isLfsEligible(filePath)) {
+                return state->next ? state->next->close(state->next) : GIT_OK;
+            }
+            auto beginResult = state->store->beginStore();
+            if (beginResult.hasError()) {
+                const QString error = beginResult.errorMessage();
+                if (!error.isEmpty()) {
+                    git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
+                }
+                return GIT_ERROR;
+            }
+            state->writer = beginResult.value();
+            state->writerReady = true;
+        }
+
+        auto finalizeResult = state->writer.finalize();
+        if (finalizeResult.hasError()) {
+            const QString error = finalizeResult.errorMessage();
             if (!error.isEmpty()) {
                 git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
             }
             return GIT_ERROR;
         }
-        const QQuickGit::LfsPointer pointer = storeResult.value();
 
-        const QByteArray pointerText = pointer.toPointerText();
+        const QByteArray pointerText = finalizeResult.value().toPointerText();
         int result = writeToNext(state->next, pointerText);
         if (result < 0) {
             return result;
@@ -106,29 +204,59 @@ int lfsStreamClose(git_writestream* stream)
         return state->next ? state->next->close(state->next) : GIT_OK;
     }
 
-    QQuickGit::LfsPointer pointer;
-    if (!QQuickGit::LfsPointer::parse(state->buffer, &pointer)) {
-        int result = writeToNext(state->next, state->buffer);
+    if (!QQuickGit::LfsPointer::parse(state->pointerBuffer, &state->pointer)) {
+        int result = writeToNext(state->next, state->pointerBuffer);
         if (result < 0) {
             return result;
         }
         return state->next ? state->next->close(state->next) : GIT_OK;
     }
 
-    auto readResult = store->readObject(pointer.oid);
-    if (readResult.hasError()) {
-        int result = writeToNext(state->next, state->buffer);
+    const QString gitDirPath = gitDirPathForSource(state->source);
+    if (gitDirPath.isEmpty()) {
+        git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
+        return GIT_ERROR;
+    }
+    state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
+    if (!state->store) {
+        state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy::defaultPolicy());
+    }
+
+    const QString objectPath = QQuickGit::LfsStore::objectPath(gitDirPath, state->pointer.oid);
+    if (objectPath.isEmpty() || !QFileInfo::exists(objectPath)) {
+        int result = writeToNext(state->next, state->pointerBuffer);
         if (result < 0) {
             return result;
         }
         return state->next ? state->next->close(state->next) : GIT_OK;
     }
 
-    const QByteArray objectData = readResult.value();
-    int result = writeToNext(state->next, objectData);
-    if (result < 0) {
-        return result;
+    QFile objectFile(objectPath);
+    if (!objectFile.open(QIODevice::ReadOnly)) {
+        int result = writeToNext(state->next, state->pointerBuffer);
+        if (result < 0) {
+            return result;
+        }
+        return state->next ? state->next->close(state->next) : GIT_OK;
     }
+
+    while (!objectFile.atEnd()) {
+        const QByteArray chunk = objectFile.read(1024 * 128);
+        if (chunk.isEmpty() && objectFile.error() != QFile::NoError) {
+            int result = writeToNext(state->next, state->pointerBuffer);
+            if (result < 0) {
+                return result;
+            }
+            return state->next ? state->next->close(state->next) : GIT_OK;
+        }
+        if (!chunk.isEmpty()) {
+            int result = state->next->write(state->next, chunk.constData(), static_cast<size_t>(chunk.size()));
+            if (result < 0) {
+                return result;
+            }
+        }
+    }
+
     return state->next ? state->next->close(state->next) : GIT_OK;
 }
 
@@ -149,6 +277,8 @@ int lfsFilterStream(git_writestream** out,
     stream->parent.free = lfsStreamFree;
     stream->next = next;
     stream->source = src;
+    stream->writerReady = false;
+    stream->passthrough = false;
     *out = &stream->parent;
     return GIT_OK;
 }

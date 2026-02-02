@@ -485,3 +485,102 @@ TEST_CASE("LfsStoreRegistry keeps store when other repository is alive", "[LFS]"
         REQUIRE(LfsStoreRegistry::storeFor(storeA->gitDirPath()) == storeA);
     }
 }
+
+TEST_CASE("Lfs filter streams large files without buffering", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("Stream Tester"));
+    account.setEmail(QStringLiteral("stream@test.invalid"));
+    repository.setAccount(&account);
+
+    const QString largeFileName = QStringLiteral("large.png");
+    const QString largeFilePath = repoDir.filePath(largeFileName);
+
+    QByteArray chunk(1024 * 256, 'a');
+    {
+        QFile file(largeFilePath);
+        REQUIRE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        for (int i = 0; i < 8; ++i) {
+            REQUIRE(file.write(chunk) == chunk.size());
+        }
+    }
+
+    const QByteArray workingTreeBytes = readFileBytes(largeFilePath);
+    REQUIRE(workingTreeBytes.size() == chunk.size() * 8);
+
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add large file"), QStringLiteral("LFS streaming")));
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    const QByteArray blobData = readBlobFromHead(repo, "large.png");
+    REQUIRE(!blobData.isEmpty());
+
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(blobData, &pointer));
+    CHECK(pointer.size == workingTreeBytes.size());
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    CHECK(QFile::exists(objectPath));
+
+    git_repository_free(repo);
+}
+
+TEST_CASE("Lfs filter svg eligibility fails with relative path when CWD differs", "[LFS][svg]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.initRepository();
+
+    LfsPolicy policy = LfsPolicy::defaultPolicy();
+    policy.setAttributesSectionTag(QStringLiteral("qquickgit-test"));
+    repository.setLfsPolicy(policy);
+
+    const QString svgPath = repoDir.filePath(QStringLiteral("test.svg"));
+    const QByteArray svgData =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">"
+        "<image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB\"/>"
+        "</svg>";
+    REQUIRE(writeTextFile(svgPath, svgData));
+
+    const QString oldCwd = QDir::currentPath();
+    QTemporaryDir otherDir;
+    REQUIRE(otherDir.isValid());
+    REQUIRE(QDir::setCurrent(otherDir.path()));
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    git_filter_list* cleanFilters = nullptr;
+    REQUIRE(git_filter_list_load(&cleanFilters, repo, nullptr, "test.svg", GIT_FILTER_TO_ODB, GIT_FILTER_DEFAULT) == GIT_OK);
+    REQUIRE(cleanFilters != nullptr);
+
+    git_buf cleanOut = GIT_BUF_INIT;
+    REQUIRE(git_filter_list_apply_to_file(&cleanOut, cleanFilters, repo, "test.svg") == GIT_OK);
+    REQUIRE(cleanOut.size > 0);
+
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(QByteArray(cleanOut.ptr, static_cast<int>(cleanOut.size)), &pointer));
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    CHECK(QFile::exists(objectPath));
+
+    git_buf_dispose(&cleanOut);
+    git_filter_list_free(cleanFilters);
+    git_repository_free(repo);
+
+    QDir::setCurrent(oldCwd);
+}

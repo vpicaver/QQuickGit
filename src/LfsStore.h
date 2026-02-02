@@ -5,6 +5,8 @@
 #include <QString>
 
 #include <memory>
+#include <QCryptographicHash>
+#include <QFile>
 
 #include "LfsPolicy.h"
 #include "Monad/Result.h"
@@ -39,6 +41,25 @@ public:
     Monad::Result<QByteArray> readObject(const QString& oid) const;
 
     static QString objectPath(const QString& gitDirPath, const QString& oid);
+
+    class StreamWriter {
+    public:
+        StreamWriter(QString gitDirPath, std::shared_ptr<QFile> file, QString tempPath);
+        StreamWriter();
+
+        bool isValid() const;
+        Monad::ResultBase write(const char* data, size_t len);
+        Monad::Result<LfsPointer> finalize();
+
+    private:
+        QString mGitDirPath;
+        std::shared_ptr<QFile> mFile;
+        std::shared_ptr<QCryptographicHash> mHasher;
+        qint64 mSize = 0;
+        QString mTempPath;
+    };
+
+    Monad::Result<StreamWriter> beginStore(qint64 sizeHint = -1) const;
 
 private:
     QString mGitDirPath;

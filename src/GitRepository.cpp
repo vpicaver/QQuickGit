@@ -1237,7 +1237,10 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                     }
 
                     QFile file(path);
-                    file.open(QFile::ReadOnly);
+                    if (!file.open(QFile::ReadOnly)) {
+                        qDebug() << "Failed to open" << path << "for reading";
+                        return QByteArray();
+                    }
 
                     enum State {
                         Same,
@@ -1285,7 +1288,10 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                 auto writeBuffer = [](const char* gitPath, const QDir& repoDir, const QByteArray& buffer) {
                     auto path = repoDir.absoluteFilePath(gitPath);
                     QFile file(path);
-                    file.open(QFile::WriteOnly);
+                    if (!file.open(QFile::WriteOnly)) {
+                        qDebug() << "Failed to open" << path << "for writing";
+                        return;
+                    }
                     file.write(buffer);
                 };
 
