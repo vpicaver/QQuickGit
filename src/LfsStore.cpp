@@ -16,6 +16,14 @@ namespace {
 
 const QByteArray LfsPointerVersionLine = "version https://git-lfs.github.com/spec/v1";
 
+QString normalizeGitDirPath(const QString& gitDirPath)
+{
+    if (gitDirPath.isEmpty()) {
+        return QString();
+    }
+    return QDir(gitDirPath).absolutePath();
+}
+
 QString lfsObjectsDir(const QString& gitDirPath)
 {
     return QDir(gitDirPath).filePath(QStringLiteral("lfs/objects"));
@@ -84,7 +92,7 @@ QString sha256HexForFile(const QString& filePath, qint64* outSize, QString* erro
 namespace QQuickGit {
 
 LfsStore::LfsStore(QString gitDirPath, LfsPolicy policy)
-    : mGitDirPath(std::move(gitDirPath)),
+    : mGitDirPath(normalizeGitDirPath(gitDirPath)),
     mPolicy(std::move(policy))
 {
 }
@@ -411,28 +419,31 @@ void LfsStoreRegistry::registerStore(const std::shared_ptr<LfsStore>& store)
         return;
     }
     QMutexLocker locker(&registryMutex);
-    auto& stores = storeRegistry[store->gitDirPath()];
+    const QString normalized = normalizeGitDirPath(store->gitDirPath());
+    auto& stores = storeRegistry[normalized];
     compactStoresLocked(stores);
     stores.append(store);
 }
 
 void LfsStoreRegistry::unregisterStore(const QString& gitDirPath)
 {
-    if (gitDirPath.isEmpty()) {
+    const QString normalized = normalizeGitDirPath(gitDirPath);
+    if (normalized.isEmpty()) {
         return;
     }
     QMutexLocker locker(&registryMutex);
-    storeRegistry.remove(gitDirPath);
+    storeRegistry.remove(normalized);
 }
 
 void LfsStoreRegistry::unregisterStore(const QString& gitDirPath,
                                        const std::shared_ptr<LfsStore>& store)
 {
-    if (gitDirPath.isEmpty() || !store) {
+    const QString normalized = normalizeGitDirPath(gitDirPath);
+    if (normalized.isEmpty() || !store) {
         return;
     }
     QMutexLocker locker(&registryMutex);
-    auto it = storeRegistry.find(gitDirPath);
+    auto it = storeRegistry.find(normalized);
     if (it == storeRegistry.end()) {
         return;
     }
@@ -451,11 +462,12 @@ void LfsStoreRegistry::unregisterStore(const QString& gitDirPath,
 
 std::shared_ptr<LfsStore> LfsStoreRegistry::storeFor(const QString& gitDirPath)
 {
-    if (gitDirPath.isEmpty()) {
+    const QString normalized = normalizeGitDirPath(gitDirPath);
+    if (normalized.isEmpty()) {
         return {};
     }
     QMutexLocker locker(&registryMutex);
-    auto it = storeRegistry.find(gitDirPath);
+    auto it = storeRegistry.find(normalized);
     if (it == storeRegistry.end()) {
         return {};
     }
