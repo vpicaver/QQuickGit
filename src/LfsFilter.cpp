@@ -269,9 +269,14 @@ int lfsStreamClose(git_writestream* stream)
         return state->next ? state->next->close(state->next) : GIT_OK;
     }
 
+    bool wroteObjectData = false;
     while (!objectFile.atEnd()) {
         const QByteArray chunk = objectFile.read(1024 * 128);
         if (chunk.isEmpty() && objectFile.error() != QFile::NoError) {
+            if (wroteObjectData) {
+                git_error_set_str(GIT_ERROR_FILTER, "LFS object read error during smudge");
+                return GIT_ERROR;
+            }
             int result = writeToNext(state->next, state->pointerBuffer);
             if (result < 0) {
                 return result;
@@ -283,6 +288,7 @@ int lfsStreamClose(git_writestream* stream)
             if (result < 0) {
                 return result;
             }
+            wroteObjectData = true;
         }
     }
 
