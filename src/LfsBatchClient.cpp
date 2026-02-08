@@ -100,6 +100,7 @@ QString enrichReplyErrorMessage(const QString& baseMessage, QNetworkReply* reply
     message += QLatin1Char(']');
     return message;
 }
+
 }
 
 namespace QQuickGit {
@@ -610,17 +611,25 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
     }
 
     git_config* config = nullptr;
-    if (git_repository_config(&config, repo) != GIT_OK) {
+    const int repoConfigResult = git_repository_config(&config, repo);
+    if (repoConfigResult != GIT_OK) {
         return Monad::Result<QUrl>(QStringLiteral("Failed to read git config"),
                                    static_cast<int>(LfsFetchErrorCode::NoRemote));
     }
 
     std::unique_ptr<git_config, decltype(&git_config_free)> configHolder(config, &git_config_free);
 
-    const char* lfsUrl = nullptr;
-    if (git_config_get_string(&lfsUrl, config, "lfs.url") == GIT_OK && lfsUrl) {
-        return Monad::Result<QUrl>(QUrl(QString::fromUtf8(lfsUrl)));
+    git_buf lfsUrlBuf = GIT_BUF_INIT;
+    const int lfsUrlResult = git_config_get_string_buf(&lfsUrlBuf, config, "lfs.url");
+    const QString lfsUrlValue = (lfsUrlResult == GIT_OK && lfsUrlBuf.ptr)
+        ? QString::fromUtf8(lfsUrlBuf.ptr)
+        : QString();
+    if (lfsUrlResult == GIT_OK && !lfsUrlValue.isEmpty()) {
+        const QUrl configured = QUrl(lfsUrlValue);
+        git_buf_dispose(&lfsUrlBuf);
+        return Monad::Result<QUrl>(configured);
     }
+    git_buf_dispose(&lfsUrlBuf);
 
     QString resolvedRemote = remoteName;
     if (resolvedRemote.isEmpty()) {
@@ -633,9 +642,17 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
 
     const QString lfsUrlKey = QStringLiteral("remote.%1.lfsurl").arg(resolvedRemote);
     const QByteArray lfsKey = lfsUrlKey.toUtf8();
-    if (git_config_get_string(&lfsUrl, config, lfsKey.constData()) == GIT_OK && lfsUrl) {
-        return Monad::Result<QUrl>(QUrl(QString::fromUtf8(lfsUrl)));
+    git_buf remoteLfsUrlBuf = GIT_BUF_INIT;
+    const int remoteLfsResult = git_config_get_string_buf(&remoteLfsUrlBuf, config, lfsKey.constData());
+    const QString remoteLfsValue = (remoteLfsResult == GIT_OK && remoteLfsUrlBuf.ptr)
+        ? QString::fromUtf8(remoteLfsUrlBuf.ptr)
+        : QString();
+    if (remoteLfsResult == GIT_OK && !remoteLfsValue.isEmpty()) {
+        const QUrl configuredRemote = QUrl(remoteLfsValue);
+        git_buf_dispose(&remoteLfsUrlBuf);
+        return Monad::Result<QUrl>(configuredRemote);
     }
+    git_buf_dispose(&remoteLfsUrlBuf);
 
     git_remote* remote = nullptr;
     if (git_remote_lookup(&remote, repo, resolvedRemote.toUtf8().constData()) != GIT_OK) {

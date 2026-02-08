@@ -114,7 +114,6 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
     LfsHydrationPlan plan;
     plan.workDir = QString::fromUtf8(workDirRaw);
     plan.gitDirPath = QDir(QString::fromUtf8(gitDirRaw)).absolutePath();
-
     QSet<QString> pendingOids;
     const size_t entryCount = git_index_entrycount(index);
     for (size_t i = 0; i < entryCount; ++i) {
@@ -136,7 +135,6 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
         }
         const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
         plan.pointerFiles.push_back(PointerWorkItem{relativePath, objectPath, pointer});
-
         if (objectPath.isEmpty() || QFileInfo::exists(objectPath) || pendingOids.contains(pointer.oid)) {
             continue;
         }
@@ -230,6 +228,67 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, Q
 
     (*step)();
     return deferred.future();
+}
+
+QFuture<Monad::Result<LfsHydrationPlan>> prepareLfsHydrationPlan(const QDir& repositoryDir)
+{
+    const QByteArray path = repositoryDir.absolutePath().toLocal8Bit();
+    return QtConcurrent::run([path]() mutable {
+        return mtry([path]() mutable -> Monad::Result<LfsHydrationPlan> {
+            git_repository* repo = nullptr;
+            const int openResult = git_repository_open(&repo, path.constData());
+            if (openResult != GIT_OK || !repo) {
+                const git_error* err = git_error_last();
+                const QString message = (err && err->message)
+                    ? QString::fromUtf8(err->message)
+                    : QStringLiteral("Failed to open repository for LFS hydration");
+                return Monad::Result<LfsHydrationPlan>(message, openResult);
+            }
+            std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+            return buildLfsHydrationPlan(repo);
+        });
+    });
+}
+
+GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir, QObject* context)
+{
+    auto prepareFuture = prepareLfsHydrationPlan(repositoryDir);
+    return AsyncFuture::observe(prepareFuture)
+        .context(context, [prepareFuture, context]() -> GitRepository::GitFuture {
+            const auto prepareResult = prepareFuture.result();
+            if (prepareResult.hasError()) {
+                return AsyncFuture::completed(Monad::ResultBase(prepareResult.errorMessage(),
+                                                                prepareResult.errorCode()));
+            }
+            return runLfsHydrationPipeline(prepareResult.value(), context);
+        }).future();
+}
+
+GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<GitRepository::MergeResult>& mergeResult,
+                                                         const QDir& repositoryDir,
+                                                         QObject* context)
+{
+    if (mergeResult.hasError()) {
+        return AsyncFuture::completed(mergeResult);
+    }
+
+    const auto state = mergeResult.value().state();
+    const bool shouldHydrate = state == GitRepository::MergeResult::FastForward
+                               || state == GitRepository::MergeResult::MergeCommitCreated;
+    if (!shouldHydrate) {
+        return AsyncFuture::completed(mergeResult);
+    }
+
+    auto hydrateFuture = runLfsHydrationForDirectory(repositoryDir, context);
+    return AsyncFuture::observe(hydrateFuture)
+        .context(context, [hydrateFuture, mergeResult]() -> Monad::Result<GitRepository::MergeResult> {
+            const auto hydrateResult = hydrateFuture.result();
+            if (hydrateResult.hasError()) {
+                return Monad::Result<GitRepository::MergeResult>(hydrateResult.errorMessage(),
+                                                                 hydrateResult.errorCode());
+            }
+            return mergeResult;
+        }).future();
 }
 }
 
@@ -881,11 +940,16 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
             });
         });
 
-        AsyncFuture::observe(future).context(this, [future, this]() {
-            d->repo = future.result().value().repo;
-        });
+        return AsyncFuture::observe(future)
+            .context(this, [future, this]() -> GitFuture {
+                const auto cloneResult = future.result();
+                if (cloneResult.hasError()) {
+                    return AsyncFuture::completed(ResultBase(cloneResult.errorMessage(), cloneResult.errorCode()));
+                }
 
-        return future;
+                d->repo = cloneResult.value().repo;
+                return runLfsHydrationForDirectory(d->mDirectory, this);
+            }).future();
     });
 }
 
@@ -1062,26 +1126,30 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                 .context(this,
                          [=]()
                          {
-                             return mbind(fetchFuture.result(),
-                                          [=](const ResultBase&)
-                                          {
-                                              return mtry(
-                                                  [=]() mutable ->Result<MergeResult>
-                                                  {
-                                                      auto currentBranch = headBranchName();
+                             const auto fetchResult = fetchFuture.result();
+                             if (fetchResult.hasError()) {
+                                 return AsyncFuture::completed(Result<MergeResult>(fetchResult.errorMessage(),
+                                                                                    fetchResult.errorCode()));
+                             }
 
-                                                      if(!currentBranch.isEmpty()) {
-                                                          auto remoteBranch = fixedRemote + QStringLiteral("/") + currentBranch;
+                             auto mergeResult = mtry(
+                                 [=]() mutable ->Result<MergeResult>
+                                 {
+                                     auto currentBranch = headBranchName();
 
-                                                          //remote branch exists
-                                                          if(remoteBranchExists(remoteBranch)) {
-                                                              setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
-                                                              return merge({remoteBranch});
-                                                          }
-                                                      }
-                                                      return Result<MergeResult>(); //QStringLiteral("Current branch name is empty"));
-                                                  });
-                                          });
+                                     if(!currentBranch.isEmpty()) {
+                                         auto remoteBranch = fixedRemote + QStringLiteral("/") + currentBranch;
+
+                                         //remote branch exists
+                                         if(remoteBranchExists(remoteBranch)) {
+                                             setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                                             return merge({remoteBranch});
+                                         }
+                                     }
+                                     return Result<MergeResult>(); //QStringLiteral("Current branch name is empty"));
+                                 });
+
+                             return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this);
                          }).future(); //This strips the progress from fetchFuture
         });
 }
