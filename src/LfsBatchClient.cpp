@@ -473,10 +473,6 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
 
         const LfsPointer actual = finalizeResult.value();
         if (actual.oid != expected.oid || actual.size != expected.size) {
-            const QString objectPath = LfsStore::objectPath(mGitDirPath, actual.oid);
-            if (!objectPath.isEmpty()) {
-                QFile::remove(objectPath);
-            }
             finish(Monad::ResultBase(QStringLiteral("LFS download hash mismatch"),
                                      static_cast<int>(LfsFetchErrorCode::Protocol)));
             return;

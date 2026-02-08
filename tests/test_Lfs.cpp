@@ -1675,6 +1675,66 @@ TEST_CASE("LfsBatchClient uploadObject validates inputs before network", "[LFS]"
     git_repository_free(repo);
 }
 
+TEST_CASE("LfsBatchClient download hash mismatch keeps existing cached object", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsDownloadServer server;
+    REQUIRE(server.start());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    REQUIRE(!gitDirPath.isEmpty());
+    LfsStore store(gitDirPath);
+    LfsBatchClient client(gitDirPath);
+
+    const QByteArray expectedBytes("expected-mismatch-payload");
+    const QByteArray actualBytes("actual-cached-object-data");
+    REQUIRE(expectedBytes.size() == actualBytes.size());
+    REQUIRE(expectedBytes != actualBytes);
+
+    const QString expectedOid =
+        QString::fromLatin1(QCryptographicHash::hash(expectedBytes, QCryptographicHash::Sha256).toHex());
+    LfsPointer expectedPointer;
+    expectedPointer.oid = expectedOid;
+    expectedPointer.size = expectedBytes.size();
+
+    auto existingStoreResult = store.storeBytes(actualBytes);
+    INFO("Seed object error:" << existingStoreResult.errorMessage().toStdString());
+    REQUIRE(!existingStoreResult.hasError());
+    const LfsPointer existingPointer = existingStoreResult.value();
+    REQUIRE(existingPointer.oid != expectedPointer.oid);
+
+    const QString existingObjectPath = LfsStore::objectPath(gitDirPath, existingPointer.oid);
+    REQUIRE(!existingObjectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(existingObjectPath));
+
+    server.setObject(expectedPointer.oid, actualBytes);
+    LfsBatchClient::Action action;
+    action.href = QUrl(QStringLiteral("%1/objects/%2")
+                           .arg(server.endpoint())
+                           .arg(expectedPointer.oid));
+
+    auto downloadFuture = client.downloadObject(action, store, expectedPointer);
+    REQUIRE(AsyncFuture::waitForFinished(downloadFuture, 60 * 1000));
+    INFO("Download error:" << downloadFuture.result().errorMessage().toStdString()
+         << "code:" << downloadFuture.result().errorCode());
+    REQUIRE(downloadFuture.result().hasError());
+    CHECK(downloadFuture.result().errorCode() == static_cast<int>(LfsFetchErrorCode::Protocol));
+    CHECK(downloadFuture.result().errorMessage().contains(QStringLiteral("hash mismatch")));
+
+    CHECK(QFileInfo::exists(existingObjectPath));
+    auto readExistingResult = store.readObject(existingPointer.oid);
+    INFO("Read existing object error:" << readExistingResult.errorMessage().toStdString());
+    REQUIRE(!readExistingResult.hasError());
+    CHECK(readExistingResult.value() == actualBytes);
+
+    git_repository_free(repo);
+}
+
 TEST_CASE("LfsBatchClient can install LfsAuthProvider", "[LFS]") {
     const auto previous = LfsBatchClient::lfsAuthProvider();
     auto provider = std::make_shared<StaticLfsAuthProvider>(QByteArrayLiteral("Bearer test-token"));
