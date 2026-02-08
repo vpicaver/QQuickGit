@@ -387,6 +387,108 @@ private:
     int mObjectRequestCount = 0;
 };
 
+class LocalLfsAuthHeaderServer
+{
+public:
+    bool start()
+    {
+        QObject::connect(&mServer, &QTcpServer::newConnection, &mServer, [this]() { handleNewConnections(); });
+        return mServer.listen(QHostAddress::LocalHost, 0);
+    }
+
+    QString remoteUrl() const
+    {
+        return QStringLiteral("http://127.0.0.1:%1/test.git").arg(mServer.serverPort());
+    }
+
+    void requireHeader(const QByteArray& name, const QByteArray& value)
+    {
+        mRequiredName = name;
+        mRequiredValue = value;
+    }
+
+    int batchRequestCount() const
+    {
+        return mBatchRequestCount;
+    }
+
+    int authorizedRequestCount() const
+    {
+        return mAuthorizedRequestCount;
+    }
+
+private:
+    static void respond(QTcpSocket* socket, int status, const QByteArray& contentType, const QByteArray& body)
+    {
+        const QByteArray statusText = status == 200 ? QByteArray("OK") : QByteArray("Unauthorized");
+        const QByteArray response =
+            "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
+            "Content-Type: " + contentType + "\r\n"
+            "Connection: close\r\n"
+            "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
+            "\r\n" + body;
+        socket->write(response);
+        socket->flush();
+        socket->disconnectFromHost();
+    }
+
+    void handleNewConnections()
+    {
+        while (mServer.hasPendingConnections()) {
+            QTcpSocket* socket = mServer.nextPendingConnection();
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
+                const QByteArray request = socket->readAll();
+                if (request.isEmpty()) {
+                    return;
+                }
+
+                const QByteArray firstLine = request.split('\n').value(0).trimmed();
+                if (!firstLine.contains("/objects/batch")) {
+                    respond(socket, 404, QByteArray("application/json"), QByteArray("{\"message\":\"not found\"}"));
+                    return;
+                }
+
+                mBatchRequestCount++;
+                bool hasRequiredHeader = false;
+                const QByteArray requiredNameLower = mRequiredName.toLower();
+                const QList<QByteArray> lines = request.split('\n');
+                for (const QByteArray& rawLine : lines) {
+                    const QByteArray line = rawLine.trimmed();
+                    if (line.isEmpty()) {
+                        break;
+                    }
+                    const int colonIndex = line.indexOf(':');
+                    if (colonIndex <= 0) {
+                        continue;
+                    }
+                    const QByteArray headerName = line.left(colonIndex).trimmed().toLower();
+                    const QByteArray headerValue = line.mid(colonIndex + 1).trimmed();
+                    if (headerName == requiredNameLower && headerValue == mRequiredValue) {
+                        hasRequiredHeader = true;
+                        break;
+                    }
+                }
+                if (hasRequiredHeader) {
+                    mAuthorizedRequestCount++;
+                    const QByteArray body =
+                        "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":1,\"actions\":{}}]}";
+                    respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), body);
+                } else {
+                    const QByteArray body = QByteArray("{\"message\":\"missing auth header\"}");
+                    respond(socket, 401, QByteArray("application/json"), body);
+                }
+            });
+            QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+        }
+    }
+
+    QTcpServer mServer;
+    QByteArray mRequiredName = QByteArray("X-QQuickGit-Auth");
+    QByteArray mRequiredValue = QByteArray("scoped-token");
+    int mBatchRequestCount = 0;
+    int mAuthorizedRequestCount = 0;
+};
+
 bool findFirstLfsPointerInRepo(const QString& repoPath, LfsPointer* pointerOut, QString* relativePathOut)
 {
     if (!pointerOut) {
@@ -1131,6 +1233,43 @@ TEST_CASE("Lfs reset does not issue duplicate batch fetch attempts for missing o
 
     // Fixed behavior: smudge does not start background network fetches.
     CHECK(server.batchRequestCount() == 1);
+}
+
+TEST_CASE("Lfs batch applies URL-scoped http.extraheader from git config", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsAuthHeaderServer server;
+    REQUIRE(server.start());
+
+    GitRepository repository;
+    repository.setDirectory(QDir(tempDir.path()));
+    repository.initRepository();
+
+    REQUIRE(configureRemoteUrl(tempDir.path(), QStringLiteral("origin"), server.remoteUrl()));
+
+    const QString extraHeaderKey = QStringLiteral("http.%1/.extraheader").arg(server.remoteUrl());
+    REQUIRE(setGitConfigString(tempDir.path(),
+                               extraHeaderKey.toUtf8().constData(),
+                               QStringLiteral("X-QQuickGit-Auth: scoped-token")));
+
+    const QString gitDirPath = gitDirPathFromWorkTree(tempDir.path());
+    REQUIRE(!gitDirPath.isEmpty());
+
+    LfsBatchClient client(gitDirPath);
+    const LfsBatchClient::ObjectSpec objectSpec{
+        QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        1
+    };
+
+    auto batchFuture = client.batch(QStringLiteral("download"), {objectSpec});
+    REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
+    INFO("Batch error:" << batchFuture.result().errorMessage().toStdString()
+         << "code:" << batchFuture.result().errorCode());
+
+    REQUIRE(server.batchRequestCount() == 1);
+    CHECK(server.authorizedRequestCount() == 1);
+    REQUIRE(!batchFuture.result().hasError());
 }
 
 TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {

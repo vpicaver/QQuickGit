@@ -11,6 +11,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <memory>
+#include <algorithm>
 
 #include "asyncfuture.h"
 #include "git2.h"
@@ -48,6 +49,76 @@ QByteArray toHeaderValue(const QString& line)
         return QByteArray();
     }
     return line.mid(index + 1).trimmed().toUtf8();
+}
+
+QString canonicalHttpMatchUrl(const QUrl& url)
+{
+    if (!url.isValid()) {
+        return QString();
+    }
+
+    QUrl normalized(url);
+    normalized.setUserName(QString());
+    normalized.setPassword(QString());
+    normalized.setQuery(QString());
+    normalized.setFragment(QString());
+
+    QString path = normalized.path();
+    if (path.isEmpty()) {
+        path = QStringLiteral("/");
+    }
+    normalized.setPath(path);
+
+    QString value = normalized.toString(QUrl::FullyEncoded);
+    if (!value.endsWith('/')) {
+        value.append('/');
+    }
+    return value;
+}
+
+bool scopeMatchesUrl(const QString& scopeRaw,
+                    const QUrl& targetUrl,
+                    const QString& targetCanonical,
+                    int* scopeLengthOut)
+{
+    if (scopeLengthOut) {
+        *scopeLengthOut = 0;
+    }
+    if (scopeRaw.isEmpty() || targetCanonical.isEmpty()) {
+        return false;
+    }
+
+    QString scope = scopeRaw.trimmed();
+    if (scope.size() >= 2 && scope.startsWith('"') && scope.endsWith('"')) {
+        scope = scope.mid(1, scope.size() - 2);
+    }
+
+    const QUrl scopedUrl(scope);
+    if (scopedUrl.isValid() && !scopedUrl.scheme().isEmpty() && !scopedUrl.host().isEmpty()) {
+        const QString scopedCanonical = canonicalHttpMatchUrl(scopedUrl);
+        if (targetCanonical.startsWith(scopedCanonical, Qt::CaseInsensitive)) {
+            if (scopeLengthOut) {
+                *scopeLengthOut = scopedCanonical.size();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    const QString targetHost = targetUrl.host().toLower();
+    QString targetHostPort = targetHost;
+    if (targetUrl.port() > 0) {
+        targetHostPort += QStringLiteral(":%1").arg(targetUrl.port());
+    }
+
+    const QString loweredScope = scope.toLower();
+    if (loweredScope == targetHost || loweredScope == targetHostPort) {
+        if (scopeLengthOut) {
+            *scopeLengthOut = scope.size();
+        }
+        return true;
+    }
+    return false;
 }
 
 QString responseBodyPreview(QNetworkReply* reply)
@@ -780,24 +851,83 @@ void LfsBatchClient::applyExtraHeaders(git_repository* repo, const QUrl& url, QN
 
     std::unique_ptr<git_config, decltype(&git_config_free)> configHolder(config, &git_config_free);
 
-    const QString host = url.host();
-    const QString urlKey = QStringLiteral("http.%1.extraheader").arg(host);
+    struct HeaderListPayload {
+        QVector<QString> headerLines;
+    };
+    auto appendEntryValue = [](const git_config_entry* entry, void* payload) -> int {
+        if (!entry || !entry->value || !payload) {
+            return 0;
+        }
+        auto* typed = static_cast<HeaderListPayload*>(payload);
+        typed->headerLines.push_back(QString::fromUtf8(entry->value));
+        return 0;
+    };
 
-    const char* headerValue = nullptr;
-    if (git_config_get_string(&headerValue, config, "http.extraheader") == GIT_OK && headerValue) {
-        const QString headerLine = QString::fromUtf8(headerValue);
+    HeaderListPayload globalHeaders;
+    git_config_get_multivar_foreach(config,
+                                    "http.extraheader",
+                                    nullptr,
+                                    appendEntryValue,
+                                    &globalHeaders);
+    for (const QString& headerLine : globalHeaders.headerLines) {
         const QString headerName = toHeaderName(headerLine);
         if (!headerName.isEmpty()) {
             request->setRawHeader(headerName.toUtf8(), toHeaderValue(headerLine));
         }
     }
 
-    headerValue = nullptr;
-    if (!host.isEmpty() && git_config_get_string(&headerValue, config, urlKey.toUtf8().constData()) == GIT_OK && headerValue) {
-        const QString headerLine = QString::fromUtf8(headerValue);
-        const QString headerName = toHeaderName(headerLine);
+    struct ScopedHeader {
+        QString headerLine;
+        int scopeLength = 0;
+    };
+    struct ScopedHeaderPayload {
+        QUrl targetUrl;
+        QString targetCanonical;
+        QVector<ScopedHeader> matchedHeaders;
+    };
+
+    ScopedHeaderPayload scopedPayload{url, canonicalHttpMatchUrl(url), {}};
+    auto collectScopedHeaders = [](const git_config_entry* entry, void* payload) -> int {
+        if (!entry || !entry->name || !entry->value || !payload) {
+            return 0;
+        }
+
+        const QString key = QString::fromUtf8(entry->name);
+        if (!key.startsWith(QStringLiteral("http."), Qt::CaseInsensitive)
+            || !key.endsWith(QStringLiteral(".extraheader"), Qt::CaseInsensitive)
+            || key.compare(QStringLiteral("http.extraheader"), Qt::CaseInsensitive) == 0) {
+            return 0;
+        }
+
+        constexpr int prefixLen = 5; // "http."
+        constexpr int suffixLen = 12; // ".extraheader"
+        const int scopedLength = key.size() - prefixLen - suffixLen;
+        if (scopedLength <= 0) {
+            return 0;
+        }
+
+        const QString scopeRaw = key.mid(prefixLen, scopedLength);
+        auto* typed = static_cast<ScopedHeaderPayload*>(payload);
+        int scopeLength = 0;
+        if (!scopeMatchesUrl(scopeRaw, typed->targetUrl, typed->targetCanonical, &scopeLength)) {
+            return 0;
+        }
+
+        typed->matchedHeaders.push_back(ScopedHeader{QString::fromUtf8(entry->value), scopeLength});
+        return 0;
+    };
+
+    git_config_foreach(config, collectScopedHeaders, &scopedPayload);
+    std::stable_sort(scopedPayload.matchedHeaders.begin(),
+                     scopedPayload.matchedHeaders.end(),
+                     [](const ScopedHeader& lhs, const ScopedHeader& rhs) {
+                         return lhs.scopeLength < rhs.scopeLength;
+                     });
+
+    for (const ScopedHeader& scopedHeader : scopedPayload.matchedHeaders) {
+        const QString headerName = toHeaderName(scopedHeader.headerLine);
         if (!headerName.isEmpty()) {
-            request->setRawHeader(headerName.toUtf8(), toHeaderValue(headerLine));
+            request->setRawHeader(headerName.toUtf8(), toHeaderValue(scopedHeader.headerLine));
         }
     }
 }
