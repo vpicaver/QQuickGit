@@ -233,8 +233,8 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, Q
 QFuture<Monad::Result<LfsHydrationPlan>> prepareLfsHydrationPlan(const QDir& repositoryDir)
 {
     const QByteArray path = repositoryDir.absolutePath().toLocal8Bit();
-    return QtConcurrent::run([path]() mutable {
-        return mtry([path]() mutable -> Monad::Result<LfsHydrationPlan> {
+    return QtConcurrent::run([path]() {
+        return mtry([path]() -> Monad::Result<LfsHydrationPlan> {
             git_repository* repo = nullptr;
             const int openResult = git_repository_open(&repo, path.constData());
             if (openResult != GIT_OK || !repo) {
@@ -948,6 +948,16 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                 }
 
                 d->repo = cloneResult.value().repo;
+                if (d->mLfsStore) {
+                    LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
+                    d->mLfsStore.reset();
+                }
+                const char* gitPath = git_repository_path(d->repo);
+                if (gitPath) {
+                    d->mLfsStore = std::make_shared<LfsStore>(QString::fromUtf8(gitPath), d->mLfsPolicy);
+                    LfsStoreRegistry::registerStore(d->mLfsStore);
+                }
+                ensureLfsAttributes();
                 return runLfsHydrationForDirectory(d->mDirectory, this);
             }).future();
     });

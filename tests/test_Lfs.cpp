@@ -1637,6 +1637,61 @@ TEST_CASE("Lfs clone hydrates working-tree bytes without explicit reset", "[LFS]
     CHECK(workingSha256 == expectedOid);
 }
 
+TEST_CASE("Lfs policy configured before clone remains active for subsequent commits", "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-policy-clone"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-policy-clone"));
+    const QString imageFileName = QStringLiteral("post-clone.png");
+    const QString policyTag = QStringLiteral("qquickgit-test");
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    REQUIRE(writeTextFile(QDir(authorPath).filePath(QStringLiteral("README.md")), QByteArray("seed\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Initial"), QStringLiteral("Seed repository")));
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    consumer.setLfsPolicy(makeCustomPolicy(policyTag));
+    consumer.setAccount(&account);
+
+    requireGitFutureSuccess(consumer.clone(QUrl::fromLocalFile(authorPath)));
+
+    // Regression guard: clone should initialize repository-scoped LFS store/policy state.
+    REQUIRE(consumer.lfsStore() != nullptr);
+
+    const QString attributesPath = QDir(consumerPath).filePath(QStringLiteral(".gitattributes"));
+    const QByteArray attributesContents = readFileBytes(attributesPath);
+    REQUIRE(attributesContents.contains(QByteArray("# qquickgit-test:begin-lfs")));
+    REQUIRE(attributesContents.contains(QByteArray("*.png filter=lfs diff=lfs merge=lfs -text")));
+
+    const QString imagePath = QDir(consumerPath).filePath(imageFileName);
+    const QByteArray workingTreeBytes = createPngFile(imagePath, Qt::blue);
+    REQUIRE(!workingTreeBytes.isEmpty());
+    REQUIRE_NOTHROW(consumer.commitAll(QStringLiteral("Add post-clone png"), QStringLiteral("LFS pointer expected")));
+
+    git_repository* consumerRepo = nullptr;
+    REQUIRE(git_repository_open(&consumerRepo, consumerPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(consumerRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> consumerRepoHolder(consumerRepo, &git_repository_free);
+
+    const QByteArray committedBlob = readBlobFromHead(consumerRepo, imageFileName.toUtf8().constData());
+    REQUIRE(!committedBlob.isEmpty());
+
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(committedBlob, &pointer));
+    CHECK(pointer.size == workingTreeBytes.size());
+    CHECK(!pointer.oid.isEmpty());
+}
+
 TEST_CASE("Lfs pull fast-forward hydrates from local object store", "[LFS][regression][P2]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
