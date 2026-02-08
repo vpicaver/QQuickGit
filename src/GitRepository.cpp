@@ -20,9 +20,11 @@
 
 //Qt includes
 #include <QDebug>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
+#include <QSet>
 #include <QtConcurrent>
 #include <QUuid>
 
@@ -76,6 +78,157 @@ QFutureInterface<ResultBase>* progressFromPayload(void* payload)
         return nullptr;
     }
     return typed->progressInterface;
+}
+
+struct PointerWorkItem {
+    QString relativePath;
+    QString objectPath;
+    LfsPointer pointer;
+};
+
+struct LfsHydrationPlan {
+    QString workDir;
+    QString gitDirPath;
+    QVector<PointerWorkItem> pointerFiles;
+    QVector<LfsPointer> missingPointers;
+};
+
+Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
+{
+    if (!repo) {
+        return Monad::Result<LfsHydrationPlan>(LfsHydrationPlan{});
+    }
+
+    const char* workDirRaw = git_repository_workdir(repo);
+    const char* gitDirRaw = git_repository_path(repo);
+    if (!workDirRaw || !gitDirRaw) {
+        return Monad::Result<LfsHydrationPlan>(LfsHydrationPlan{});
+    }
+
+    git_index* index = nullptr;
+    if (git_repository_index(&index, repo) != GIT_OK || !index) {
+        return Monad::Result<LfsHydrationPlan>(QStringLiteral("Failed to read git index"));
+    }
+    std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
+
+    LfsHydrationPlan plan;
+    plan.workDir = QString::fromUtf8(workDirRaw);
+    plan.gitDirPath = QDir(QString::fromUtf8(gitDirRaw)).absolutePath();
+
+    QSet<QString> pendingOids;
+    const size_t entryCount = git_index_entrycount(index);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_index_entry* entry = git_index_get_byindex(index, i);
+        if (!entry || !entry->path) {
+            continue;
+        }
+
+        const QString relativePath = QString::fromUtf8(entry->path);
+        QFile file(QDir(plan.workDir).filePath(relativePath));
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        const QByteArray prefix = file.read(1024);
+        LfsPointer pointer;
+        if (!LfsPointer::parse(prefix, &pointer)) {
+            continue;
+        }
+        const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
+        plan.pointerFiles.push_back(PointerWorkItem{relativePath, objectPath, pointer});
+
+        if (objectPath.isEmpty() || QFileInfo::exists(objectPath) || pendingOids.contains(pointer.oid)) {
+            continue;
+        }
+
+        pendingOids.insert(pointer.oid);
+        plan.missingPointers.push_back(pointer);
+    }
+
+    return Monad::Result<LfsHydrationPlan>(plan);
+}
+
+Monad::ResultBase hydratePointerFiles(const LfsHydrationPlan& plan)
+{
+    for (const auto& item : plan.pointerFiles) {
+        if (item.objectPath.isEmpty() || !QFileInfo::exists(item.objectPath)) {
+            continue;
+        }
+
+        const QString targetPath = QDir(plan.workDir).filePath(item.relativePath);
+        QFile current(targetPath);
+        if (!current.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        const QByteArray currentPrefix = current.read(1024);
+        LfsPointer currentPointer;
+        if (!LfsPointer::parse(currentPrefix, &currentPointer)
+            || currentPointer.oid != item.pointer.oid
+            || currentPointer.size != item.pointer.size) {
+            continue;
+        }
+        current.close();
+        const QFile::Permissions existingPermissions = QFileInfo(targetPath).permissions();
+
+        if (QFileInfo::exists(targetPath) && !QFile::remove(targetPath)) {
+            return Monad::ResultBase(QStringLiteral("Failed to replace LFS pointer file: %1").arg(item.relativePath));
+        }
+
+        if (!QFile::copy(item.objectPath, targetPath)) {
+            return Monad::ResultBase(QStringLiteral("Failed to hydrate LFS file from object store: %1").arg(item.relativePath));
+        }
+
+        if (!QFile::setPermissions(targetPath, existingPermissions)) {
+            return Monad::ResultBase(QStringLiteral("Failed to restore LFS file permissions: %1").arg(item.relativePath));
+        }
+    }
+
+    return Monad::ResultBase();
+}
+
+GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, QObject* context)
+{
+    if (plan.pointerFiles.isEmpty()) {
+        return AsyncFuture::completed(Monad::ResultBase());
+    }
+
+    auto store = std::make_shared<LfsStore>(plan.gitDirPath, LfsPolicy());
+    if (plan.missingPointers.isEmpty()) {
+        return AsyncFuture::completed(hydratePointerFiles(plan));
+    }
+
+    auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
+    deferred.reportStarted();
+
+    auto pointers = std::make_shared<QVector<LfsPointer>>(plan.missingPointers);
+    auto nextIndex = std::make_shared<int>(0);
+    auto step = std::make_shared<std::function<void()>>();
+
+    *step = [deferred, context, store, plan, pointers, nextIndex, step]() mutable {
+        if (*nextIndex >= pointers->size()) {
+            deferred.complete(hydratePointerFiles(plan));
+            return;
+        }
+
+        const LfsPointer pointer = pointers->at(*nextIndex);
+        (*nextIndex)++;
+        qDebug() << "[LFS-HYDRATE] fetching missing oid:" << pointer.oid << "size:" << pointer.size;
+        auto fetchFuture = store->fetchObject(pointer);
+        AsyncFuture::observe(fetchFuture)
+            .context(context, [deferred, step, fetchFuture]() mutable {
+                const auto result = fetchFuture.result();
+                if (result.hasError()) {
+                    qDebug() << "[LFS-HYDRATE] fetch failed error:" << result.errorMessage()
+                             << "code:" << result.errorCode();
+                    deferred.complete(Monad::ResultBase(result.errorMessage(), result.errorCode()));
+                    return;
+                }
+                (*step)();
+            });
+    };
+
+    (*step)();
+    return deferred.future();
 }
 }
 
@@ -1011,7 +1164,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         QVector<git_annotated_commit*> commits;
         commits.reserve(refSpecs.size());
 
-        for(auto ref_ish : refSpecs) {
+        for(const auto& ref_ish : refSpecs) {
             auto commit = d->toAnnotatedCommit(ref_ish);
             if(commit) {
                 commits.append(d->toAnnotatedCommit(ref_ish));
@@ -1386,27 +1539,105 @@ bool GitRepository::remoteBranchExists(const QString &refSpec) const
     return commit != nullptr;
 }
 
-void GitRepository::checkout(const QString &refSpec)
+GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, CheckoutMode mode)
 {
-    git_object* object;
-    check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
+    return progressFuture<ResultBase>(
+        [=](QFutureInterface<ResultBase>)
+        {
+            auto path = d->mDirectory.absolutePath().toLocal8Bit();
+            auto localRefSpec = refSpec.toLocal8Bit();
 
-    auto id = git_object_id(object);
-    d->checkout(id, refSpec);
+            auto prepareFuture = QtConcurrent::run([=]() mutable {
+                return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    auto repo = makeScopedPtr(git_repository_free);
+                    check(git_repository_open(&repo, path));
 
-    git_object_free(object);
+                    git_object* object = nullptr;
+                    check(git_revparse_single(&object, repo, localRefSpec.constData()));
+
+                    git_checkout_options checkoutOptions = GIT_CHECKOUT_OPTIONS_INIT;
+                    checkoutOptions.checkout_strategy = mode == CheckoutMode::Force
+                                                            ? GIT_CHECKOUT_FORCE
+                                                            : GIT_CHECKOUT_SAFE;
+                    check(git_checkout_tree(repo, object, &checkoutOptions));
+
+                    git_reference* resolvedRef = nullptr;
+                    if (git_reference_dwim(&resolvedRef, repo, localRefSpec.constData()) == GIT_OK && resolvedRef) {
+                        check(git_repository_set_head(repo, git_reference_name(resolvedRef)));
+                        git_reference_free(resolvedRef);
+                    } else {
+                        check(git_repository_set_head_detached(repo, git_object_id(object)));
+                    }
+
+                    git_object_free(object);
+                    return buildLfsHydrationPlan(repo);
+                });
+            });
+
+            return AsyncFuture::observe(prepareFuture)
+                .context(this, [=]() {
+                    const auto prepareResult = prepareFuture.result();
+                    if (prepareResult.hasError()) {
+                        return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
+                    }
+                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                }).future();
+        });
 }
 
-void GitRepository::resetHard(const QString &refSpec)
+GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode mode)
 {
-    git_object* object = nullptr;
-    check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
+    return progressFuture<ResultBase>(
+        [=](QFutureInterface<ResultBase>)
+        {
+            auto path = d->mDirectory.absolutePath().toLocal8Bit();
+            auto localRefSpec = refSpec.toLocal8Bit();
 
-    git_checkout_options checkoutOptions = GIT_CHECKOUT_OPTIONS_INIT;
-    checkoutOptions.checkout_strategy = GIT_CHECKOUT_FORCE;
-    check(git_reset(d->repo, object, GIT_RESET_HARD, &checkoutOptions));
+            auto prepareFuture = QtConcurrent::run([=]() mutable {
+                return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    auto repo = makeScopedPtr(git_repository_free);
+                    check(git_repository_open(&repo, path));
 
-    git_object_free(object);
+                    git_object* object = nullptr;
+                    check(git_revparse_single(&object, repo, localRefSpec.constData()));
+
+                    git_reset_t resetType = GIT_RESET_HARD;
+                    git_checkout_options checkoutOptions = GIT_CHECKOUT_OPTIONS_INIT;
+                    git_checkout_options* checkoutOptionsPtr = nullptr;
+
+                    switch (mode) {
+                    case ResetMode::Soft:
+                        resetType = GIT_RESET_SOFT;
+                        break;
+                    case ResetMode::Mixed:
+                        resetType = GIT_RESET_MIXED;
+                        break;
+                    case ResetMode::Hard:
+                        resetType = GIT_RESET_HARD;
+                        checkoutOptions.checkout_strategy = GIT_CHECKOUT_FORCE;
+                        checkoutOptionsPtr = &checkoutOptions;
+                        break;
+                    }
+
+                    check(git_reset(repo, object, resetType, checkoutOptionsPtr));
+                    git_object_free(object);
+
+                    if (mode != ResetMode::Hard) {
+                        return Monad::Result<LfsHydrationPlan>(LfsHydrationPlan{});
+                    }
+                    return buildLfsHydrationPlan(repo);
+                });
+            });
+
+            return AsyncFuture::observe(prepareFuture)
+                .context(this, [=]() {
+                    const auto prepareResult = prepareFuture.result();
+                    if (prepareResult.hasError()) {
+                        return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
+                    }
+                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                }).future();
+        });
 }
 
 

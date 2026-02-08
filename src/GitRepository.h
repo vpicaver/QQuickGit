@@ -33,6 +33,19 @@ class GitRepository : public QObject
     Q_PROPERTY(QVector<GitRemoteInfo> remotes READ remotes NOTIFY remotesChanged)
 
 public:
+    enum class CheckoutMode {
+        Safe,
+        Force
+    };
+    Q_ENUM(CheckoutMode)
+
+    enum class ResetMode {
+        Soft,
+        Mixed,
+        Hard
+    };
+    Q_ENUM(ResetMode)
+
     class MergeResult {
         friend GitRepository;
 
@@ -104,8 +117,10 @@ public:
 
     bool remoteBranchExists(const QString& refSpec) const;
 
-    void checkout(const QString& refSpec);
-    void resetHard(const QString& refSpec);
+    Q_INVOKABLE GitFuture checkout(const QString& refSpec,
+                                   CheckoutMode mode = CheckoutMode::Safe);
+    Q_INVOKABLE GitFuture reset(const QString& refSpec,
+                                ResetMode mode = ResetMode::Hard);
 
     QString headBranchName() const;
 

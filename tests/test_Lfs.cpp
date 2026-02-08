@@ -8,10 +8,16 @@
 // Our includes
 #include "GitRepository.h"
 #include "Account.h"
+#include "LfsAuthProvider.h"
+#include "LfsBatchClient.h"
 #include "LfsStore.h"
+#include "asyncfuture.h"
 
 // Qt includes
 #include <QDir>
+#include <QDirIterator>
+#include <QDateTime>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -151,6 +157,252 @@ QByteArray createPngFile(const QString& path, const QColor& color)
         return QByteArray();
     }
     return readFileBytes(path);
+}
+
+bool hasOwnerExecutePermission(const QString& path)
+{
+    return QFileInfo(path).permissions().testFlag(QFileDevice::ExeOwner);
+}
+
+QString permissionDebug(QFile::Permissions perms)
+{
+    return QStringLiteral("qtPerms=0x%1 ownerExec=%3 ")
+        .arg(QString::number(static_cast<uint>(perms), 16))
+        .arg(perms.testFlag(QFileDevice::ExeOwner));
+}
+
+QString permissionDebugString(const QString& path)
+{
+    QFileInfo info(path);
+    const QFile::Permissions perms = info.permissions();
+
+    return permissionDebug(perms);
+}
+
+bool findFirstLfsPointerInRepo(const QString& repoPath, LfsPointer* pointerOut, QString* relativePathOut)
+{
+    if (!pointerOut) {
+        return false;
+    }
+
+    QDirIterator it(repoPath, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString filePath = it.next();
+        if (filePath.contains(QStringLiteral("/.git/"))) {
+            continue;
+        }
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        const QByteArray data = file.read(1024);
+        if (data.isEmpty()) {
+            continue;
+        }
+
+        LfsPointer pointer;
+        if (LfsPointer::parse(data, &pointer)) {
+            *pointerOut = pointer;
+            if (relativePathOut) {
+                *relativePathOut = QDir(repoPath).relativeFilePath(filePath);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool findLfsPointerByOidInRepo(const QString& repoPath,
+                               const QString& oid,
+                               LfsPointer* pointerOut,
+                               QString* relativePathOut)
+{
+    if (!pointerOut || oid.isEmpty()) {
+        return false;
+    }
+
+    QDirIterator it(repoPath, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString filePath = it.next();
+        if (filePath.contains(QStringLiteral("/.git/"))) {
+            continue;
+        }
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        const QByteArray data = file.read(1024);
+        if (data.isEmpty()) {
+            continue;
+        }
+
+        LfsPointer pointer;
+        if (!LfsPointer::parse(data, &pointer)) {
+            continue;
+        }
+
+        if (pointer.oid == oid) {
+            *pointerOut = pointer;
+            if (relativePathOut) {
+                *relativePathOut = QDir(repoPath).relativeFilePath(filePath);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+QString gitDirPathFromWorkTree(const QString& workTreePath)
+{
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, workTreePath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        return QString();
+    }
+
+    const char* gitPath = git_repository_path(repo);
+    const QString result = gitPath ? QDir(QString::fromUtf8(gitPath)).absolutePath() : QString();
+    git_repository_free(repo);
+    return result;
+}
+
+void requireGitFutureSuccess(QFuture<Monad::ResultBase> future, int timeoutMs = 60 * 1000)
+{
+    REQUIRE(AsyncFuture::waitForFinished(future, timeoutMs));
+    INFO("Git future error:" << future.result().errorMessage().toStdString()
+         << "code:" << future.result().errorCode());
+    REQUIRE(!future.result().hasError());
+}
+
+QString envOrDefault(const char* key, const QString& fallback)
+{
+    const QByteArray value = qgetenv(key);
+    if (value.isEmpty()) {
+        return fallback;
+    }
+    return QString::fromUtf8(value);
+}
+
+QString lfsTestRepoUrl()
+{
+    return envOrDefault("QQGIT_LFS_TEST_REPO_URL",
+                        QStringLiteral("https://github.com/vpicaver/lfs-test.git"));
+}
+
+QString lfsAuthEndpoint()
+{
+    return envOrDefault("QQGIT_LFS_TEST_AUTH_LFS_URL", QString());
+}
+
+QString lfsAuthUsername()
+{
+    return envOrDefault("QQGIT_LFS_TEST_AUTH_USERNAME", QString());
+}
+
+QString lfsAuthToken()
+{
+    return envOrDefault("QQGIT_LFS_TEST_AUTH_TOKEN", QString());
+}
+
+QStringList missingUploadAuthEnvVars()
+{
+    QStringList missing;
+    if (lfsAuthEndpoint().isEmpty()) {
+        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_LFS_URL (e.g. https://github.com/vpicaver/lfs-test.git/info/lfs)");
+    }
+    if (lfsAuthUsername().isEmpty()) {
+        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_USERNAME (e.g. vpicaver)");
+    }
+    if (lfsAuthToken().isEmpty()) {
+        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_TOKEN (e.g. github_pat_xxx)");
+    }
+    return missing;
+}
+
+QByteArray basicAuthHeader(const QString& username, const QString& token)
+{
+    if (username.isEmpty() || token.isEmpty()) {
+        return QByteArray();
+    }
+    const QByteArray credentials = (username + ":" + token).toUtf8().toBase64();
+    return QByteArray("Basic ") + credentials;
+}
+
+class StaticLfsAuthProvider : public LfsAuthProvider
+{
+public:
+    explicit StaticLfsAuthProvider(QByteArray header)
+        : mHeader(std::move(header))
+    {
+    }
+
+    QByteArray authorizationHeader(const QUrl&) const override
+    {
+        return mHeader;
+    }
+
+private:
+    QByteArray mHeader;
+};
+
+class EnvLfsAuthProvider : public LfsAuthProvider
+{
+public:
+    EnvLfsAuthProvider(QString username, QString token)
+        : mHeader(basicAuthHeader(username, token))
+    {
+    }
+
+    QByteArray authorizationHeader(const QUrl&) const override
+    {
+        return mHeader;
+    }
+
+private:
+    QByteArray mHeader;
+};
+
+class ScopedLfsAuthProvider
+{
+public:
+    explicit ScopedLfsAuthProvider(std::shared_ptr<LfsAuthProvider> provider)
+        : mPrevious(LfsBatchClient::lfsAuthProvider())
+    {
+        LfsBatchClient::setLfsAuthProvider(std::move(provider));
+    }
+
+    ~ScopedLfsAuthProvider()
+    {
+        LfsBatchClient::setLfsAuthProvider(mPrevious);
+    }
+
+private:
+    std::shared_ptr<LfsAuthProvider> mPrevious;
+};
+
+bool setGitConfigString(const QString& workTreePath, const char* key, const QString& value)
+{
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, workTreePath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        return false;
+    }
+
+    git_config* config = nullptr;
+    const int configResult = git_repository_config(&config, repo);
+    if (configResult != GIT_OK || !config) {
+        git_repository_free(repo);
+        return false;
+    }
+
+    const int setResult = git_config_set_string(config, key, value.toUtf8().constData());
+    git_config_free(config);
+    git_repository_free(repo);
+    return setResult == GIT_OK;
 }
 
 struct CountingWriteStream {
@@ -402,7 +654,7 @@ TEST_CASE("Lfs commit via GitRepository stores pointer and checkout restores PNG
     file.write("corrupt");
     file.close();
 
-    REQUIRE_NOTHROW(repository.resetHard(QStringLiteral("HEAD")));
+    requireGitFutureSuccess(repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
     CHECK(readFileBytes(imagePath) == workingTreeBytes);
     repository.checkStatus();
     CHECK(repository.modifiedFileCount() == 0);
@@ -456,16 +708,76 @@ TEST_CASE("Lfs commits keep working tree PNG for multiple commits", "[LFS]") {
 
     repository.createBranch(QStringLiteral("check"), QStringLiteral("HEAD"), false);
 
-    REQUIRE_NOTHROW(repository.resetHard(redCommit));
+    requireGitFutureSuccess(repository.reset(redCommit, GitRepository::ResetMode::Hard));
     CHECK(readFileBytes(imagePath) == redBytes);
 
-    REQUIRE_NOTHROW(repository.resetHard(greenCommit));
+    requireGitFutureSuccess(repository.reset(greenCommit, GitRepository::ResetMode::Hard));
     CHECK(readFileBytes(imagePath) == greenBytes);
 
-    REQUIRE_NOTHROW(repository.resetHard(blueCommit));
+    requireGitFutureSuccess(repository.reset(blueCommit, GitRepository::ResetMode::Hard));
     CHECK(readFileBytes(imagePath) == blueBytes);
 
     git_repository_free(repo);
+}
+
+TEST_CASE("Lfs hydration preserves executable bit after reset", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    repository.setAccount(&account);
+
+    const QString imageFileName = QStringLiteral("exec.png");
+    const QString imagePath = repoDir.filePath(imageFileName);
+    const QByteArray workingTreeBytes = createPngFile(imagePath, Qt::red);
+    REQUIRE(!workingTreeBytes.isEmpty());
+
+    QFile::Permissions permissions = QFileInfo(imagePath).permissions();
+    permissions |= QFileDevice::ExeOwner;
+    REQUIRE(QFile::setPermissions(imagePath, permissions));
+    INFO(permissionDebugString(imagePath).toStdString());
+    REQUIRE(hasOwnerExecutePermission(imagePath));
+
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add executable png"), QStringLiteral("LFS exec")));
+
+    QFile file(imagePath);
+    REQUIRE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    REQUIRE(file.write("corrupt") == 7);
+    file.close();
+
+    QFile::Permissions qtPermissionsBeforeClear = QFileInfo(imagePath).permissions();
+    QFile::Permissions qtPermissionsAfterClear = qtPermissionsBeforeClear;
+    qtPermissionsAfterClear &= ~QFileDevice::ExeOwner;
+    qtPermissionsAfterClear &= ~QFileDevice::ExeUser;
+    qtPermissionsAfterClear &= ~QFileDevice::ExeGroup;
+    qtPermissionsAfterClear &= ~QFileDevice::ExeOther;
+    INFO(QStringLiteral("Qt perms clear attempt before=0x%1 after=0x%2")
+             .arg(QString::number(static_cast<uint>(qtPermissionsBeforeClear), 16))
+             .arg(QString::number(static_cast<uint>(qtPermissionsAfterClear), 16))
+             .toStdString());
+    REQUIRE(QFile::setPermissions(imagePath, qtPermissionsAfterClear));
+    INFO(permissionDebugString(imagePath).toStdString());
+
+    QString chmodError;
+    // REQUIRE(clearExecuteBits(imagePath, &chmodError));
+    INFO(chmodError.toStdString());
+    INFO(permissionDebugString(imagePath).toStdString());
+    REQUIRE(!hasOwnerExecutePermission(imagePath));
+
+    requireGitFutureSuccess(repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+    INFO(permissionDebugString(imagePath).toStdString());
+    CHECK(readFileBytes(imagePath) == workingTreeBytes);
+    CHECK(hasOwnerExecutePermission(imagePath));
+    repository.checkStatus();
+    CHECK(repository.modifiedFileCount() == 0);
 }
 
 TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
@@ -535,7 +847,7 @@ TEST_CASE("GitRepository resetHard discards local changes", "[GitRepository]") {
     REQUIRE(writeTextFile(filePath, QByteArray("modified\n")));
     CHECK(readFileBytes(filePath) == QByteArray("modified\n"));
 
-    REQUIRE_NOTHROW(repository.resetHard(QStringLiteral("HEAD")));
+    requireGitFutureSuccess(repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
     CHECK(readFileBytes(filePath) == QByteArray("original\n"));
 
     repository.checkStatus();
@@ -719,4 +1031,280 @@ TEST_CASE("Lfs smudge streams non-pointer file without buffering", "[LFS]") {
     sink->parent.free(&sink->parent);
     git_filter_list_free(smudgeFilters);
     git_repository_free(repo);
+}
+
+TEST_CASE("LfsBatchClient batch and download against GitHub", "[LFS][network]") {
+    const QString expectedOid = QStringLiteral("181a7d98e96a130662d153a385ead3976d304acc5f3ad905d34e4fe870535243");
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-test"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(lfsTestRepoUrl()));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    LfsPointer pointer;
+    QString pointerPath;
+    REQUIRE(findLfsPointerByOidInRepo(repoPath, expectedOid, &pointer, &pointerPath));
+    INFO("Pointer path:" << pointerPath.toStdString());
+
+    const QString gitDirPath = gitDirPathFromWorkTree(repoPath);
+    REQUIRE(!gitDirPath.isEmpty());
+
+    LfsBatchClient client(gitDirPath);
+    LfsStore store(gitDirPath);
+    const LfsBatchClient::ObjectSpec spec{pointer.oid, pointer.size};
+
+    auto batchFuture = client.batch(QStringLiteral("download"), {spec});
+    REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
+    INFO("Batch error:" << batchFuture.result().errorMessage().toStdString());
+    REQUIRE(!batchFuture.result().hasError());
+
+    const auto response = batchFuture.result().value();
+    const LfsBatchClient::ObjectResponse* objectResponse = nullptr;
+    for (const auto& object : response.objects) {
+        if (object.oid == pointer.oid) {
+            objectResponse = &object;
+            break;
+        }
+    }
+    REQUIRE(objectResponse != nullptr);
+    REQUIRE(objectResponse->errorMessage.isEmpty());
+    REQUIRE(objectResponse->actions.contains(QStringLiteral("download")));
+
+    const auto downloadAction = objectResponse->actions.value(QStringLiteral("download"));
+    auto downloadFuture = client.downloadObject(downloadAction, store, pointer);
+    REQUIRE(AsyncFuture::waitForFinished(downloadFuture, 60 * 1000));
+    INFO("Download error:" << downloadFuture.result().errorMessage().toStdString());
+    REQUIRE(!downloadFuture.result().hasError());
+
+    auto readResult = store.readObject(pointer.oid);
+    INFO("Read error:" << readResult.errorMessage().toStdString());
+    REQUIRE(!readResult.hasError());
+    CHECK(readResult.value().size() == pointer.size);
+    const QString downloadedSha256 =
+        QString::fromLatin1(QCryptographicHash::hash(readResult.value(), QCryptographicHash::Sha256).toHex());
+    CHECK(downloadedSha256 == expectedOid);
+}
+
+TEST_CASE("LfsBatchClient uploadObject validates inputs before network", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    LfsBatchClient client(gitDirPath);
+
+    {
+        LfsBatchClient::Action action;
+        const QString missingPath = QDir(tempDir.path()).filePath(QStringLiteral("missing-object"));
+        LfsPointer pointer;
+        pointer.oid = QStringLiteral("oid");
+        pointer.size = 1;
+
+        auto future = client.uploadObject(action, missingPath, pointer);
+        REQUIRE(AsyncFuture::waitForFinished(future, 1000));
+        REQUIRE(future.result().hasError());
+        CHECK(future.result().errorCode() == static_cast<int>(LfsFetchErrorCode::Protocol));
+    }
+
+    {
+        const QString objectPath = QDir(tempDir.path()).filePath(QStringLiteral("object.bin"));
+        REQUIRE(writeTextFile(objectPath, QByteArray("abc")));
+
+        LfsBatchClient::Action action;
+        action.href = QUrl(QStringLiteral("https://github.com/vpicaver/lfs-test.git/info/lfs/objects"));
+
+        LfsPointer pointer;
+        pointer.oid = QStringLiteral("oid");
+        pointer.size = 5;
+
+        auto future = client.uploadObject(action, objectPath, pointer);
+        REQUIRE(AsyncFuture::waitForFinished(future, 1000));
+        REQUIRE(future.result().hasError());
+        CHECK(future.result().errorCode() == static_cast<int>(LfsFetchErrorCode::Protocol));
+    }
+
+    git_repository_free(repo);
+}
+
+TEST_CASE("LfsBatchClient can install LfsAuthProvider", "[LFS]") {
+    const auto previous = LfsBatchClient::lfsAuthProvider();
+    auto provider = std::make_shared<StaticLfsAuthProvider>(QByteArrayLiteral("Bearer test-token"));
+
+    LfsBatchClient::setLfsAuthProvider(provider);
+    CHECK(LfsBatchClient::lfsAuthProvider() == provider);
+
+    LfsBatchClient::setLfsAuthProvider(previous);
+}
+
+TEST_CASE("LfsStore fetchObject keeps working when caller releases store early", "[LFS][network]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-test"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(lfsTestRepoUrl()));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    LfsPointer pointer;
+    REQUIRE(findFirstLfsPointerInRepo(repoPath, &pointer, nullptr));
+
+    const QString gitDirPath = gitDirPathFromWorkTree(repoPath);
+    REQUIRE(!gitDirPath.isEmpty());
+
+    std::shared_ptr<LfsStore> store = std::make_shared<LfsStore>(gitDirPath, LfsPolicy());
+    auto fetchFuture = store->fetchObject(pointer);
+    store.reset();
+
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 60 * 1000));
+
+    REQUIRE(fetchFuture.isCanceled());
+
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    CHECK(!QFile::exists(objectPath));
+}
+
+TEST_CASE("Lfs checkout populates working-tree bytes for known pointer", "[LFS][network]") {
+    const QString expectedOid = QStringLiteral("181a7d98e96a130662d153a385ead3976d304acc5f3ad905d34e4fe870535243");
+    QTemporaryDir tempDir;
+    tempDir.setAutoRemove(false);
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-test-checkout"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(lfsTestRepoUrl()));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    LfsPointer pointer;
+    QString pointerPath;
+    REQUIRE(findLfsPointerByOidInRepo(repoPath, expectedOid, &pointer, &pointerPath));
+    INFO("Pointer path:" << pointerPath.toStdString());
+
+    requireGitFutureSuccess(repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+
+    const QString workingFilePath = QDir(repoPath).filePath(pointerPath);
+    const QByteArray workingBytes = readFileBytes(workingFilePath);
+    REQUIRE(!workingBytes.isEmpty());
+    CHECK(workingBytes.size() == pointer.size);
+
+    LfsPointer parsedPointer;
+    CHECK(!LfsPointer::parse(workingBytes, &parsedPointer));
+
+    const QString workingSha256 =
+        QString::fromLatin1(QCryptographicHash::hash(workingBytes, QCryptographicHash::Sha256).toHex());
+    CHECK(workingSha256.toStdString() == expectedOid.toStdString());
+}
+
+TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS][network][upload]") {
+    const QStringList missingEnv = missingUploadAuthEnvVars();
+    if (!missingEnv.isEmpty()) {
+        const QString skipMessage =
+            QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
+        SKIP(skipMessage.toStdString());
+    }
+    const QString authLfsUrl = lfsAuthEndpoint();
+    const QString username = lfsAuthUsername();
+    const QString token = lfsAuthToken();
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-test-upload"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(lfsTestRepoUrl()));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    ScopedLfsAuthProvider authProvider(std::make_shared<EnvLfsAuthProvider>(username, token));
+
+    REQUIRE(setGitConfigString(repoPath, "lfs.url", authLfsUrl));
+
+    const QString gitDirPath = gitDirPathFromWorkTree(repoPath);
+    REQUIRE(!gitDirPath.isEmpty());
+
+    LfsBatchClient client(gitDirPath);
+    LfsStore store(gitDirPath);
+
+    const QByteArray payload = QByteArray("qquickgit-lfs-upload-")
+                               + QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+    auto pointerResult = store.storeBytes(payload);
+    REQUIRE(!pointerResult.hasError());
+    const LfsPointer pointer = pointerResult.value();
+
+    const LfsBatchClient::ObjectSpec spec{pointer.oid, pointer.size};
+    auto batchFuture = client.batch(QStringLiteral("upload"), {spec});
+    REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
+    INFO("Upload batch error:" << batchFuture.result().errorMessage().toStdString());
+    REQUIRE(!batchFuture.result().hasError());
+
+    const auto response = batchFuture.result().value();
+    REQUIRE(!response.objects.isEmpty());
+    const auto& object = response.objects.first();
+    INFO("Upload object error:" << object.errorMessage.toStdString());
+    INFO("Upload object error code:" << object.errorCode);
+    INFO("Upload object actions:" << object.actions.keys().join(QStringLiteral(", ")).toStdString());
+    REQUIRE(object.errorMessage.isEmpty());
+
+    if (object.actions.contains(QStringLiteral("upload"))) {
+        auto uploadFuture = client.uploadObject(object.actions.value(QStringLiteral("upload")),
+                                                LfsStore::objectPath(gitDirPath, pointer.oid),
+                                                pointer);
+        REQUIRE(AsyncFuture::waitForFinished(uploadFuture, 60 * 1000));
+        INFO("Upload error:" << uploadFuture.result().errorMessage().toStdString());
+        REQUIRE(!uploadFuture.result().hasError());
+    }
+
+    if (object.actions.contains(QStringLiteral("verify"))) {
+        auto verifyFuture = client.verifyObject(object.actions.value(QStringLiteral("verify")), pointer);
+        REQUIRE(AsyncFuture::waitForFinished(verifyFuture, 60 * 1000));
+        INFO("Verify error:" << verifyFuture.result().errorMessage().toStdString());
+        REQUIRE(!verifyFuture.result().hasError());
+    }
+
+    auto downloadBatchFuture = client.batch(QStringLiteral("download"), {spec});
+    REQUIRE(AsyncFuture::waitForFinished(downloadBatchFuture, 60 * 1000));
+    INFO("Download batch error:" << downloadBatchFuture.result().errorMessage().toStdString());
+    REQUIRE(!downloadBatchFuture.result().hasError());
+
+    const auto downloadResponse = downloadBatchFuture.result().value();
+    REQUIRE(!downloadResponse.objects.isEmpty());
+    const auto& downloadObject = downloadResponse.objects.first();
+    INFO("Download object error:" << downloadObject.errorMessage.toStdString());
+    INFO("Download object error code:" << downloadObject.errorCode);
+    INFO("Download object actions:" << downloadObject.actions.keys().join(QStringLiteral(", ")).toStdString());
+    REQUIRE(downloadObject.errorMessage.isEmpty());
+    REQUIRE(downloadObject.actions.contains(QStringLiteral("download")));
+
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    REQUIRE(QFile::remove(objectPath));
+
+    auto downloadFuture = client.downloadObject(downloadObject.actions.value(QStringLiteral("download")),
+                                                store,
+                                                pointer);
+    REQUIRE(AsyncFuture::waitForFinished(downloadFuture, 60 * 1000));
+    INFO("Download error:" << downloadFuture.result().errorMessage().toStdString());
+    REQUIRE(!downloadFuture.result().hasError());
+
+    auto readResult = store.readObject(pointer.oid);
+    REQUIRE(!readResult.hasError());
+    CHECK(readResult.value() == payload);
 }

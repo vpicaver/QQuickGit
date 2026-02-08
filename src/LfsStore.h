@@ -2,6 +2,8 @@
 #define LFSSTORE_H
 
 #include <QByteArray>
+#include <QFuture>
+#include <QObject>
 #include <QString>
 
 #include <memory>
@@ -13,6 +15,8 @@
 
 namespace QQuickGit {
 
+class LfsBatchClient;
+
 struct LfsPointer {
     QString oid;
     qint64 size = 0;
@@ -20,6 +24,15 @@ struct LfsPointer {
     bool isValid() const;
     QByteArray toPointerText() const;
     static bool parse(const QByteArray& data, LfsPointer* outPointer);
+};
+
+enum class LfsFetchErrorCode {
+    NoRemote = Monad::ResultBase::CustomError + 200,
+    Offline,
+    Auth,
+    NotFound,
+    Protocol,
+    Transfer
 };
 
 class LfsStore
@@ -40,6 +53,10 @@ public:
 
     Monad::Result<QByteArray> readObject(const QString& oid) const;
 
+    QFuture<Monad::ResultBase> fetchObject(const LfsPointer& pointer, const QString& remoteName = QString()) const;
+    static bool shouldFallbackForFetchError(int errorCode);
+    QObject* lfsContext() const;
+
     static QString objectPath(const QString& gitDirPath, const QString& oid);
 
     class StreamWriter {
@@ -50,6 +67,7 @@ public:
         bool isValid() const;
         Monad::ResultBase write(const char* data, size_t len);
         Monad::Result<LfsPointer> finalize();
+        void discard();
 
     private:
         QString mGitDirPath;
@@ -62,8 +80,11 @@ public:
     Monad::Result<StreamWriter> beginStore(qint64 sizeHint = -1) const;
 
 private:
+    std::shared_ptr<LfsBatchClient> batchClient() const;
+
     QString mGitDirPath;
     LfsPolicy mPolicy;
+    mutable std::shared_ptr<LfsBatchClient> mBatchClient;
 };
 
 class LfsStoreRegistry

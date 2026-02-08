@@ -38,6 +38,12 @@ auto waitForClone(QFuture<ResultBase> future, int timeout = defaultTimeout) {
     CHECK(!future.result().hasError());
 }
 
+auto waitForGitFuture(QFuture<ResultBase> future, int timeout = defaultTimeout) {
+    REQUIRE(AsyncFuture::waitForFinished(future, timeout));
+    INFO("Git error:" << future.result().errorMessage().toStdString() << "code:" << future.result().errorCode());
+    CHECK(!future.result().hasError());
+}
+
 TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
     QDir cloneDir("clone-test");
 
@@ -595,7 +601,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         CHECK_NOTHROW(repo.commitAll("test1", "2 test commit"));
 
         SECTION("Fast forward") {
-            CHECK_NOTHROW(repo.checkout("refs/heads/master"));
+            waitForGitFuture(repo.checkout("refs/heads/master"));
             CHECK(repo.headBranchName().toStdString() == "master");
 
             GitRepository::MergeResult result;
@@ -605,7 +611,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         }
 
         SECTION("Simple merge, no conflicts") {
-            CHECK_NOTHROW(repo.checkout("refs/heads/master"));
+            waitForGitFuture(repo.checkout("refs/heads/master"));
             CHECK(repo.headBranchName().toStdString() == "master");
 
             {
@@ -631,7 +637,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
             repo.commitAll("test2", "3 test commit");
 
-            CHECK_NOTHROW(repo.checkout("refs/heads/master"));
+            waitForGitFuture(repo.checkout("refs/heads/master"));
             CHECK(repo.headBranchName().toStdString() == "master");
 
             {

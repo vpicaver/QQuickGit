@@ -1,7 +1,11 @@
 #include "LfsStore.h"
+#include "LfsBatchClient.h"
+
+#include "asyncfuture.h"
 
 #include <QCryptographicHash>
 #include <QByteArrayView>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,6 +14,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QUuid>
+#include <QDebug>
 #include <algorithm>
 
 namespace {
@@ -167,6 +172,16 @@ Monad::Result<LfsPointer> LfsStore::StreamWriter::finalize()
     pointer.oid = oid;
     pointer.size = mSize;
     return Monad::Result<LfsPointer>(pointer);
+}
+
+void LfsStore::StreamWriter::discard()
+{
+    if (mFile && mFile->isOpen()) {
+        mFile->close();
+    }
+    if (!mTempPath.isEmpty()) {
+        QFile::remove(mTempPath);
+    }
 }
 
 Monad::Result<LfsStore::StreamWriter> LfsStore::beginStore(qint64 sizeHint) const
@@ -392,6 +407,86 @@ Monad::Result<QByteArray> LfsStore::readObject(const QString& oid) const
     }
 
     return Monad::Result<QByteArray>(file.readAll());
+}
+
+QFuture<Monad::ResultBase> LfsStore::fetchObject(const LfsPointer& pointer, const QString& remoteName) const
+{
+    if (!pointer.isValid()) {
+        return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Invalid LFS pointer"),
+                                                        static_cast<int>(LfsFetchErrorCode::Protocol)));
+    }
+
+    const LfsPointer expected = pointer;
+    LfsBatchClient::ObjectSpec spec{pointer.oid, pointer.size};
+    // Never capture `this` across async continuations. Use a dedicated store instance
+    // that stays alive for the full batch->download chain.
+    auto downloadStore = std::make_shared<LfsStore>(mGitDirPath, mPolicy);
+
+    auto client = batchClient();
+    auto batchFuture = client->batch(QStringLiteral("download"), {spec}, remoteName);
+
+    return AsyncFuture::observe(batchFuture)
+        .context(client.get(),
+                 [client, downloadStore, expected](const Monad::Result<LfsBatchClient::BatchResponse>& batchResult) {
+        if (batchResult.hasError()) {
+            return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
+        }
+
+        const auto response = batchResult.value();
+        if (response.objects.isEmpty()) {
+            return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Missing LFS batch response objects"),
+                                                            static_cast<int>(LfsFetchErrorCode::Protocol)));
+        }
+
+        const LfsBatchClient::ObjectResponse* objectResponse = nullptr;
+        for (const auto& entry : response.objects) {
+            if (entry.oid == expected.oid) {
+                objectResponse = &entry;
+                break;
+            }
+        }
+        if (!objectResponse) {
+            objectResponse = &response.objects.first();
+        }
+
+        if (!objectResponse->errorMessage.isEmpty()) {
+            const int errorCode = objectResponse->errorCode == 404
+                                      ? static_cast<int>(LfsFetchErrorCode::NotFound)
+                                      : static_cast<int>(LfsFetchErrorCode::Transfer);
+            return AsyncFuture::completed(Monad::ResultBase(objectResponse->errorMessage, errorCode));
+        }
+
+        if (!objectResponse->actions.contains(QStringLiteral("download"))) {
+            return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Missing LFS download action"),
+                                                            static_cast<int>(LfsFetchErrorCode::Protocol)));
+        }
+
+        return client->downloadObject(objectResponse->actions.value(QStringLiteral("download")), *downloadStore, expected);
+    }, []() {
+        return AsyncFuture::completed(
+            Monad::ResultBase(QStringLiteral("LFS batch request canceled"),
+                              static_cast<int>(LfsFetchErrorCode::Transfer)));
+    }).future();
+}
+
+std::shared_ptr<LfsBatchClient> LfsStore::batchClient() const
+{
+    if (!mBatchClient) {
+        mBatchClient = std::make_shared<LfsBatchClient>(mGitDirPath);
+    }
+    return mBatchClient;
+}
+
+QObject* LfsStore::lfsContext() const
+{
+    auto client = batchClient();
+    return client.get();
+}
+
+bool LfsStore::shouldFallbackForFetchError(int errorCode)
+{
+    const auto code = static_cast<LfsFetchErrorCode>(errorCode);
+    return code == LfsFetchErrorCode::NoRemote || code == LfsFetchErrorCode::Offline;
 }
 
 QString LfsStore::objectPath(const QString& gitDirPath, const QString& oid)

@@ -6,8 +6,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QDebug>
+#include <QObject>
 #include <QString>
 #include <memory>
+
+#include "asyncfuture.h"
 
 #include "git2/errors.h"
 #include "git2/repository.h"
@@ -251,7 +255,40 @@ int lfsStreamClose(git_writestream* stream)
         state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
     }
 
-    const QString objectPath = QQuickGit::LfsStore::objectPath(gitDirPath, state->pointer.oid);
+    QString objectPath = QQuickGit::LfsStore::objectPath(gitDirPath, state->pointer.oid);
+    if (objectPath.isEmpty() || !QFileInfo::exists(objectPath)) {
+        auto fetchFuture = state->store->fetchObject(state->pointer);
+        if (fetchFuture.isFinished()) {
+            const auto fetchResult = fetchFuture.result();
+            if (fetchResult.hasError()) {
+                if (!QQuickGit::LfsStore::shouldFallbackForFetchError(fetchResult.errorCode())) {
+                    const QString error = fetchResult.errorMessage();
+                    if (!error.isEmpty()) {
+                        git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
+                    }
+                    return GIT_ERROR;
+                }
+                int result = writeToNext(state->next, state->pointerBuffer);
+                if (result < 0) {
+                    return result;
+                }
+                return state->next ? state->next->close(state->next) : GIT_OK;
+            }
+            objectPath = QQuickGit::LfsStore::objectPath(gitDirPath, state->pointer.oid);
+        } else {
+            QObject* context = state->store ? state->store->lfsContext() : nullptr;
+            if (context) {
+                AsyncFuture::observe(fetchFuture)
+                    .context(context, [](const Monad::ResultBase&) {});
+            }
+            int result = writeToNext(state->next, state->pointerBuffer);
+            if (result < 0) {
+                return result;
+            }
+            return state->next ? state->next->close(state->next) : GIT_OK;
+        }
+    }
+
     if (objectPath.isEmpty() || !QFileInfo::exists(objectPath)) {
         int result = writeToNext(state->next, state->pointerBuffer);
         if (result < 0) {

@@ -30,6 +30,7 @@ find_package(Qt6
     Quick
     Test
     Concurrent
+    Network
 )
 
 qt_standard_project_setup(REQUIRES 6.8)
@@ -100,6 +101,7 @@ target_link_libraries(qquickgit
     Qt6::Quick
     Qt6::Core
     Qt6::Concurrent
+    Qt6::Network
     monad
     asyncfuture
     libgit2::libgit2
@@ -127,5 +129,4 @@ target_link_libraries(qquickgit-test
     Qt6::Test
     SignalSpyChecker
 )
-
 
