@@ -212,14 +212,15 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, Q
 
         const LfsPointer pointer = pointers->at(*nextIndex);
         (*nextIndex)++;
-        qDebug() << "[LFS-HYDRATE] fetching missing oid:" << pointer.oid << "size:" << pointer.size;
         auto fetchFuture = store->fetchObject(pointer);
         AsyncFuture::observe(fetchFuture)
             .context(context, [deferred, step, fetchFuture]() mutable {
                 const auto result = fetchFuture.result();
                 if (result.hasError()) {
-                    qDebug() << "[LFS-HYDRATE] fetch failed error:" << result.errorMessage()
-                             << "code:" << result.errorCode();
+                    if (QQuickGit::LfsStore::shouldFallbackForFetchError(result.errorCode())) {
+                        (*step)();
+                        return;
+                    }
                     deferred.complete(Monad::ResultBase(result.errorMessage(), result.errorCode()));
                     return;
                 }

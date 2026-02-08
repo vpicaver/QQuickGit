@@ -18,9 +18,15 @@
 #include <QDirIterator>
 #include <QDateTime>
 #include <QCryptographicHash>
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
 #include <QImage>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <memory>
 
@@ -166,7 +172,7 @@ bool hasOwnerExecutePermission(const QString& path)
 
 QString permissionDebug(QFile::Permissions perms)
 {
-    return QStringLiteral("qtPerms=0x%1 ownerExec=%3 ")
+    return QStringLiteral("qtPerms=0x%1 ownerExec=%2")
         .arg(QString::number(static_cast<uint>(perms), 16))
         .arg(perms.testFlag(QFileDevice::ExeOwner));
 }
@@ -178,6 +184,99 @@ QString permissionDebugString(const QString& path)
 
     return permissionDebug(perms);
 }
+
+bool configureRemoteUrl(const QString& workTreePath,
+                        const QString& remoteName,
+                        const QString& remoteUrl)
+{
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, workTreePath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        return false;
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    const QByteArray remoteNameUtf8 = remoteName.toUtf8();
+    const QByteArray remoteUrlUtf8 = remoteUrl.toUtf8();
+
+    git_remote* existingRemote = nullptr;
+    if (git_remote_lookup(&existingRemote, repo, remoteNameUtf8.constData()) == GIT_OK && existingRemote) {
+        git_remote_free(existingRemote);
+        return git_remote_set_url(repo, remoteNameUtf8.constData(), remoteUrlUtf8.constData()) == GIT_OK;
+    }
+
+    git_remote* createdRemote = nullptr;
+    const int createResult = git_remote_create(&createdRemote,
+                                               repo,
+                                               remoteNameUtf8.constData(),
+                                               remoteUrlUtf8.constData());
+    if (createdRemote) {
+        git_remote_free(createdRemote);
+    }
+    return createResult == GIT_OK;
+}
+
+class LocalLfsBatchServer
+{
+public:
+    bool start()
+    {
+        QObject::connect(&mServer, &QTcpServer::newConnection, &mServer, [this]() { handleNewConnections(); });
+        return mServer.listen(QHostAddress::LocalHost, 0);
+    }
+
+    quint16 port() const
+    {
+        return mServer.serverPort();
+    }
+
+    void setBatchResponse(const QByteArray& body)
+    {
+        mBatchResponse = body;
+    }
+
+    int batchRequestCount() const
+    {
+        return mBatchRequestCount;
+    }
+
+private:
+    void handleNewConnections()
+    {
+        while (mServer.hasPendingConnections()) {
+            QTcpSocket* socket = mServer.nextPendingConnection();
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
+                const QByteArray request = socket->readAll();
+                if (request.isEmpty()) {
+                    return;
+                }
+                const QByteArray firstLine = request.split('\n').value(0).trimmed();
+                if (firstLine.contains("/objects/batch")) {
+                    mBatchRequestCount++;
+                }
+
+                const QByteArray body = firstLine.contains("/objects/batch")
+                    ? mBatchResponse
+                    : QByteArray("{\"message\":\"not found\"}");
+                const QByteArray response =
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: application/vnd.git-lfs+json\r\n"
+                    "Connection: close\r\n"
+                    "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
+                    "\r\n" + body;
+                socket->write(response);
+                socket->flush();
+                socket->disconnectFromHost();
+            });
+            QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+        }
+    }
+
+    QTcpServer mServer;
+    QByteArray mBatchResponse = QByteArray(
+        "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"\",\"size\":0,"
+        "\"error\":{\"code\":404,\"message\":\"missing\"}}]}");
+    int mBatchRequestCount = 0;
+};
 
 bool findFirstLfsPointerInRepo(const QString& repoPath, LfsPointer* pointerOut, QString* relativePathOut)
 {
@@ -778,6 +877,127 @@ TEST_CASE("Lfs hydration preserves executable bit after reset", "[LFS]") {
     CHECK(hasOwnerExecutePermission(imagePath));
     repository.checkStatus();
     CHECK(repository.modifiedFileCount() == 0);
+}
+
+TEST_CASE("Lfs reset falls back to pointer when object is missing and no remote exists", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    repository.setAccount(&account);
+
+    const QString imagePath = repoDir.filePath(QStringLiteral("fallback.png"));
+    const QByteArray workingTreeBytes = createPngFile(imagePath, Qt::red);
+    REQUIRE(!workingTreeBytes.isEmpty());
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add fallback png"), QStringLiteral("LFS fallback")));
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    const QByteArray blobData = readBlobFromHead(repo, "fallback.png");
+    REQUIRE(!blobData.isEmpty());
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(blobData, &pointer));
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    REQUIRE(!objectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(QFile::remove(objectPath));
+
+    REQUIRE(writeTextFile(imagePath, QByteArray("dirty\n")));
+    REQUIRE(readFileBytes(imagePath) == QByteArray("dirty\n"));
+
+    auto resetFuture = repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard);
+    REQUIRE(AsyncFuture::waitForFinished(resetFuture, 60 * 1000));
+    INFO("Reset error:" << resetFuture.result().errorMessage().toStdString()
+         << "code:" << resetFuture.result().errorCode());
+
+    // Expected behavior: no-remote/offline fetch errors should fall back to pointer text.
+    CHECK(!resetFuture.result().hasError());
+
+    const QByteArray postResetBytes = readFileBytes(imagePath);
+    LfsPointer pointerAfterReset;
+    CHECK(LfsPointer::parse(postResetBytes, &pointerAfterReset));
+    CHECK(pointerAfterReset.oid == pointer.oid);
+    CHECK(pointerAfterReset.size == pointer.size);
+}
+
+TEST_CASE("Lfs reset does not issue duplicate batch fetch attempts for missing object", "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsBatchServer server;
+    REQUIRE(server.start());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    repository.setAccount(&account);
+
+    const QString imagePath = repoDir.filePath(QStringLiteral("duplicate-fetch.png"));
+    const QByteArray workingTreeBytes = createPngFile(imagePath, Qt::green);
+    REQUIRE(!workingTreeBytes.isEmpty());
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add duplicate fetch png"),
+                                         QStringLiteral("LFS duplicate fetch")));
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    const QByteArray blobData = readBlobFromHead(repo, "duplicate-fetch.png");
+    REQUIRE(!blobData.isEmpty());
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(blobData, &pointer));
+
+    const QString batchResponseBody = QStringLiteral(
+        "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
+        "\"error\":{\"code\":404,\"message\":\"missing\"}}]}")
+        .arg(pointer.oid)
+        .arg(pointer.size);
+    server.setBatchResponse(batchResponseBody.toUtf8());
+
+    const QString remoteUrl = QStringLiteral("http://127.0.0.1:%1/test.git").arg(server.port());
+    REQUIRE(configureRemoteUrl(repoDir.absolutePath(), QStringLiteral("origin"), remoteUrl));
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    REQUIRE(!objectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(QFile::remove(objectPath));
+
+    REQUIRE(writeTextFile(imagePath, QByteArray("dirty\n")));
+
+    auto resetFuture = repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard);
+    REQUIRE(AsyncFuture::waitForFinished(resetFuture, 60 * 1000));
+    INFO("Reset error:" << resetFuture.result().errorMessage().toStdString()
+         << "code:" << resetFuture.result().errorCode());
+
+    QElapsedTimer settle;
+    settle.start();
+    while (settle.elapsed() < 1500) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+
+    // Fixed behavior: smudge does not start background network fetches.
+    CHECK(server.batchRequestCount() == 1);
 }
 
 TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
