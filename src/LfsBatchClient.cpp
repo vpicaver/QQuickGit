@@ -96,7 +96,19 @@ bool scopeMatchesUrl(const QString& scopeRaw,
     const QUrl scopedUrl(scope);
     if (scopedUrl.isValid() && !scopedUrl.scheme().isEmpty() && !scopedUrl.host().isEmpty()) {
         const QString scopedCanonical = canonicalHttpMatchUrl(scopedUrl);
-        if (targetCanonical.startsWith(scopedCanonical, Qt::CaseInsensitive)) {
+        const int targetPathIndex = targetCanonical.indexOf('/', targetCanonical.indexOf(QStringLiteral("://")) + 3);
+        const int scopedPathIndex = scopedCanonical.indexOf('/', scopedCanonical.indexOf(QStringLiteral("://")) + 3);
+        if (targetPathIndex <= 0 || scopedPathIndex <= 0) {
+            return false;
+        }
+
+        const QString targetAuthority = targetCanonical.left(targetPathIndex);
+        const QString scopedAuthority = scopedCanonical.left(scopedPathIndex);
+        const QString targetPath = targetCanonical.mid(targetPathIndex);
+        const QString scopedPath = scopedCanonical.mid(scopedPathIndex);
+
+        if (targetAuthority.compare(scopedAuthority, Qt::CaseInsensitive) == 0
+            && targetPath.startsWith(scopedPath, Qt::CaseSensitive)) {
             if (scopeLengthOut) {
                 *scopeLengthOut = scopedCanonical.size();
             }

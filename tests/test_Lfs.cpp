@@ -1272,6 +1272,47 @@ TEST_CASE("Lfs batch applies URL-scoped http.extraheader from git config", "[LFS
     REQUIRE(!batchFuture.result().hasError());
 }
 
+TEST_CASE("Lfs batch does not apply URL-scoped http.extraheader when only path case differs",
+          "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsAuthHeaderServer server;
+    REQUIRE(server.start());
+
+    GitRepository repository;
+    repository.setDirectory(QDir(tempDir.path()));
+    repository.initRepository();
+
+    const QString remoteUrl = server.remoteUrl();
+    REQUIRE(configureRemoteUrl(tempDir.path(), QStringLiteral("origin"), remoteUrl));
+
+    QString mismatchedScopeUrl = remoteUrl;
+    mismatchedScopeUrl.replace(QStringLiteral("/test.git"), QStringLiteral("/Test.git"));
+    REQUIRE(mismatchedScopeUrl != remoteUrl);
+
+    const QString extraHeaderKey = QStringLiteral("http.%1/.extraheader").arg(mismatchedScopeUrl);
+    REQUIRE(setGitConfigString(tempDir.path(),
+                               extraHeaderKey.toUtf8().constData(),
+                               QStringLiteral("X-QQuickGit-Auth: scoped-token")));
+
+    const QString gitDirPath = gitDirPathFromWorkTree(tempDir.path());
+    REQUIRE(!gitDirPath.isEmpty());
+
+    LfsBatchClient client(gitDirPath);
+    const LfsBatchClient::ObjectSpec objectSpec{
+        QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        1
+    };
+
+    auto batchFuture = client.batch(QStringLiteral("download"), {objectSpec});
+    REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
+
+    REQUIRE(server.batchRequestCount() == 1);
+    CHECK(server.authorizedRequestCount() == 0);
+    CHECK(batchFuture.result().hasError());
+}
+
 TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
