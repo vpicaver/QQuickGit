@@ -552,6 +552,16 @@ TEST_CASE("LfsPointer round trip", "[LFS]") {
     CHECK(parsed.size == pointer.size);
 }
 
+TEST_CASE("LfsPointer parse rejects traversal-style oid", "[LFS]") {
+    const QByteArray pointerText =
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:../../../../tmp/evil\n"
+        "size 12\n";
+
+    LfsPointer parsed;
+    CHECK_FALSE(LfsPointer::parse(pointerText, &parsed));
+}
+
 TEST_CASE("LfsStore store/read bytes", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

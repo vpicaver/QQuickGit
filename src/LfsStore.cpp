@@ -21,6 +21,21 @@ namespace {
 
 const QByteArray LfsPointerVersionLine = "version https://git-lfs.github.com/spec/v1";
 
+bool isValidSha256Oid(const QByteArray& oid)
+{
+    if (oid.size() != 64) {
+        return false;
+    }
+    for (char ch : oid) {
+        const bool isDigit = ch >= '0' && ch <= '9';
+        const bool isLowerHex = ch >= 'a' && ch <= 'f';
+        if (!isDigit && !isLowerHex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QString normalizeGitDirPath(const QString& gitDirPath)
 {
     if (gitDirPath.isEmpty()) {
@@ -268,7 +283,7 @@ bool LfsPointer::parse(const QByteArray& data, LfsPointer* outPointer)
         return false;
     }
     const QByteArray oidBytes = oidLine.mid(oidPrefix.size()).trimmed();
-    if (oidBytes.isEmpty()) {
+    if (!isValidSha256Oid(oidBytes)) {
         return false;
     }
 
