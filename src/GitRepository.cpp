@@ -73,6 +73,15 @@ struct SshCallbackPayload {
     bool allowAgent = true;
 };
 
+struct PrePushCredentialPayload {
+    int totalMaxAttempts = 8;
+    int totalAttempts = 0;
+    int sshAgentMaxAttempts = 1;
+    int sshAgentAttempts = 0;
+    int sshKeyMaxAttempts = 1;
+    int sshKeyAttempts = 0;
+};
+
 QFutureInterface<ResultBase>* progressFromPayload(void* payload)
 {
     auto typed = reinterpret_cast<SshCallbackPayload*>(payload);
@@ -329,7 +338,15 @@ int prePushRemoteCredentialCallback(git_credential **out,
                                     unsigned int allowed_types,
                                     void *payload)
 {
-    (void)payload;
+    auto prePushPayload = reinterpret_cast<PrePushCredentialPayload*>(payload);
+    if (prePushPayload) {
+        prePushPayload->totalAttempts++;
+        if (prePushPayload->totalAttempts > prePushPayload->totalMaxAttempts) {
+            qDebug() << "[LFS pre-push][cred-callback] max total attempts reached, passthrough";
+            return GIT_PASSTHROUGH;
+        }
+    }
+
     const QString urlText = url ? QString::fromUtf8(url) : QString();
     const QUrl parsedUrl(urlText);
     const QString urlUser = parsedUrl.userName();
@@ -375,12 +392,27 @@ int prePushRemoteCredentialCallback(git_credential **out,
     }
 
     if (allowed_types & GIT_CREDENTIAL_SSH_KEY) {
-        const int agentResult = git_credential_ssh_key_from_agent(out, userName);
-        qDebug() << "[LFS pre-push][cred-callback] ssh-agent result=" << agentResult;
-        if (agentResult == GIT_OK) {
-            qDebug() << "[LFS pre-push][cred-callback] using ssh-agent credential";
-            return GIT_OK;
+        const bool allowAgent = !prePushPayload || prePushPayload->sshAgentAttempts < prePushPayload->sshAgentMaxAttempts;
+        if (allowAgent) {
+            const int agentResult = git_credential_ssh_key_from_agent(out, userName);
+            qDebug() << "[LFS pre-push][cred-callback] ssh-agent result=" << agentResult;
+            if (agentResult == GIT_OK) {
+                if (prePushPayload) {
+                    prePushPayload->sshAgentAttempts++;
+                }
+                qDebug() << "[LFS pre-push][cred-callback] using ssh-agent credential";
+                return GIT_OK;
+            }
+        } else {
+            qDebug() << "[LFS pre-push][cred-callback] ssh-agent attempts exhausted";
         }
+
+        const bool allowSshKey = !prePushPayload || prePushPayload->sshKeyAttempts < prePushPayload->sshKeyMaxAttempts;
+        if (!allowSshKey) {
+            qDebug() << "[LFS pre-push][cred-callback] ssh-key attempts exhausted, passthrough";
+            return GIT_PASSTHROUGH;
+        }
+
         RSAKeyGenerator key;
         const QString host = extractHostFromUrl(url);
         const bool usedSshConfig = key.loadFromSshConfigHost(host);
@@ -393,6 +425,9 @@ int prePushRemoteCredentialCallback(git_credential **out,
         const char* publicKey = publicKeyPath.isEmpty() ? nullptr : publicKeyPath.constData();
         const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
         const int keyResult = git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
+        if (prePushPayload && keyResult == GIT_OK) {
+            prePushPayload->sshKeyAttempts++;
+        }
         qDebug() << "[LFS pre-push][cred-callback] ssh key credential result=" << keyResult
                  << "usedSshConfig=" << usedSshConfig;
         return keyResult;
@@ -422,7 +457,9 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
              << "url=" << remoteUrl;
 
     git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
+    PrePushCredentialPayload credentialPayload;
     callbacks.credentials = prePushRemoteCredentialCallback;
+    callbacks.payload = &credentialPayload;
     qDebug() << "[LFS pre-push][advertised-tips] using pre-push credential callback";
     const int connectResult = git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr);
     if (connectResult != GIT_OK) {
