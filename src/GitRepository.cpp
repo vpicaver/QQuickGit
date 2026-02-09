@@ -8,6 +8,7 @@
 #include "Account.h"
 #include "LfsFilter.h"
 #include "LfsPolicy.h"
+#include "LfsBatchClient.h"
 #include "LfsStore.h"
 #include "Monad/Result.h"
 #include "ProgressState.h"
@@ -27,6 +28,7 @@
 #include <QSet>
 #include <QtConcurrent>
 #include <QUuid>
+#include <QHash>
 
 //Async includes
 #include "asyncfuture.h"
@@ -92,6 +94,326 @@ struct LfsHydrationPlan {
     QVector<PointerWorkItem> pointerFiles;
     QVector<LfsPointer> missingPointers;
 };
+
+struct LfsPushUploadPlan {
+    QString gitDirPath;
+    QVector<LfsBatchClient::ObjectSpec> objects;
+    QHash<QString, LfsPointer> pointersByOid;
+};
+
+struct LfsPushRefSpec {
+    QString sourceRef;
+    QString destinationRef;
+};
+
+struct LfsTreeCollectPayload {
+    git_repository* repo = nullptr;
+    QHash<QString, LfsPointer>* pointersByOid = nullptr;
+};
+
+LfsPushRefSpec parsePushRefSpec(QString refSpec)
+{
+    if (refSpec.startsWith(QLatin1Char('+'))) {
+        refSpec.remove(0, 1);
+    }
+
+    const int colonIndex = refSpec.indexOf(QLatin1Char(':'));
+    if (colonIndex >= 0) {
+        return LfsPushRefSpec{refSpec.left(colonIndex), refSpec.mid(colonIndex + 1)};
+    }
+    return LfsPushRefSpec{refSpec, QString()};
+}
+
+int collectLfsPointersFromTree(const char* root, const git_tree_entry* entry, void* payload)
+{
+    Q_UNUSED(root);
+    auto* state = reinterpret_cast<LfsTreeCollectPayload*>(payload);
+    if (!state || !state->repo || !state->pointersByOid) {
+        return 0;
+    }
+
+    if (git_tree_entry_type(entry) != GIT_OBJECT_BLOB) {
+        return 0;
+    }
+
+    git_blob* blob = nullptr;
+    if (git_blob_lookup(&blob, state->repo, git_tree_entry_id(entry)) != GIT_OK || !blob) {
+        return 0;
+    }
+    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+    const size_t rawSize = git_blob_rawsize(blob);
+    if (!raw || rawSize == 0 || rawSize > 4096) {
+        return 0;
+    }
+
+    LfsPointer pointer;
+    if (!LfsPointer::parse(QByteArray(raw, static_cast<int>(rawSize)), &pointer)) {
+        return 0;
+    }
+    if (pointer.oid.isEmpty() || state->pointersByOid->contains(pointer.oid)) {
+        return 0;
+    }
+
+    state->pointersByOid->insert(pointer.oid, pointer);
+    return 0;
+}
+
+Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
+                                                        const QString& refSpec,
+                                                        const QString& remoteName)
+{
+    if (!repo) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to open repository for LFS push upload"));
+    }
+
+    const LfsPushRefSpec parsed = parsePushRefSpec(refSpec);
+    if (parsed.sourceRef.isEmpty()) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Missing push source refspec for LFS upload"));
+    }
+
+    const char* gitPathRaw = git_repository_path(repo);
+    if (!gitPathRaw) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to resolve .git path for LFS upload"));
+    }
+
+    git_object* sourceObj = nullptr;
+    if (git_revparse_single(&sourceObj, repo, parsed.sourceRef.toUtf8().constData()) != GIT_OK || !sourceObj) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to resolve push source for LFS upload"));
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> sourceHolder(sourceObj, &git_object_free);
+
+    git_object* sourceCommitObj = nullptr;
+    if (git_object_peel(&sourceCommitObj, sourceObj, GIT_OBJECT_COMMIT) != GIT_OK || !sourceCommitObj) {
+        return Monad::Result<LfsPushUploadPlan>(LfsPushUploadPlan{});
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> sourceCommitHolder(sourceCommitObj, &git_object_free);
+
+    git_revwalk* revwalk = nullptr;
+    if (git_revwalk_new(&revwalk, repo) != GIT_OK || !revwalk) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to create revwalk for LFS upload"));
+    }
+    std::unique_ptr<git_revwalk, decltype(&git_revwalk_free)> revwalkHolder(revwalk, &git_revwalk_free);
+
+    git_revwalk_sorting(revwalk, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
+    if (git_revwalk_push(revwalk, git_object_id(sourceCommitObj)) != GIT_OK) {
+        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to walk pushed commits for LFS upload"));
+    }
+
+    QString branchName;
+    if (parsed.sourceRef.startsWith(QStringLiteral("refs/heads/"))) {
+        branchName = parsed.sourceRef.mid(QStringLiteral("refs/heads/").size());
+    }
+    if (branchName.isEmpty() && parsed.destinationRef.startsWith(QStringLiteral("refs/heads/"))) {
+        branchName = parsed.destinationRef.mid(QStringLiteral("refs/heads/").size());
+    }
+    if (!branchName.isEmpty()) {
+        const QString trackingRef = QStringLiteral("refs/remotes/%1/%2").arg(remoteName, branchName);
+        git_reference* remoteTracking = nullptr;
+        if (git_reference_lookup(&remoteTracking, repo, trackingRef.toUtf8().constData()) == GIT_OK && remoteTracking) {
+            const git_oid* remoteTip = git_reference_target(remoteTracking);
+            if (remoteTip) {
+                git_revwalk_hide(revwalk, remoteTip);
+            }
+        }
+        if (remoteTracking) {
+            git_reference_free(remoteTracking);
+        }
+    }
+
+    QHash<QString, LfsPointer> pointersByOid;
+    git_oid commitOid;
+    while (git_revwalk_next(&commitOid, revwalk) == GIT_OK) {
+        git_commit* commit = nullptr;
+        if (git_commit_lookup(&commit, repo, &commitOid) != GIT_OK || !commit) {
+            continue;
+        }
+        std::unique_ptr<git_commit, decltype(&git_commit_free)> commitHolder(commit, &git_commit_free);
+
+        git_tree* tree = nullptr;
+        if (git_commit_tree(&tree, commit) != GIT_OK || !tree) {
+            continue;
+        }
+        std::unique_ptr<git_tree, decltype(&git_tree_free)> treeHolder(tree, &git_tree_free);
+
+        LfsTreeCollectPayload payload{repo, &pointersByOid};
+        if (git_tree_walk(tree, GIT_TREEWALK_PRE, collectLfsPointersFromTree, &payload) != GIT_OK) {
+            return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to scan pushed tree for LFS pointers"));
+        }
+    }
+
+    LfsPushUploadPlan plan;
+    plan.gitDirPath = QDir(QString::fromUtf8(gitPathRaw)).absolutePath();
+    plan.pointersByOid = pointersByOid;
+    plan.objects.reserve(pointersByOid.size());
+    for (auto it = pointersByOid.begin(); it != pointersByOid.end(); ++it) {
+        const LfsPointer pointer = it.value();
+        const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
+        if (objectPath.isEmpty() || !QFileInfo::exists(objectPath)) {
+            return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Missing local LFS object for oid %1").arg(pointer.oid),
+                                                    static_cast<int>(LfsFetchErrorCode::NotFound));
+        }
+        plan.objects.push_back(LfsBatchClient::ObjectSpec{pointer.oid, pointer.size});
+    }
+
+    return Monad::Result<LfsPushUploadPlan>(plan);
+}
+
+GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
+                                             const QHash<QString, LfsPointer>& pointersByOid,
+                                             const QVector<LfsBatchClient::ObjectResponse>& objects,
+                                             std::shared_ptr<LfsBatchClient> client,
+                                             QObject* context)
+{
+    struct UploadTask {
+        QString oid;
+        LfsBatchClient::Action uploadAction;
+        LfsBatchClient::Action verifyAction;
+        bool hasUpload = false;
+        bool hasVerify = false;
+    };
+
+    QVector<UploadTask> tasks;
+    for (const auto& object : objects) {
+        if (object.errorCode != 0) {
+            return AsyncFuture::completed(Monad::ResultBase(
+                QStringLiteral("LFS batch upload failed for oid %1: %2")
+                    .arg(object.oid, object.errorMessage),
+                static_cast<int>(LfsFetchErrorCode::Transfer)));
+        }
+
+        UploadTask task;
+        task.oid = object.oid;
+        if (object.actions.contains(QStringLiteral("upload"))) {
+            task.hasUpload = true;
+            task.uploadAction = object.actions.value(QStringLiteral("upload"));
+        }
+        if (object.actions.contains(QStringLiteral("verify"))) {
+            task.hasVerify = true;
+            task.verifyAction = object.actions.value(QStringLiteral("verify"));
+        }
+        if (task.hasUpload || task.hasVerify) {
+            tasks.push_back(task);
+        }
+    }
+
+    if (tasks.isEmpty()) {
+        return AsyncFuture::completed(Monad::ResultBase());
+    }
+
+    auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
+    deferred.reportStarted();
+
+    auto taskList = std::make_shared<QVector<UploadTask>>(std::move(tasks));
+    auto nextIndex = std::make_shared<int>(0);
+    auto step = std::make_shared<std::function<void()>>();
+
+    *step = [deferred, context, client, gitDirPath, pointersByOid, taskList, nextIndex, step]() mutable {
+        if (*nextIndex >= taskList->size()) {
+            deferred.complete(Monad::ResultBase());
+            return;
+        }
+
+        const UploadTask task = taskList->at(*nextIndex);
+        (*nextIndex)++;
+
+        if (!pointersByOid.contains(task.oid)) {
+            deferred.complete(Monad::ResultBase(QStringLiteral("Missing LFS pointer details for oid %1").arg(task.oid),
+                                                static_cast<int>(LfsFetchErrorCode::Protocol)));
+            return;
+        }
+        const LfsPointer pointer = pointersByOid.value(task.oid);
+        const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+
+        auto runVerify = [deferred, context, client, pointer, task, step]() mutable {
+            if (!task.hasVerify) {
+                (*step)();
+                return;
+            }
+            auto verifyFuture = client->verifyObject(task.verifyAction, pointer);
+            AsyncFuture::observe(verifyFuture)
+                .context(context, [deferred, step, verifyFuture]() mutable {
+                    const auto verifyResult = verifyFuture.result();
+                    if (verifyResult.hasError()) {
+                        deferred.complete(verifyResult);
+                        return;
+                    }
+                    (*step)();
+                });
+        };
+
+        if (!task.hasUpload) {
+            runVerify();
+            return;
+        }
+
+        auto uploadFuture = client->uploadObject(task.uploadAction, objectPath, pointer);
+        AsyncFuture::observe(uploadFuture)
+            .context(context, [deferred, uploadFuture, runVerify]() mutable {
+                const auto uploadResult = uploadFuture.result();
+                if (uploadResult.hasError()) {
+                    deferred.complete(uploadResult);
+                    return;
+                }
+                runVerify();
+            });
+    };
+
+    (*step)();
+    return deferred.future();
+}
+
+GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
+                                             const QString& refSpec,
+                                             const QString& remoteName,
+                                             QObject* context)
+{
+    auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName]() {
+        return mtry([repoPath, refSpec, remoteName]() -> Monad::Result<LfsPushUploadPlan> {
+            git_repository* repo = nullptr;
+            const int openResult = git_repository_open(&repo, repoPath.constData());
+            if (openResult != GIT_OK || !repo) {
+                const git_error* err = git_error_last();
+                const QString message = (err && err->message)
+                    ? QString::fromUtf8(err->message)
+                    : QStringLiteral("Failed to open repository for LFS push upload");
+                return Monad::Result<LfsPushUploadPlan>(message, openResult);
+            }
+            std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+            return buildLfsPushUploadPlan(repo, refSpec, remoteName);
+        });
+    });
+
+    return AsyncFuture::observe(planFuture)
+        .context(context, [planFuture, remoteName, context]() -> GitRepository::GitFuture {
+            const auto planResult = planFuture.result();
+            if (planResult.hasError()) {
+                return AsyncFuture::completed(Monad::ResultBase(planResult.errorMessage(), planResult.errorCode()));
+            }
+
+            const auto plan = planResult.value();
+            if (plan.objects.isEmpty()) {
+                return AsyncFuture::completed(Monad::ResultBase());
+            }
+
+            auto client = std::make_shared<LfsBatchClient>(plan.gitDirPath);
+            auto batchFuture = client->batch(QStringLiteral("upload"), plan.objects, remoteName);
+            return AsyncFuture::observe(batchFuture)
+                .context(context, [batchFuture, plan, client, context]() -> GitRepository::GitFuture {
+                    const auto batchResult = batchFuture.result();
+                    if (batchResult.hasError()) {
+                        return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
+                    }
+
+                    return runLfsUploadActions(plan.gitDirPath,
+                                               plan.pointersByOid,
+                                               batchResult.value().objects,
+                                               client,
+                                               context);
+                }).future();
+        }).future();
+}
 
 Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
 {
@@ -1080,40 +1402,48 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             }
 
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
+            auto fixRemote = fixUpRemote(remote);
+            auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this);
 
-            return QtConcurrent::run([=]() {
-                return mtry([=]() mutable ->ResultBase {
-                    auto fixRemote = fixUpRemote(remote);
+            return AsyncFuture::observe(prePushUploadFuture)
+                .context(this, [=]() -> GitFuture {
+                    const auto prePushResult = prePushUploadFuture.result();
+                    if (prePushResult.hasError()) {
+                        return AsyncFuture::completed(prePushResult);
+                    }
 
-                    git_push_options options;
-                    git_remote* gitRemote = makeScopedPtr(&git_remote_free);
+                    return QtConcurrent::run([=]() {
+                        return mtry([=]() mutable ->ResultBase {
+                            git_push_options options;
+                            git_remote* gitRemote = makeScopedPtr(&git_remote_free);
 
-                    auto repo = makeScopedPtr(git_repository_free);
-                    check(git_repository_open(&repo, path));
+                            auto repo = makeScopedPtr(git_repository_free);
+                            check(git_repository_open(&repo, path));
 
-                    auto localRefSpec = fixRefSpec.toLocal8Bit();
-                    std::array<const char*, 1> refspec = {localRefSpec};
-                    const git_strarray refspecs = {const_cast<char**>(refspec.data()), 1};
+                            auto localRefSpec = fixRefSpec.toLocal8Bit();
+                            std::array<const char*, 1> refspec = {localRefSpec};
+                            const git_strarray refspecs = {const_cast<char**>(refspec.data()), 1};
 
-                    check(git_remote_lookup(&gitRemote, repo, fixRemote.toLocal8Bit()));
+                            check(git_remote_lookup(&gitRemote, repo, fixRemote.toLocal8Bit()));
 
-                    check(git_push_options_init(&options, GIT_PUSH_OPTIONS_VERSION ));
-                    options.callbacks.credentials = GitRepositoryData::credentailCallBack;
-                    options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
-                    SshCallbackPayload callbackPayload;
-                    callbackPayload.progressInterface = &progressInterface;
-                    callbackPayload.allowAgent = true;
-                    callbackPayload.agentMaxAttempts = 1;
-                    callbackPayload.agentAttempts = 0;
-                    options.callbacks.payload = static_cast<void*>(&callbackPayload);
+                            check(git_push_options_init(&options, GIT_PUSH_OPTIONS_VERSION ));
+                            options.callbacks.credentials = GitRepositoryData::credentailCallBack;
+                            options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
+                            SshCallbackPayload callbackPayload;
+                            callbackPayload.progressInterface = &progressInterface;
+                            callbackPayload.allowAgent = true;
+                            callbackPayload.agentMaxAttempts = 1;
+                            callbackPayload.agentAttempts = 0;
+                            options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
-                    check(git_remote_push(gitRemote, &refspecs, &options));
+                            check(git_remote_push(gitRemote, &refspecs, &options));
 
-                    git_remote_free(gitRemote);
+                            git_remote_free(gitRemote);
 
-                    return ResultBase();
-                });
-            });
+                            return ResultBase();
+                        });
+                    });
+                }).future();
         });
 }
 
