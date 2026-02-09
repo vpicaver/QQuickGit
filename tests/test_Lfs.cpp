@@ -608,6 +608,192 @@ private:
     int mAuthorizedRequestCount = 0;
 };
 
+class LocalGitAdvertiseAuthServer
+{
+public:
+    bool start()
+    {
+        QObject::connect(&mServer, &QTcpServer::newConnection, &mServer, [this]() { handleNewConnections(); });
+        return mServer.listen(QHostAddress::LocalHost, 0);
+    }
+
+    QString remoteUrl() const
+    {
+        return QStringLiteral("http://127.0.0.1:%1/test.git").arg(mServer.serverPort());
+    }
+
+    QString remoteUrlWithCredentials(const QString& user, const QString& password) const
+    {
+        QUrl url(remoteUrl());
+        url.setUserName(user);
+        url.setPassword(password);
+        return url.toString();
+    }
+
+    void setCredentials(const QString& user, const QString& password)
+    {
+        mRequiredAuthHeader = makeBasicAuthHeader(user, password);
+    }
+
+    int advertiseRequestCount() const
+    {
+        return mAdvertiseRequestCount;
+    }
+
+    int authorizedAdvertiseRequestCount() const
+    {
+        return mAuthorizedAdvertiseRequestCount;
+    }
+
+    int unauthorizedAdvertiseRequestCount() const
+    {
+        return mUnauthorizedAdvertiseRequestCount;
+    }
+
+private:
+    static QByteArray makeBasicAuthHeader(const QString& user, const QString& password)
+    {
+        if (user.isEmpty() || password.isEmpty()) {
+            return QByteArray();
+        }
+        const QByteArray credentials = (user + ":" + password).toUtf8().toBase64();
+        return QByteArray("Basic ") + credentials;
+    }
+
+    static QByteArray pktLine(const QByteArray& payload)
+    {
+        const int len = payload.size() + 4;
+        return QByteArray::number(len, 16).rightJustified(4, '0') + payload;
+    }
+
+    static QByteArray advertiseBody(const QByteArray& oidHex)
+    {
+        QByteArray firstRef = oidHex + QByteArray(" refs/heads/remote-only");
+        firstRef.append('\0');
+        firstRef += QByteArray("report-status delete-refs ofs-delta\n");
+        return pktLine(QByteArray("# service=git-receive-pack\n"))
+               + QByteArray("0000")
+               + pktLine(firstRef)
+               + QByteArray("0000");
+    }
+
+    static void respond(QTcpSocket* socket,
+                        int status,
+                        const QByteArray& statusText,
+                        const QByteArray& contentType,
+                        const QByteArray& body,
+                        const QByteArray& extraHeaders = QByteArray())
+    {
+        QByteArray response =
+            "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
+            "Content-Type: " + contentType + "\r\n"
+            "Connection: close\r\n"
+            "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
+        if (!extraHeaders.isEmpty()) {
+            response += extraHeaders;
+            if (!extraHeaders.endsWith("\r\n")) {
+                response += "\r\n";
+            }
+        }
+        response += "\r\n";
+        response += body;
+        socket->write(response);
+        socket->flush();
+        socket->disconnectFromHost();
+    }
+
+    void handleNewConnections()
+    {
+        while (mServer.hasPendingConnections()) {
+            QTcpSocket* socket = mServer.nextPendingConnection();
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
+                const QByteArray request = socket->readAll();
+                if (request.isEmpty()) {
+                    return;
+                }
+
+                const QList<QByteArray> lines = request.split('\n');
+                const QByteArray firstLine = lines.value(0).trimmed();
+                const QByteArray method = firstLine.split(' ').value(0).trimmed();
+                const QByteArray path = firstLine.split(' ').value(1).trimmed();
+
+                if (method == "GET" && path.startsWith("/test.git/info/refs?service=git-receive-pack")) {
+                    mAdvertiseRequestCount++;
+                    qDebug() << "[Test GitAdvertiseAuthServer] request" << firstLine;
+
+                    QByteArray authHeaderValue;
+                    for (const QByteArray& rawLine : lines) {
+                        const QByteArray line = rawLine.trimmed();
+                        if (line.isEmpty()) {
+                            break;
+                        }
+                        const int colonIndex = line.indexOf(':');
+                        if (colonIndex <= 0) {
+                            continue;
+                        }
+                        const QByteArray key = line.left(colonIndex).trimmed().toLower();
+                        const QByteArray value = line.mid(colonIndex + 1).trimmed();
+                        if (key == QByteArray("authorization")) {
+                            authHeaderValue = value;
+                            break;
+                        }
+                    }
+
+                    if (mRequireInitialChallenge && !mIssuedChallenge) {
+                        mIssuedChallenge = true;
+                        mUnauthorizedAdvertiseRequestCount++;
+                        qDebug() << "[Test GitAdvertiseAuthServer] issuing initial 401 challenge";
+                        respond(socket,
+                                401,
+                                QByteArray("Unauthorized"),
+                                QByteArray("text/plain"),
+                                QByteArray("auth required"),
+                                QByteArray("WWW-Authenticate: Basic realm=\"qquickgit-test\"\r\n"));
+                        return;
+                    }
+
+                    if (authHeaderValue == mRequiredAuthHeader) {
+                        mAuthorizedAdvertiseRequestCount++;
+                        qDebug() << "[Test GitAdvertiseAuthServer] authorized advertise request";
+                        respond(socket,
+                                200,
+                                QByteArray("OK"),
+                                QByteArray("application/x-git-receive-pack-advertisement"),
+                                advertiseBody(mAdvertisedOid));
+                    } else {
+                        mUnauthorizedAdvertiseRequestCount++;
+                        qDebug() << "[Test GitAdvertiseAuthServer] unauthorized advertise request authHeader="
+                                 << QString::fromUtf8(authHeaderValue);
+                        respond(socket,
+                                401,
+                                QByteArray("Unauthorized"),
+                                QByteArray("text/plain"),
+                                QByteArray("auth required"),
+                                QByteArray("WWW-Authenticate: Basic realm=\"qquickgit-test\"\r\n"));
+                    }
+                    return;
+                }
+
+                respond(socket,
+                        404,
+                        QByteArray("Not Found"),
+                        QByteArray("text/plain"),
+                        QByteArray("unsupported"));
+            });
+            QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+        }
+    }
+
+    QTcpServer mServer;
+    QByteArray mRequiredAuthHeader = makeBasicAuthHeader(QStringLiteral("planner"), QStringLiteral("secret"));
+    QByteArray mAdvertisedOid = QByteArray("1111111111111111111111111111111111111111");
+    bool mRequireInitialChallenge = true;
+    bool mIssuedChallenge = false;
+    int mAdvertiseRequestCount = 0;
+    int mAuthorizedAdvertiseRequestCount = 0;
+    int mUnauthorizedAdvertiseRequestCount = 0;
+};
+
 bool findFirstLfsPointerInRepo(const QString& repoPath, LfsPointer* pointerOut, QString* relativePathOut)
 {
     if (!pointerOut) {
@@ -2812,6 +2998,102 @@ TEST_CASE("Lfs push does not fall back to stale tracking refs when remote tips a
 
     // Regression guard: successful remote ls with unknown advertised tips must not
     // permit stale local tracking refs to suppress required uploads.
+    CHECK(lfsServer.uploadBatchRequestCount() > uploadBatchRequestsBeforePush);
+    CHECK(lfsServer.uploadRequestCount() > uploadRequestsBeforePush);
+}
+
+TEST_CASE("Lfs push planning uses non-SSH auth to list advertised tips before stale-tracking fallback",
+          "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsUploadServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    LocalGitAdvertiseAuthServer gitServer;
+    REQUIRE(gitServer.start());
+    gitServer.setCredentials(QStringLiteral("planner"), QStringLiteral("secret"));
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-http-auth-planning"));
+    const QString trackedFileName = QStringLiteral("http-auth-planning-lfs.png");
+    const QString topicBranch = QStringLiteral("topic-http-auth-planning");
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    REQUIRE(configureRemoteUrl(authorPath,
+                               QStringLiteral("origin"),
+                               gitServer.remoteUrlWithCredentials(QStringLiteral("planner"), QStringLiteral("secret"))));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    const QString baseFilePath = QDir(authorPath).filePath(QStringLiteral("base.txt"));
+    REQUIRE(writeTextFile(baseFilePath, QByteArray("base commit\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Base"), QStringLiteral("Base commit")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString baseOid = headOidString(authorRepo);
+    REQUIRE_FALSE(baseOid.isEmpty());
+    REQUIRE_NOTHROW(author.createBranch(topicBranch, baseOid));
+    CHECK(author.headBranchName() == topicBranch);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray workingBytes = createPngFile(authorFilePath, Qt::darkYellow);
+    REQUIRE(!workingBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Topic LFS file"), QStringLiteral("LFS HTTP auth planning")));
+
+    const QByteArray pointerBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!pointerBlob.isEmpty());
+    LfsPointer topicPointer;
+    REQUIRE(LfsPointer::parse(pointerBlob, &topicPointer));
+    REQUIRE(topicPointer.size == workingBytes.size());
+
+    git_reference* headRef = nullptr;
+    REQUIRE(git_repository_head(&headRef, authorRepo) == GIT_OK);
+    REQUIRE(headRef != nullptr);
+    const git_oid* topicCommitOid = git_reference_target(headRef);
+    REQUIRE(topicCommitOid != nullptr);
+
+    // If advertised tips cannot be listed, stale tracking would hide this commit and suppress upload.
+    const QByteArray staleTrackingName = QByteArray("refs/remotes/origin/") + topicBranch.toUtf8();
+    git_reference* staleTrackingRef = nullptr;
+    REQUIRE(git_reference_create(&staleTrackingRef,
+                                 authorRepo,
+                                 staleTrackingName.constData(),
+                                 topicCommitOid,
+                                 1,
+                                 "regression: stale topic tracking tip for auth listing") == GIT_OK);
+    if (staleTrackingRef) {
+        git_reference_free(staleTrackingRef);
+    }
+    git_reference_free(headRef);
+
+    const int uploadBatchRequestsBeforePush = lfsServer.uploadBatchRequestCount();
+    const int uploadRequestsBeforePush = lfsServer.uploadRequestCount();
+    lfsServer.setExpectedObject(topicPointer.oid, topicPointer.size);
+
+    auto pushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
+    INFO("Push error:" << pushFuture.result().errorMessage().toStdString()
+         << "code:" << pushFuture.result().errorCode());
+    REQUIRE(pushFuture.result().hasError());
+
+    CHECK(gitServer.advertiseRequestCount() > 0);
+    CHECK(gitServer.unauthorizedAdvertiseRequestCount() > 0);
+    CHECK(gitServer.authorizedAdvertiseRequestCount() > 0);
+
+    // Regression guard: authenticated remote tip listing must remain authoritative so
+    // stale local tracking refs do not suppress required LFS uploads.
     CHECK(lfsServer.uploadBatchRequestCount() > uploadBatchRequestsBeforePush);
     CHECK(lfsServer.uploadRequestCount() > uploadRequestsBeforePush);
 }

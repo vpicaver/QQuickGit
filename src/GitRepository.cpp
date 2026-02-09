@@ -330,31 +330,76 @@ int prePushRemoteCredentialCallback(git_credential **out,
                                     void *payload)
 {
     (void)payload;
-    const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
+    const QString urlText = url ? QString::fromUtf8(url) : QString();
+    const QUrl parsedUrl(urlText);
+    const QString urlUser = parsedUrl.userName();
+    const QString urlPassword = parsedUrl.password();
+    const QString userNameText = (username_from_url && *username_from_url)
+        ? QString::fromUtf8(username_from_url)
+        : (urlUser.isEmpty() ? QStringLiteral("git") : urlUser);
+    const QByteArray userNameUtf8 = userNameText.toUtf8();
+    const char *userName = userNameUtf8.constData();
+    qDebug() << "[LFS pre-push][cred-callback] url=" << (url ? QString::fromUtf8(url) : QString())
+             << "username_from_url=" << (username_from_url ? QString::fromUtf8(username_from_url) : QString())
+             << "allowed_types=" << allowed_types;
 
-    if (!(allowed_types & GIT_CREDENTIAL_SSH_KEY)) {
-        return GIT_PASSTHROUGH;
+    if (allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) {
+        if (!userNameText.isEmpty() && !urlPassword.isEmpty()) {
+            const QByteArray passwordUtf8 = urlPassword.toUtf8();
+            const int result = git_credential_userpass_plaintext_new(out,
+                                                                      userNameUtf8.constData(),
+                                                                      passwordUtf8.constData());
+            qDebug() << "[LFS pre-push][cred-callback] using url userpass credential result=" << result;
+            if (result == GIT_OK) {
+                return GIT_OK;
+            }
+        } else {
+            qDebug() << "[LFS pre-push][cred-callback] userpass allowed but URL credentials unavailable";
+        }
     }
 
-    if (allowed_types & GIT_CREDENTIAL_SSH_KEY) {
-        const int agentResult = git_credential_ssh_key_from_agent(out, userName);
-        if (agentResult == GIT_OK) {
+    if (allowed_types & GIT_CREDENTIAL_USERNAME) {
+        const int result = git_credential_username_new(out, userName);
+        qDebug() << "[LFS pre-push][cred-callback] username credential result=" << result;
+        if (result == GIT_OK) {
             return GIT_OK;
         }
     }
 
-    RSAKeyGenerator key;
-    const QString host = extractHostFromUrl(url);
-    const bool usedSshConfig = key.loadFromSshConfigHost(host);
-    if (!usedSshConfig) {
-        key.loadOrGenerate();
+    if (allowed_types & GIT_CREDENTIAL_DEFAULT) {
+        const int result = git_credential_default_new(out);
+        qDebug() << "[LFS pre-push][cred-callback] default credential result=" << result;
+        if (result == GIT_OK) {
+            return GIT_OK;
+        }
     }
 
-    const QByteArray publicKeyPath = key.publicKeyPath().toLocal8Bit();
-    const QByteArray privateKeyPath = key.privateKeyPath().toLocal8Bit();
-    const char* publicKey = publicKeyPath.isEmpty() ? nullptr : publicKeyPath.constData();
-    const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
-    return git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
+    if (allowed_types & GIT_CREDENTIAL_SSH_KEY) {
+        const int agentResult = git_credential_ssh_key_from_agent(out, userName);
+        qDebug() << "[LFS pre-push][cred-callback] ssh-agent result=" << agentResult;
+        if (agentResult == GIT_OK) {
+            qDebug() << "[LFS pre-push][cred-callback] using ssh-agent credential";
+            return GIT_OK;
+        }
+        RSAKeyGenerator key;
+        const QString host = extractHostFromUrl(url);
+        const bool usedSshConfig = key.loadFromSshConfigHost(host);
+        if (!usedSshConfig) {
+            key.loadOrGenerate();
+        }
+
+        const QByteArray publicKeyPath = key.publicKeyPath().toLocal8Bit();
+        const QByteArray privateKeyPath = key.privateKeyPath().toLocal8Bit();
+        const char* publicKey = publicKeyPath.isEmpty() ? nullptr : publicKeyPath.constData();
+        const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
+        const int keyResult = git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
+        qDebug() << "[LFS pre-push][cred-callback] ssh key credential result=" << keyResult
+                 << "usedSshConfig=" << usedSshConfig;
+        return keyResult;
+    }
+
+    qDebug() << "[LFS pre-push][cred-callback] no supported credential type resolved, passthrough";
+    return GIT_PASSTHROUGH;
 }
 
 bool hideAdvertisedRemoteTips(git_repository* repo,
@@ -371,17 +416,30 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
     }
     std::unique_ptr<git_remote, decltype(&git_remote_free)> remoteHolder(remote, &git_remote_free);
 
+    const char* remoteUrlRaw = git_remote_url(remote);
+    const QString remoteUrl = remoteUrlRaw ? QString::fromUtf8(remoteUrlRaw) : QString();
+    qDebug() << "[LFS pre-push][advertised-tips] remote=" << remoteName
+             << "url=" << remoteUrl;
+
     git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
     callbacks.credentials = prePushRemoteCredentialCallback;
-    if (git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr) != GIT_OK) {
+    qDebug() << "[LFS pre-push][advertised-tips] using pre-push credential callback";
+    const int connectResult = git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr);
+    if (connectResult != GIT_OK) {
+        const git_error* err = git_error_last();
+        qDebug() << "[LFS pre-push][advertised-tips] git_remote_connect failed result=" << connectResult
+                 << "message=" << ((err && err->message) ? QString::fromUtf8(err->message) : QString());
         return false;
     }
+    qDebug() << "[LFS pre-push][advertised-tips] git_remote_connect succeeded";
 
     const git_remote_head** remoteHeads = nullptr;
     size_t remoteHeadCount = 0;
     bool listedAdvertisedTips = false;
-    if (git_remote_ls(&remoteHeads, &remoteHeadCount, remote) == GIT_OK) {
+    const int lsResult = git_remote_ls(&remoteHeads, &remoteHeadCount, remote);
+    if (lsResult == GIT_OK) {
         listedAdvertisedTips = true;
+        qDebug() << "[LFS pre-push][advertised-tips] git_remote_ls succeeded count=" << remoteHeadCount;
         if (remoteHeads) {
             for (size_t i = 0; i < remoteHeadCount; ++i) {
                 const git_remote_head* head = remoteHeads[i];
@@ -391,9 +449,14 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
                 git_revwalk_hide(revwalk, &head->oid);
             }
         }
+    } else {
+        const git_error* err = git_error_last();
+        qDebug() << "[LFS pre-push][advertised-tips] git_remote_ls failed result=" << lsResult
+                 << "message=" << ((err && err->message) ? QString::fromUtf8(err->message) : QString());
     }
 
     git_remote_disconnect(remote);
+    qDebug() << "[LFS pre-push][advertised-tips] listedAdvertisedTips=" << listedAdvertisedTips;
     return listedAdvertisedTips;
 }
 
