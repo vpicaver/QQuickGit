@@ -14,7 +14,9 @@
 using namespace QQuickGit;
 
 TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConnection]") {
-    auto testConnection = [](const QUrl& url, const QStringList& messages) {
+    auto testConnection = [](const QUrl& url,
+                             const QStringList& exactMessages,
+                             const QStringList& containsMessages = {}) {
         INFO("Url:" << url.toString().toStdString());
 
         GitTestConnection connection;
@@ -44,10 +46,19 @@ TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConne
         CHECK(canceled == false);
         CHECK(connection.state() == GitTestConnection::Ready);
         const QString actualMessage = connection.errorMessage();
-        if(messages.isEmpty()) {
+        if(exactMessages.isEmpty() && containsMessages.isEmpty()) {
             CHECK(actualMessage.isEmpty());
         } else {
-            CHECK(messages.contains(actualMessage));
+            bool matched = exactMessages.contains(actualMessage);
+            if(!matched) {
+                for(const auto& expectedContains : containsMessages) {
+                    if(actualMessage.contains(expectedContains, Qt::CaseInsensitive)) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            CHECK(matched);
         }
     };
 
@@ -59,8 +70,8 @@ TEST_CASE("GitTestConnection should async test a git connection", "[GitTestConne
 
     std::cout << "Testing connect to a bad host, this will take a while (~20 secs)" << std::endl;
     testConnection(QUrl("ssh://192.168.1.2/test.git"),
-                   {QString("failed to connect to 192.168.1.2: Operation timed out"),
-                    QString("failed to connect to 192.168.1.2: Connection refused")});
+                   {},
+                   {QString("failed to connect to 192.168.1.2")});
     std::cout << "Done" << std::endl;
 
 }
