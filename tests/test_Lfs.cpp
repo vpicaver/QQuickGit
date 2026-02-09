@@ -899,6 +899,73 @@ bool setGitConfigString(const QString& workTreePath, const char* key, const QStr
     return setResult == GIT_OK && verifyResult == GIT_OK;
 }
 
+bool setBareRemoteBranchToOrphanCommit(const QString& bareRepoPath,
+                                       const QString& branchName,
+                                       QString* commitOidOut = nullptr)
+{
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, bareRepoPath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        return false;
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_signature* signature = nullptr;
+    if (git_signature_now(&signature, "Remote Rewriter", "remote@test.invalid") != GIT_OK || !signature) {
+        return false;
+    }
+    std::unique_ptr<git_signature, decltype(&git_signature_free)> signatureHolder(signature, &git_signature_free);
+
+    static const QByteArray remoteBlobContents("remote rewritten tip\n");
+    git_oid blobOid;
+    if (git_blob_create_frombuffer(&blobOid,
+                                   repo,
+                                   remoteBlobContents.constData(),
+                                   static_cast<size_t>(remoteBlobContents.size())) != GIT_OK) {
+        return false;
+    }
+
+    git_treebuilder* treeBuilder = nullptr;
+    if (git_treebuilder_new(&treeBuilder, repo, nullptr) != GIT_OK || !treeBuilder) {
+        return false;
+    }
+    std::unique_ptr<git_treebuilder, decltype(&git_treebuilder_free)> treeBuilderHolder(treeBuilder,
+                                                                                         &git_treebuilder_free);
+
+    if (git_treebuilder_insert(nullptr, treeBuilder, "remote-tip.txt", &blobOid, GIT_FILEMODE_BLOB) != GIT_OK) {
+        return false;
+    }
+
+    git_oid treeOid;
+    if (git_treebuilder_write(&treeOid, treeBuilder) != GIT_OK) {
+        return false;
+    }
+
+    git_tree* tree = nullptr;
+    if (git_tree_lookup(&tree, repo, &treeOid) != GIT_OK || !tree) {
+        return false;
+    }
+    std::unique_ptr<git_tree, decltype(&git_tree_free)> treeHolder(tree, &git_tree_free);
+
+    const QByteArray refName = QByteArray("refs/heads/") + branchName.toUtf8();
+    git_oid commitOid;
+    if (git_commit_create_v(&commitOid,
+                            repo,
+                            refName.constData(),
+                            signature,
+                            signature,
+                            nullptr,
+                            "Remote tip rewritten out-of-band",
+                            tree,
+                            0) != GIT_OK) {
+        return false;
+    }
+
+    if (commitOidOut) {
+        *commitOidOut = QString::fromLatin1(git_oid_tostr_s(&commitOid));
+    }
+    return true;
+}
+
 struct CountingWriteStream {
     git_writestream parent;
     size_t totalBytes = 0;
@@ -2652,6 +2719,101 @@ TEST_CASE("Lfs push does not trust stale remote-tracking refs over actual remote
     // Regression guard: stale local tracking refs must not suppress required uploads.
     CHECK(lfsServer.uploadBatchRequestCount() > uploadBatchRequestsAfterBaseline);
     CHECK(lfsServer.uploadRequestCount() > uploadRequestsAfterBaseline);
+}
+
+TEST_CASE("Lfs push does not fall back to stale tracking refs when remote tips are advertised but unknown locally",
+          "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsUploadServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-advertised-tip-fallback"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-advertised-tip-fallback.git"));
+    const QString trackedFileName = QStringLiteral("advertised-tip-fallback-lfs.png");
+    const QString topicBranch = QStringLiteral("topic-advertised-tip-fallback");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    const QString baseFilePath = QDir(authorPath).filePath(QStringLiteral("base.txt"));
+    REQUIRE(writeTextFile(baseFilePath, QByteArray("base commit\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Base"), QStringLiteral("Base commit")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString baseOid = headOidString(authorRepo);
+    REQUIRE_FALSE(baseOid.isEmpty());
+
+    REQUIRE_NOTHROW(author.createBranch(topicBranch, baseOid));
+    CHECK(author.headBranchName() == topicBranch);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray workingBytes = createPngFile(authorFilePath, Qt::cyan);
+    REQUIRE(!workingBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Topic LFS file"), QStringLiteral("LFS advertised tip fallback")));
+
+    const QByteArray pointerBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!pointerBlob.isEmpty());
+    LfsPointer topicPointer;
+    REQUIRE(LfsPointer::parse(pointerBlob, &topicPointer));
+    REQUIRE(topicPointer.size == workingBytes.size());
+
+    git_reference* headRef = nullptr;
+    REQUIRE(git_repository_head(&headRef, authorRepo) == GIT_OK);
+    REQUIRE(headRef != nullptr);
+    const git_oid* topicCommitOid = git_reference_target(headRef);
+    REQUIRE(topicCommitOid != nullptr);
+
+    const QByteArray staleTrackingName = QByteArray("refs/remotes/origin/") + topicBranch.toUtf8();
+    git_reference* staleTrackingRef = nullptr;
+    REQUIRE(git_reference_create(&staleTrackingRef,
+                                 authorRepo,
+                                 staleTrackingName.constData(),
+                                 topicCommitOid,
+                                 1,
+                                 "regression: stale topic tracking tip") == GIT_OK);
+    if (staleTrackingRef) {
+        git_reference_free(staleTrackingRef);
+    }
+    git_reference_free(headRef);
+
+    // Create an advertised remote head the pusher does not have locally.
+    REQUIRE(setBareRemoteBranchToOrphanCommit(remotePath, QStringLiteral("remote-only")));
+
+    const int uploadBatchRequestsBeforePush = lfsServer.uploadBatchRequestCount();
+    const int uploadRequestsBeforePush = lfsServer.uploadRequestCount();
+    lfsServer.setExpectedObject(topicPointer.oid, topicPointer.size);
+
+    auto pushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
+    INFO("Push error:" << pushFuture.result().errorMessage().toStdString()
+         << "code:" << pushFuture.result().errorCode());
+    REQUIRE(!pushFuture.result().hasError());
+
+    // Regression guard: successful remote ls with unknown advertised tips must not
+    // permit stale local tracking refs to suppress required uploads.
+    CHECK(lfsServer.uploadBatchRequestCount() > uploadBatchRequestsBeforePush);
+    CHECK(lfsServer.uploadRequestCount() > uploadRequestsBeforePush);
 }
 
 TEST_CASE("Lfs push does not fail with missing-local-object when remote tips are undiscoverable", "[LFS][regression][P1]") {

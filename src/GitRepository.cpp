@@ -379,21 +379,22 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
 
     const git_remote_head** remoteHeads = nullptr;
     size_t remoteHeadCount = 0;
-    bool hidAny = false;
-    if (git_remote_ls(&remoteHeads, &remoteHeadCount, remote) == GIT_OK && remoteHeads) {
-        for (size_t i = 0; i < remoteHeadCount; ++i) {
-            const git_remote_head* head = remoteHeads[i];
-            if (!head || git_oid_is_zero(&head->oid)) {
-                continue;
-            }
-            if (git_revwalk_hide(revwalk, &head->oid) == GIT_OK) {
-                hidAny = true;
+    bool listedAdvertisedTips = false;
+    if (git_remote_ls(&remoteHeads, &remoteHeadCount, remote) == GIT_OK) {
+        listedAdvertisedTips = true;
+        if (remoteHeads) {
+            for (size_t i = 0; i < remoteHeadCount; ++i) {
+                const git_remote_head* head = remoteHeads[i];
+                if (!head || git_oid_is_zero(&head->oid)) {
+                    continue;
+                }
+                git_revwalk_hide(revwalk, &head->oid);
             }
         }
     }
 
     git_remote_disconnect(remote);
-    return hidAny;
+    return listedAdvertisedTips;
 }
 
 Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
@@ -438,8 +439,8 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         }
     }
 
-    const bool hidAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName);
-    if (!hidAdvertisedTips) {
+    const bool listedAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName);
+    if (!listedAdvertisedTips) {
         // Fall back to local tracking refs only when advertised refs are unavailable.
         // Advertised refs are authoritative for push reachability and avoid stale local
         // tracking refs incorrectly hiding commits that still need LFS upload.
