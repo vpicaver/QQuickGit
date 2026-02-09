@@ -29,6 +29,7 @@ struct LfsFilterStream {
     QQuickGit::LfsPointer pointer;
     bool writerReady = false;
     bool passthrough = false;
+    bool cleanWriteFailed = false;
     QByteArray pointerBuffer;
 };
 
@@ -168,6 +169,10 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
 
     auto writeResult = state->writer.write(buffer, len);
     if (writeResult.hasError()) {
+        state->writer.discard();
+        state->writer = QQuickGit::LfsStore::StreamWriter();
+        state->writerReady = false;
+        state->cleanWriteFailed = true;
         const QString error = writeResult.errorMessage();
         if (!error.isEmpty()) {
             git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
@@ -183,6 +188,11 @@ int lfsStreamClose(git_writestream* stream)
     const git_filter_mode_t mode = git_filter_source_mode(state->source);
 
     if (mode == GIT_FILTER_CLEAN) {
+        if (state->cleanWriteFailed) {
+            git_error_set_str(GIT_ERROR_FILTER, "LFS clean write failed");
+            return GIT_ERROR;
+        }
+
         if (state->passthrough) {
             return state->next ? state->next->close(state->next) : GIT_OK;
         }
@@ -215,6 +225,9 @@ int lfsStreamClose(git_writestream* stream)
 
         auto finalizeResult = state->writer.finalize();
         if (finalizeResult.hasError()) {
+            state->writer.discard();
+            state->writer = QQuickGit::LfsStore::StreamWriter();
+            state->writerReady = false;
             const QString error = finalizeResult.errorMessage();
             if (!error.isEmpty()) {
                 git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());

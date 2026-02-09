@@ -29,6 +29,10 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <memory>
+#include <csignal>
+#if defined(Q_OS_UNIX)
+#include <sys/resource.h>
+#endif
 
 using namespace QQuickGit;
 
@@ -50,6 +54,17 @@ QByteArray readFileBytes(const QString& path)
         return QByteArray();
     }
     return file.readAll();
+}
+
+int countFilesRecursively(const QString& rootPath)
+{
+    int count = 0;
+    QDirIterator it(rootPath, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        count++;
+    }
+    return count;
 }
 
 LfsPolicy makeCustomPolicy(const QString& tag)
@@ -798,6 +813,57 @@ public:
 private:
     std::shared_ptr<LfsAuthProvider> mPrevious;
 };
+
+#if defined(Q_OS_UNIX)
+class ScopedFileSizeLimit
+{
+public:
+    bool apply(rlim_t softLimitBytes)
+    {
+        if (getrlimit(RLIMIT_FSIZE, &mPrevious) != 0) {
+            return false;
+        }
+
+        rlimit updated = mPrevious;
+        updated.rlim_cur = softLimitBytes;
+        if (setrlimit(RLIMIT_FSIZE, &updated) != 0) {
+            return false;
+        }
+        mActive = true;
+        return true;
+    }
+
+    ~ScopedFileSizeLimit()
+    {
+        if (mActive) {
+            setrlimit(RLIMIT_FSIZE, &mPrevious);
+        }
+    }
+
+private:
+    rlimit mPrevious{};
+    bool mActive = false;
+};
+
+class ScopedSignalHandler
+{
+public:
+    ScopedSignalHandler(int signalNumber, void (*handler)(int))
+        : mSignal(signalNumber)
+    {
+        mPrevious = std::signal(signalNumber, handler);
+    }
+
+    ~ScopedSignalHandler()
+    {
+        std::signal(mSignal, mPrevious);
+    }
+
+private:
+    int mSignal;
+    void (*mPrevious)(int) = SIG_DFL;
+};
+#endif
 
 bool setGitConfigString(const QString& workTreePath, const char* key, const QString& value)
 {
@@ -1668,6 +1734,61 @@ TEST_CASE("Lfs smudge streams non-pointer file without buffering", "[LFS]") {
     sink->parent.free(&sink->parent);
     git_filter_list_free(smudgeFilters);
     git_repository_free(repo);
+}
+
+TEST_CASE("Lfs clean write failure discards temporary object file", "[LFS][regression][P2]") {
+#if !defined(Q_OS_UNIX)
+    SKIP("Requires RLIMIT_FSIZE to force deterministic write failure");
+#else
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    auto store = std::make_shared<LfsStore>(gitDirPath, makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    LfsStoreRegistry::registerStore(store);
+
+    const QString attributesPath = QDir(tempDir.path()).filePath(QStringLiteral(".gitattributes"));
+    REQUIRE(writeTextFile(attributesPath, QByteArray("*.png filter=lfs diff=lfs merge=lfs -text\n")));
+
+    const QString tmpDirPath = QDir(gitDirPath).filePath(QStringLiteral("lfs/tmp"));
+    QDir().mkpath(tmpDirPath);
+    const QDir tmpDir(tmpDirPath);
+    const int beforeCount = tmpDir.entryList(QDir::Files | QDir::NoDotAndDotDot).size();
+    const QString objectsDirPath = QDir(gitDirPath).filePath(QStringLiteral("lfs/objects"));
+    QDir().mkpath(objectsDirPath);
+    const int objectFilesBefore = countFilesRecursively(objectsDirPath);
+
+    ScopedSignalHandler ignoreSigXfsz(SIGXFSZ, SIG_IGN);
+    ScopedFileSizeLimit fileSizeLimit;
+    REQUIRE(fileSizeLimit.apply(1024));
+
+    const QByteArray payload(64 * 1024, 'x');
+    git_filter_list* cleanFilters = nullptr;
+    REQUIRE(git_filter_list_load(&cleanFilters, repo, nullptr, "write-fail.png", GIT_FILTER_TO_ODB, GIT_FILTER_DEFAULT) == GIT_OK);
+    REQUIRE(cleanFilters != nullptr);
+
+    git_buf cleanOut = GIT_BUF_INIT;
+    const int applyResult = git_filter_list_apply_to_buffer(&cleanOut,
+                                                            cleanFilters,
+                                                            payload.constData(),
+                                                            static_cast<size_t>(payload.size()));
+    CHECK(applyResult != GIT_OK);
+
+    git_buf_dispose(&cleanOut);
+    git_filter_list_free(cleanFilters);
+
+    const int afterCount = tmpDir.entryList(QDir::Files | QDir::NoDotAndDotDot).size();
+    CHECK(afterCount == beforeCount);
+    const int objectFilesAfter = countFilesRecursively(objectsDirPath);
+    CHECK(objectFilesAfter == objectFilesBefore);
+
+    LfsStoreRegistry::unregisterStore(gitDirPath, store);
+    git_repository_free(repo);
+#endif
 }
 
 TEST_CASE("LfsBatchClient batch and download against GitHub", "[LFS][network]") {
