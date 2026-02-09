@@ -8,6 +8,7 @@
 
 //Qt includes
 #include <QObject>
+#include <QPointer>
 
 namespace QQuickGit {
 
@@ -63,8 +64,12 @@ protected:
     void watchProgress(Future future, WatchFunc watch) {
         watch();
 
-        auto updateProgress = [this, future]() {
-            setProgress(ProgressState::fromJson(future.progressText()));
+        QPointer<AbstractGitFutureWatcher> guard(this);
+        auto updateProgress = [guard, future]() {
+            if (!guard) {
+                return;
+            }
+            guard->setProgress(ProgressState::fromJson(future.progressText()));
         };
 
         setProgress(ProgressState(initialProgressText(), 0, 1));
