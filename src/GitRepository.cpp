@@ -124,6 +124,71 @@ LfsPushRefSpec parsePushRefSpec(QString refSpec)
     return LfsPushRefSpec{refSpec, QString()};
 }
 
+bool hasRefGlobPattern(const QString& ref)
+{
+    return ref.contains(QLatin1Char('*'))
+        || ref.contains(QLatin1Char('?'))
+        || ref.contains(QLatin1Char('['));
+}
+
+QVector<git_oid> resolvePushSourceCommits(git_repository* repo, const QString& sourceRef)
+{
+    QVector<git_oid> commitOids;
+    if (!repo || sourceRef.isEmpty()) {
+        return commitOids;
+    }
+
+    auto appendIfUnique = [&commitOids](const git_oid* oid) {
+        if (!oid || git_oid_is_zero(oid)) {
+            return;
+        }
+        for (const git_oid& existing : commitOids) {
+            if (git_oid_cmp(&existing, oid) == 0) {
+                return;
+            }
+        }
+        commitOids.push_back(*oid);
+    };
+
+    if (hasRefGlobPattern(sourceRef)) {
+        git_reference_iterator* iterator = nullptr;
+        if (git_reference_iterator_glob_new(&iterator, repo, sourceRef.toUtf8().constData()) != GIT_OK || !iterator) {
+            return commitOids;
+        }
+        std::unique_ptr<git_reference_iterator, decltype(&git_reference_iterator_free)> iteratorHolder(
+            iterator,
+            &git_reference_iterator_free);
+
+        git_reference* reference = nullptr;
+        while (git_reference_next(&reference, iterator) == GIT_OK) {
+            std::unique_ptr<git_reference, decltype(&git_reference_free)> referenceHolder(reference, &git_reference_free);
+            reference = nullptr;
+
+            git_object* commitObj = nullptr;
+            if (git_reference_peel(&commitObj, referenceHolder.get(), GIT_OBJECT_COMMIT) != GIT_OK || !commitObj) {
+                continue;
+            }
+            std::unique_ptr<git_object, decltype(&git_object_free)> commitHolder(commitObj, &git_object_free);
+            appendIfUnique(git_object_id(commitObj));
+        }
+        return commitOids;
+    }
+
+    git_object* sourceObj = nullptr;
+    if (git_revparse_single(&sourceObj, repo, sourceRef.toUtf8().constData()) != GIT_OK || !sourceObj) {
+        return commitOids;
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> sourceHolder(sourceObj, &git_object_free);
+
+    git_object* sourceCommitObj = nullptr;
+    if (git_object_peel(&sourceCommitObj, sourceObj, GIT_OBJECT_COMMIT) != GIT_OK || !sourceCommitObj) {
+        return commitOids;
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> sourceCommitHolder(sourceCommitObj, &git_object_free);
+    appendIfUnique(git_object_id(sourceCommitObj));
+    return commitOids;
+}
+
 int collectLfsPointersFromTree(const char* root, const git_tree_entry* entry, void* payload)
 {
     Q_UNUSED(root);
@@ -292,39 +357,43 @@ int prePushRemoteCredentialCallback(git_credential **out,
     return git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
 }
 
-void hideAdvertisedRemoteTips(git_repository* repo,
+bool hideAdvertisedRemoteTips(git_repository* repo,
                               git_revwalk* revwalk,
                               const QString& remoteName)
 {
     if (!repo || !revwalk || remoteName.isEmpty()) {
-        return;
+        return false;
     }
 
     git_remote* remote = nullptr;
     if (git_remote_lookup(&remote, repo, remoteName.toUtf8().constData()) != GIT_OK || !remote) {
-        return;
+        return false;
     }
     std::unique_ptr<git_remote, decltype(&git_remote_free)> remoteHolder(remote, &git_remote_free);
 
     git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
     callbacks.credentials = prePushRemoteCredentialCallback;
     if (git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr) != GIT_OK) {
-        return;
+        return false;
     }
 
     const git_remote_head** remoteHeads = nullptr;
     size_t remoteHeadCount = 0;
+    bool hidAny = false;
     if (git_remote_ls(&remoteHeads, &remoteHeadCount, remote) == GIT_OK && remoteHeads) {
         for (size_t i = 0; i < remoteHeadCount; ++i) {
             const git_remote_head* head = remoteHeads[i];
             if (!head || git_oid_is_zero(&head->oid)) {
                 continue;
             }
-            git_revwalk_hide(revwalk, &head->oid);
+            if (git_revwalk_hide(revwalk, &head->oid) == GIT_OK) {
+                hidAny = true;
+            }
         }
     }
 
     git_remote_disconnect(remote);
+    return hidAny;
 }
 
 Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
@@ -347,17 +416,14 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to resolve .git path for LFS upload"));
     }
 
-    git_object* sourceObj = nullptr;
-    if (git_revparse_single(&sourceObj, repo, parsed.sourceRef.toUtf8().constData()) != GIT_OK || !sourceObj) {
+    const QVector<git_oid> sourceCommitOids = resolvePushSourceCommits(repo, parsed.sourceRef);
+    if (sourceCommitOids.isEmpty()) {
+        if (hasRefGlobPattern(parsed.sourceRef)) {
+            // Wildcard refspecs may legitimately match no local refs.
+            return Monad::Result<LfsPushUploadPlan>(LfsPushUploadPlan{});
+        }
         return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to resolve push source for LFS upload"));
     }
-    std::unique_ptr<git_object, decltype(&git_object_free)> sourceHolder(sourceObj, &git_object_free);
-
-    git_object* sourceCommitObj = nullptr;
-    if (git_object_peel(&sourceCommitObj, sourceObj, GIT_OBJECT_COMMIT) != GIT_OK || !sourceCommitObj) {
-        return Monad::Result<LfsPushUploadPlan>(LfsPushUploadPlan{});
-    }
-    std::unique_ptr<git_object, decltype(&git_object_free)> sourceCommitHolder(sourceCommitObj, &git_object_free);
 
     git_revwalk* revwalk = nullptr;
     if (git_revwalk_new(&revwalk, repo) != GIT_OK || !revwalk) {
@@ -366,15 +432,18 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     std::unique_ptr<git_revwalk, decltype(&git_revwalk_free)> revwalkHolder(revwalk, &git_revwalk_free);
 
     git_revwalk_sorting(revwalk, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
-    if (git_revwalk_push(revwalk, git_object_id(sourceCommitObj)) != GIT_OK) {
-        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to walk pushed commits for LFS upload"));
+    for (const git_oid& sourceCommitOid : sourceCommitOids) {
+        if (git_revwalk_push(revwalk, &sourceCommitOid) != GIT_OK) {
+            return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to walk pushed commits for LFS upload"));
+        }
     }
 
-    const bool hidTrackingTips = hideRemoteTrackingTips(repo, revwalk, remoteName);
-    if (!hidTrackingTips) {
-        // Fall back to advertised refs when local tracking refs are missing/stale,
-        // e.g. first push of a new branch from a repository initialized locally.
-        hideAdvertisedRemoteTips(repo, revwalk, remoteName);
+    const bool hidAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName);
+    if (!hidAdvertisedTips) {
+        // Fall back to local tracking refs only when advertised refs are unavailable.
+        // Advertised refs are authoritative for push reachability and avoid stale local
+        // tracking refs incorrectly hiding commits that still need LFS upload.
+        hideRemoteTrackingTips(repo, revwalk, remoteName);
     }
 
     QHash<QString, LfsPointer> pointersByOid;
@@ -428,11 +497,9 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     plan.objects.reserve(pointersByOid.size());
     for (auto it = pointersByOid.begin(); it != pointersByOid.end(); ++it) {
         const LfsPointer pointer = it.value();
-        const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
-        if (objectPath.isEmpty() || !QFileInfo::exists(objectPath)) {
-            return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Missing local LFS object for oid %1").arg(pointer.oid),
-                                                    static_cast<int>(LfsFetchErrorCode::NotFound));
-        }
+        // Defer local object existence checks until the server explicitly requests
+        // an upload action for this oid. This avoids false failures when remote
+        // reachability cannot be determined up-front.
         plan.objects.push_back(LfsBatchClient::ObjectSpec{pointer.oid, pointer.size});
     }
 
@@ -1578,6 +1645,11 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             if(refSpec.isEmpty()) {
                 auto headBranch = headBranchName();
                 fixRefSpec = QString("refs/heads/%1").arg(headBranch);
+            }
+
+            const LfsPushRefSpec parsedRefSpec = parsePushRefSpec(fixRefSpec);
+            if (hasRefGlobPattern(parsedRefSpec.sourceRef) || hasRefGlobPattern(parsedRefSpec.destinationRef)) {
+                return AsyncFuture::completed(ResultBase(QStringLiteral("Wildcard push refspecs are not supported"), 2));
             }
 
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
