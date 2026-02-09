@@ -17,6 +17,7 @@
 #include <QFuture>
 #include <QTemporaryDir>
 #include <QFile>
+#include <QUuid>
 
 //Std includes
 #include <iostream>
@@ -43,6 +44,46 @@ auto waitForGitFuture(QFuture<ResultBase> future, int timeout = defaultTimeout) 
     INFO("Git error:" << future.result().errorMessage().toStdString() << "code:" << future.result().errorCode());
     CHECK(!future.result().hasError());
 }
+
+class ScopedRemoteBranchCleanup {
+public:
+    ScopedRemoteBranchCleanup(GitRepository* repository, QString branchName, int timeoutMs)
+        : mRepository(repository),
+          mBranchName(std::move(branchName)),
+          mTimeoutMs(timeoutMs)
+    {
+    }
+
+    void release()
+    {
+        mActive = false;
+    }
+
+    ~ScopedRemoteBranchCleanup()
+    {
+        if (!mActive || !mRepository || mBranchName.isEmpty()) {
+            return;
+        }
+
+        if (!mRepository->remoteBranchExists(QStringLiteral("origin/%1").arg(mBranchName))) {
+            return;
+        }
+
+        auto cleanupFuture = mRepository->deleteBranchRemote(mBranchName);
+        AsyncFuture::waitForFinished(cleanupFuture, mTimeoutMs);
+        if (cleanupFuture.result().hasError()) {
+            qDebug() << "Cleanup delete remote branch failed for"
+                     << mBranchName
+                     << cleanupFuture.result().errorMessage();
+        }
+    }
+
+private:
+    GitRepository* mRepository = nullptr;
+    QString mBranchName;
+    int mTimeoutMs = 0;
+    bool mActive = true;
+};
 
 TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
     QDir cloneDir("clone-test");
@@ -528,7 +569,10 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
     }
 
     SECTION("Create branch. commit. push. delete remote branch") {
-        CHECK_NOTHROW(repository.createBranch("testBranch"));
+        const QString branchName = QStringLiteral("testBranch-%1")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+        ScopedRemoteBranchCleanup cleanupGuard(&repository, branchName, defaultTimeout);
+        CHECK_NOTHROW(repository.createBranch(branchName));
 
         Account account;
         account.setName("Test name");
@@ -542,7 +586,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
             file.write("Hello world :D :D!\n");
         }
 
-        CHECK_NOTHROW(repository.commitAll("testBranch", ""));
+        CHECK_NOTHROW(repository.commitAll(branchName, ""));
 
         auto pushFuture = repository.push();
         AsyncFuture::waitForFinished(pushFuture, defaultTimeout);
@@ -553,8 +597,9 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
         AsyncFuture::waitForFinished(deleteFuture, defaultTimeout);
         INFO("Delete Future Error:" << deleteFuture.result().errorMessage().toStdString());
         REQUIRE(!deleteFuture.result().hasError());
+        cleanupGuard.release();
 
-        CHECK(!repository.remoteBranchExists("origin/testBranch"));
+        CHECK(!repository.remoteBranchExists(QStringLiteral("origin/%1").arg(branchName)));
     }
 
     git_repository_free(repo);

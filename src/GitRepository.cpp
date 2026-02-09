@@ -170,7 +170,9 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
 
     const LfsPushRefSpec parsed = parsePushRefSpec(refSpec);
     if (parsed.sourceRef.isEmpty()) {
-        return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Missing push source refspec for LFS upload"));
+        // Delete-only pushes (e.g. :refs/heads/topic) have no source object.
+        // They do not need LFS upload preflight.
+        return Monad::Result<LfsPushUploadPlan>(LfsPushUploadPlan{});
     }
 
     const char* gitPathRaw = git_repository_path(repo);
