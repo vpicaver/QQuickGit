@@ -2362,6 +2362,104 @@ TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression]
     CHECK(lfsServer.uploadRequestCount() > 0);
 }
 
+TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsUploadServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-new-branch"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-new-branch.git"));
+    const QString trackedFileName = QStringLiteral("baseline-lfs.png");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray baselineBytes = createPngFile(authorFilePath, Qt::blue);
+    REQUIRE(!baselineBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add baseline LFS file"), QStringLiteral("LFS baseline")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QByteArray baselineBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!baselineBlob.isEmpty());
+    LfsPointer baselinePointer;
+    REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
+    REQUIRE(baselinePointer.size == baselineBytes.size());
+
+    lfsServer.setExpectedObject(baselinePointer.oid, baselinePointer.size);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    auto baselinePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
+    INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
+         << "code:" << baselinePushFuture.result().errorCode());
+    REQUIRE(!baselinePushFuture.result().hasError());
+    const int uploadBatchRequestsAfterBaseline = lfsServer.uploadBatchRequestCount();
+    const int uploadRequestsAfterBaseline = lfsServer.uploadRequestCount();
+
+    const QString gitDirPath = gitDirPathFromWorkTree(authorPath);
+    REQUIRE(!gitDirPath.isEmpty());
+    const QString prunedObjectPath = LfsStore::objectPath(gitDirPath, baselinePointer.oid);
+    REQUIRE(!prunedObjectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(prunedObjectPath));
+    REQUIRE(QFile::remove(prunedObjectPath));
+
+    const QString topicBranch = QStringLiteral("topic-without-tracking");
+    REQUIRE_NOTHROW(author.createBranch(topicBranch));
+
+    const QString textPath = QDir(authorPath).filePath(QStringLiteral("topic-note.txt"));
+    REQUIRE(writeTextFile(textPath, QByteArray("branch-only change\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Topic change"), QStringLiteral("No new LFS pointers")));
+
+    git_reference* topicTracking = nullptr;
+    const int trackingLookup = git_reference_lookup(&topicTracking,
+                                                    authorRepo,
+                                                    QStringLiteral("refs/remotes/origin/%1").arg(topicBranch).toUtf8().constData());
+    CHECK(trackingLookup == GIT_ENOTFOUND);
+    if (topicTracking) {
+        git_reference_free(topicTracking);
+    }
+
+    auto topicPushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(topicPushFuture, 60 * 1000));
+    INFO("Topic push error:" << topicPushFuture.result().errorMessage().toStdString()
+         << "code:" << topicPushFuture.result().errorCode());
+    REQUIRE(!topicPushFuture.result().hasError());
+    CHECK(lfsServer.uploadBatchRequestCount() == uploadBatchRequestsAfterBaseline);
+    CHECK(lfsServer.uploadRequestCount() == uploadRequestsAfterBaseline);
+
+    git_repository* remoteRepoVerify = nullptr;
+    REQUIRE(git_repository_open(&remoteRepoVerify, remotePath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(remoteRepoVerify != nullptr);
+    git_reference* remoteTopicRef = nullptr;
+    REQUIRE(git_reference_lookup(&remoteTopicRef,
+                                 remoteRepoVerify,
+                                 QStringLiteral("refs/heads/%1").arg(topicBranch).toUtf8().constData()) == GIT_OK);
+    REQUIRE(remoteTopicRef != nullptr);
+    git_reference_free(remoteTopicRef);
+    git_repository_free(remoteRepoVerify);
+}
+
 TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS][network][upload]") {
     const QStringList missingEnv = missingUploadAuthEnvVars();
     if (!missingEnv.isEmpty()) {

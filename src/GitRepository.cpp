@@ -160,6 +160,173 @@ int collectLfsPointersFromTree(const char* root, const git_tree_entry* entry, vo
     return 0;
 }
 
+void collectLfsPointerFromBlobOid(git_repository* repo,
+                                  const git_oid* blobOid,
+                                  QHash<QString, LfsPointer>* pointersByOid)
+{
+    if (!repo || !blobOid || !pointersByOid || git_oid_is_zero(blobOid)) {
+        return;
+    }
+
+    git_blob* blob = nullptr;
+    if (git_blob_lookup(&blob, repo, blobOid) != GIT_OK || !blob) {
+        return;
+    }
+    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+    const size_t rawSize = git_blob_rawsize(blob);
+    if (!raw || rawSize == 0 || rawSize > 4096) {
+        return;
+    }
+
+    LfsPointer pointer;
+    if (!LfsPointer::parse(QByteArray(raw, static_cast<int>(rawSize)), &pointer)) {
+        return;
+    }
+    if (pointer.oid.isEmpty() || pointersByOid->contains(pointer.oid)) {
+        return;
+    }
+
+    pointersByOid->insert(pointer.oid, pointer);
+}
+
+void collectLfsPointersFromDiff(git_repository* repo,
+                                git_tree* parentTree,
+                                git_tree* commitTree,
+                                QHash<QString, LfsPointer>* pointersByOid)
+{
+    if (!repo || !commitTree || !pointersByOid) {
+        return;
+    }
+
+    git_diff* diff = nullptr;
+    git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
+    if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff) {
+        return;
+    }
+    std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
+
+    const size_t deltaCount = git_diff_num_deltas(diff);
+    for (size_t i = 0; i < deltaCount; ++i) {
+        const git_diff_delta* delta = git_diff_get_delta(diff, i);
+        if (!delta) {
+            continue;
+        }
+
+        const git_oid* blobOid = &delta->new_file.id;
+        if (git_oid_is_zero(blobOid)) {
+            continue;
+        }
+
+        collectLfsPointerFromBlobOid(repo, blobOid, pointersByOid);
+    }
+}
+
+bool hideRemoteTrackingTips(git_repository* repo,
+                            git_revwalk* revwalk,
+                            const QString& remoteName)
+{
+    if (!repo || !revwalk || remoteName.isEmpty()) {
+        return false;
+    }
+
+    const QString glob = QStringLiteral("refs/remotes/%1/*").arg(remoteName);
+    git_reference_iterator* iterator = nullptr;
+    if (git_reference_iterator_glob_new(&iterator, repo, glob.toUtf8().constData()) != GIT_OK || !iterator) {
+        return false;
+    }
+    std::unique_ptr<git_reference_iterator, decltype(&git_reference_iterator_free)> iteratorHolder(
+        iterator,
+        &git_reference_iterator_free);
+
+    bool hidAny = false;
+    git_reference* reference = nullptr;
+    while (git_reference_next(&reference, iterator) == GIT_OK) {
+        std::unique_ptr<git_reference, decltype(&git_reference_free)> referenceHolder(reference, &git_reference_free);
+        reference = nullptr;
+
+        const git_oid* remoteTip = git_reference_target(referenceHolder.get());
+        if (!remoteTip) {
+            continue;
+        }
+
+        if (git_revwalk_hide(revwalk, remoteTip) == GIT_OK) {
+            hidAny = true;
+        }
+    }
+    return hidAny;
+}
+
+int prePushRemoteCredentialCallback(git_credential **out,
+                                    const char *url,
+                                    const char *username_from_url,
+                                    unsigned int allowed_types,
+                                    void *payload)
+{
+    (void)payload;
+    const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
+
+    if (!(allowed_types & GIT_CREDENTIAL_SSH_KEY)) {
+        return GIT_PASSTHROUGH;
+    }
+
+    if (allowed_types & GIT_CREDENTIAL_SSH_KEY) {
+        const int agentResult = git_credential_ssh_key_from_agent(out, userName);
+        if (agentResult == GIT_OK) {
+            return GIT_OK;
+        }
+    }
+
+    RSAKeyGenerator key;
+    const QString host = extractHostFromUrl(url);
+    const bool usedSshConfig = key.loadFromSshConfigHost(host);
+    if (!usedSshConfig) {
+        key.loadOrGenerate();
+    }
+
+    const QByteArray publicKeyPath = key.publicKeyPath().toLocal8Bit();
+    const QByteArray privateKeyPath = key.privateKeyPath().toLocal8Bit();
+    const char* publicKey = publicKeyPath.isEmpty() ? nullptr : publicKeyPath.constData();
+    const char* privateKey = privateKeyPath.isEmpty() ? nullptr : privateKeyPath.constData();
+    return git_credential_ssh_key_new(out, userName, publicKey, privateKey, "");
+}
+
+void hideAdvertisedRemoteTips(git_repository* repo,
+                              git_revwalk* revwalk,
+                              const QString& remoteName)
+{
+    if (!repo || !revwalk || remoteName.isEmpty()) {
+        return;
+    }
+
+    git_remote* remote = nullptr;
+    if (git_remote_lookup(&remote, repo, remoteName.toUtf8().constData()) != GIT_OK || !remote) {
+        return;
+    }
+    std::unique_ptr<git_remote, decltype(&git_remote_free)> remoteHolder(remote, &git_remote_free);
+
+    git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
+    callbacks.credentials = prePushRemoteCredentialCallback;
+    if (git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr) != GIT_OK) {
+        return;
+    }
+
+    const git_remote_head** remoteHeads = nullptr;
+    size_t remoteHeadCount = 0;
+    if (git_remote_ls(&remoteHeads, &remoteHeadCount, remote) == GIT_OK && remoteHeads) {
+        for (size_t i = 0; i < remoteHeadCount; ++i) {
+            const git_remote_head* head = remoteHeads[i];
+            if (!head || git_oid_is_zero(&head->oid)) {
+                continue;
+            }
+            git_revwalk_hide(revwalk, &head->oid);
+        }
+    }
+
+    git_remote_disconnect(remote);
+}
+
 Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
                                                         const QString& refSpec,
                                                         const QString& remoteName)
@@ -203,25 +370,11 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to walk pushed commits for LFS upload"));
     }
 
-    QString branchName;
-    if (parsed.sourceRef.startsWith(QStringLiteral("refs/heads/"))) {
-        branchName = parsed.sourceRef.mid(QStringLiteral("refs/heads/").size());
-    }
-    if (branchName.isEmpty() && parsed.destinationRef.startsWith(QStringLiteral("refs/heads/"))) {
-        branchName = parsed.destinationRef.mid(QStringLiteral("refs/heads/").size());
-    }
-    if (!branchName.isEmpty()) {
-        const QString trackingRef = QStringLiteral("refs/remotes/%1/%2").arg(remoteName, branchName);
-        git_reference* remoteTracking = nullptr;
-        if (git_reference_lookup(&remoteTracking, repo, trackingRef.toUtf8().constData()) == GIT_OK && remoteTracking) {
-            const git_oid* remoteTip = git_reference_target(remoteTracking);
-            if (remoteTip) {
-                git_revwalk_hide(revwalk, remoteTip);
-            }
-        }
-        if (remoteTracking) {
-            git_reference_free(remoteTracking);
-        }
+    const bool hidTrackingTips = hideRemoteTrackingTips(repo, revwalk, remoteName);
+    if (!hidTrackingTips) {
+        // Fall back to advertised refs when local tracking refs are missing/stale,
+        // e.g. first push of a new branch from a repository initialized locally.
+        hideAdvertisedRemoteTips(repo, revwalk, remoteName);
     }
 
     QHash<QString, LfsPointer> pointersByOid;
@@ -239,9 +392,31 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         }
         std::unique_ptr<git_tree, decltype(&git_tree_free)> treeHolder(tree, &git_tree_free);
 
-        LfsTreeCollectPayload payload{repo, &pointersByOid};
-        if (git_tree_walk(tree, GIT_TREEWALK_PRE, collectLfsPointersFromTree, &payload) != GIT_OK) {
-            return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to scan pushed tree for LFS pointers"));
+        const unsigned int parentCount = git_commit_parentcount(commit);
+        if (parentCount == 0) {
+            // Root commit: all tree entries are new to this history slice.
+            LfsTreeCollectPayload payload{repo, &pointersByOid};
+            if (git_tree_walk(tree, GIT_TREEWALK_PRE, collectLfsPointersFromTree, &payload) != GIT_OK) {
+                return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to scan pushed tree for LFS pointers"));
+            }
+            continue;
+        }
+
+        for (unsigned int parentIndex = 0; parentIndex < parentCount; ++parentIndex) {
+            git_commit* parentCommit = nullptr;
+            if (git_commit_parent(&parentCommit, commit, parentIndex) != GIT_OK || !parentCommit) {
+                continue;
+            }
+            std::unique_ptr<git_commit, decltype(&git_commit_free)> parentCommitHolder(parentCommit,
+                                                                                        &git_commit_free);
+
+            git_tree* parentTree = nullptr;
+            if (git_commit_tree(&parentTree, parentCommit) != GIT_OK || !parentTree) {
+                continue;
+            }
+            std::unique_ptr<git_tree, decltype(&git_tree_free)> parentTreeHolder(parentTree, &git_tree_free);
+
+            collectLfsPointersFromDiff(repo, parentTree, tree, &pointersByOid);
         }
     }
 
