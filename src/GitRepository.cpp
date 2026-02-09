@@ -402,22 +402,24 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
             continue;
         }
 
-        for (unsigned int parentIndex = 0; parentIndex < parentCount; ++parentIndex) {
-            git_commit* parentCommit = nullptr;
-            if (git_commit_parent(&parentCommit, commit, parentIndex) != GIT_OK || !parentCommit) {
-                continue;
-            }
-            std::unique_ptr<git_commit, decltype(&git_commit_free)> parentCommitHolder(parentCommit,
-                                                                                        &git_commit_free);
-
-            git_tree* parentTree = nullptr;
-            if (git_commit_tree(&parentTree, parentCommit) != GIT_OK || !parentTree) {
-                continue;
-            }
-            std::unique_ptr<git_tree, decltype(&git_tree_free)> parentTreeHolder(parentTree, &git_tree_free);
-
-            collectLfsPointersFromDiff(repo, parentTree, tree, &pointersByOid);
+        git_commit* firstParentCommit = nullptr;
+        if (git_commit_parent(&firstParentCommit, commit, 0) != GIT_OK || !firstParentCommit) {
+            continue;
         }
+        std::unique_ptr<git_commit, decltype(&git_commit_free)> firstParentCommitHolder(firstParentCommit,
+                                                                                          &git_commit_free);
+
+        git_tree* firstParentTree = nullptr;
+        if (git_commit_tree(&firstParentTree, firstParentCommit) != GIT_OK || !firstParentTree) {
+            continue;
+        }
+        std::unique_ptr<git_tree, decltype(&git_tree_free)> firstParentTreeHolder(firstParentTree,
+                                                                                   &git_tree_free);
+
+        // Merge commits may contain content already reachable from other parents that
+        // is already present remotely. Restrict to first-parent diffs to plan uploads
+        // only for the pushed side of history.
+        collectLfsPointersFromDiff(repo, firstParentTree, tree, &pointersByOid);
     }
 
     LfsPushUploadPlan plan;

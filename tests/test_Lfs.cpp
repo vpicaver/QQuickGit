@@ -2460,6 +2460,104 @@ TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LF
     git_repository_free(remoteRepoVerify);
 }
 
+TEST_CASE("Lfs push merge ignores LFS pointers only present in non-first-parent diff", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsUploadServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-merge-parent-scan"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-merge-parent-scan.git"));
+    const QString trackedFileName = QStringLiteral("merge-parent-lfs.png");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    const QString baseFilePath = QDir(authorPath).filePath(QStringLiteral("base.txt"));
+    REQUIRE(writeTextFile(baseFilePath, QByteArray("base commit\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Base"), QStringLiteral("Base commit")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString baseOid = headOidString(authorRepo);
+    REQUIRE_FALSE(baseOid.isEmpty());
+    const QString baseBranch = author.headBranchName();
+    REQUIRE_FALSE(baseBranch.isEmpty());
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray workingBytes = createPngFile(authorFilePath, Qt::darkGreen);
+    REQUIRE(!workingBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add remote-tip LFS file"), QStringLiteral("LFS merge parent baseline")));
+
+    const QByteArray baselineBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!baselineBlob.isEmpty());
+    LfsPointer baselinePointer;
+    REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
+    REQUIRE(baselinePointer.size == workingBytes.size());
+
+    lfsServer.setExpectedObject(baselinePointer.oid, baselinePointer.size);
+
+    auto baselinePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
+    INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
+         << "code:" << baselinePushFuture.result().errorCode());
+    REQUIRE(!baselinePushFuture.result().hasError());
+    const int uploadBatchRequestsAfterBaseline = lfsServer.uploadBatchRequestCount();
+    const int uploadRequestsAfterBaseline = lfsServer.uploadRequestCount();
+
+    const QString featureBranch = QStringLiteral("feature-non-lfs-parent");
+    REQUIRE_NOTHROW(author.createBranch(featureBranch, baseOid));
+    CHECK(author.headBranchName() == featureBranch);
+
+    const QString featureFilePath = QDir(authorPath).filePath(QStringLiteral("feature.txt"));
+    REQUIRE(writeTextFile(featureFilePath, QByteArray("feature branch commit\n")));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Feature commit"), QStringLiteral("No LFS changes")));
+
+    auto checkoutBaseFuture = author.checkout(QStringLiteral("refs/heads/%1").arg(baseBranch));
+    REQUIRE(AsyncFuture::waitForFinished(checkoutBaseFuture, 60 * 1000));
+    REQUIRE(!checkoutBaseFuture.result().hasError());
+    CHECK(author.headBranchName() == baseBranch);
+
+    const GitRepository::MergeResult mergeResult = author.merge({featureBranch});
+    REQUIRE(mergeResult.state() == GitRepository::MergeResult::MergeCommitCreated);
+
+    const QString gitDirPath = gitDirPathFromWorkTree(authorPath);
+    REQUIRE(!gitDirPath.isEmpty());
+    const QString prunedObjectPath = LfsStore::objectPath(gitDirPath, baselinePointer.oid);
+    REQUIRE(!prunedObjectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(prunedObjectPath));
+    REQUIRE(QFile::remove(prunedObjectPath));
+
+    auto mergePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(mergePushFuture, 60 * 1000));
+    INFO("Merge push error:" << mergePushFuture.result().errorMessage().toStdString()
+         << "code:" << mergePushFuture.result().errorCode());
+    REQUIRE(!mergePushFuture.result().hasError());
+
+    // Regression guard: merge push should not require uploading remote-tip LFS objects.
+    CHECK(lfsServer.uploadBatchRequestCount() == uploadBatchRequestsAfterBaseline);
+    CHECK(lfsServer.uploadRequestCount() == uploadRequestsAfterBaseline);
+}
+
 TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS][network][upload]") {
     const QStringList missingEnv = missingUploadAuthEnvVars();
     if (!missingEnv.isEmpty()) {
