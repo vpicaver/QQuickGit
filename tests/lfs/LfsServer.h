@@ -34,8 +34,7 @@ private:
 
     QTcpServer mServer;
     QHash<QTcpSocket*, QByteArray> mPendingRequests;
-    QString mDownloadOid;
-    QByteArray mDownloadObjectBytes;
+    QHash<QString, QByteArray> mDownloadObjects;
     QString mUploadOid;
     qint64 mUploadSize = 0;
     int mDownloadBatchRequestCount = 0;

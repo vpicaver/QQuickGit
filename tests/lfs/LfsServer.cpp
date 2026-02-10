@@ -2,6 +2,9 @@
 
 #include <QDebug>
 #include <QHostAddress>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTcpSocket>
 
 namespace {
@@ -22,6 +25,27 @@ int contentLengthFromHeaders(const QByteArray& request)
         }
     }
     return 0;
+}
+
+QString firstRequestedOidFromBatchBody(const QByteArray& body)
+{
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
+    if (doc.isNull() || !doc.isObject()) {
+        return QString();
+    }
+
+    const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
+    for (const QJsonValue& value : objects) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QString oid = value.toObject().value(QStringLiteral("oid")).toString();
+        if (!oid.isEmpty()) {
+            return oid;
+        }
+    }
+    return QString();
 }
 } // namespace
 
@@ -46,8 +70,10 @@ QString LfsServer::endpoint() const
 
 void LfsServer::setDownloadObject(const QString& oid, const QByteArray& bytes)
 {
-    mDownloadOid = oid;
-    mDownloadObjectBytes = bytes;
+    if (oid.isEmpty()) {
+        return;
+    }
+    mDownloadObjects.insert(oid, bytes);
 }
 
 void LfsServer::setExpectedUploadObject(const QString& oid, qint64 size)
@@ -155,7 +181,17 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
 
         mDownloadBatchRequestCount++;
         qDebug() << "[LfsServer] download batch request count =" << mDownloadBatchRequestCount;
-        if (mDownloadOid.isEmpty() || mDownloadObjectBytes.isEmpty()) {
+        const QString requestedOid = firstRequestedOidFromBatchBody(body);
+        const QString oid = (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid))
+            ? requestedOid
+            : (mDownloadObjects.isEmpty() ? QString() : mDownloadObjects.constBegin().key());
+        const QByteArray objectBytes = oid.isEmpty() ? QByteArray() : mDownloadObjects.value(oid);
+
+        qDebug() << "[LfsServer] download batch requested oid =" << requestedOid
+                 << "served oid =" << oid
+                 << "bytes =" << objectBytes.size();
+
+        if (oid.isEmpty() || objectBytes.isEmpty()) {
             respond(socket,
                     200,
                     QByteArray("application/vnd.git-lfs+json"),
@@ -165,12 +201,12 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
 
         const QString href = QStringLiteral("http://127.0.0.1:%1/objects/%2")
             .arg(mServer.serverPort())
-            .arg(mDownloadOid);
+            .arg(oid);
         const QByteArray responseBody = QStringLiteral(
             "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
             "\"actions\":{\"download\":{\"href\":\"%3\"}}}]}")
-            .arg(mDownloadOid)
-            .arg(mDownloadObjectBytes.size())
+            .arg(oid)
+            .arg(objectBytes.size())
             .arg(href)
             .toUtf8();
         respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
@@ -192,8 +228,8 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         qDebug() << "[LfsServer] download object request count =" << mDownloadObjectRequestCount;
         const QByteArray oidBytes = path.mid(objectPrefixIndex + objectPathPrefix.size());
         const QString requestedOid = QString::fromUtf8(oidBytes);
-        if (!requestedOid.isEmpty() && requestedOid == mDownloadOid) {
-            respond(socket, 200, QByteArray("application/octet-stream"), mDownloadObjectBytes);
+        if (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid)) {
+            respond(socket, 200, QByteArray("application/octet-stream"), mDownloadObjects.value(requestedOid));
         } else {
             respond(socket, 404, QByteArray("application/octet-stream"), QByteArray("missing"));
         }
