@@ -41,7 +41,14 @@ QString normalizeGitDirPath(const QString& gitDirPath)
     if (gitDirPath.isEmpty()) {
         return QString();
     }
-    return QDir(gitDirPath).absolutePath();
+
+    const QString absolute = QDir(gitDirPath).absolutePath();
+    const QFileInfo info(absolute);
+    const QString canonical = info.canonicalFilePath();
+    if (!canonical.isEmpty()) {
+        return QDir(canonical).absolutePath();
+    }
+    return absolute;
 }
 
 QString lfsObjectsDir(const QString& gitDirPath)

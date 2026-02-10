@@ -4,6 +4,27 @@
 #include <QHostAddress>
 #include <QTcpSocket>
 
+namespace {
+int contentLengthFromHeaders(const QByteArray& request)
+{
+    const int headerEnd = request.indexOf("\r\n\r\n");
+    if (headerEnd < 0) {
+        return -1;
+    }
+    const QByteArray headerBlock = request.left(headerEnd);
+    const QList<QByteArray> lines = headerBlock.split('\n');
+    for (const QByteArray& rawLine : lines) {
+        const QByteArray line = rawLine.trimmed();
+        if (line.toLower().startsWith("content-length:")) {
+            bool ok = false;
+            const int value = line.mid(sizeof("Content-Length:") - 1).trimmed().toInt(&ok);
+            return ok ? value : 0;
+        }
+    }
+    return 0;
+}
+} // namespace
+
 LfsServer::LfsServer(QObject* parent)
     : QObject(parent)
 {
@@ -60,23 +81,46 @@ void LfsServer::handleNewConnections()
     while (mServer.hasPendingConnections()) {
         QTcpSocket* socket = mServer.nextPendingConnection();
         QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
-            const QByteArray request = socket->readAll();
-            if (request.isEmpty()) {
+            const QByteArray chunk = socket->readAll();
+            if (chunk.isEmpty()) {
                 return;
             }
-            handleRequest(socket, request);
+            QByteArray& pending = mPendingRequests[socket];
+            pending.append(chunk);
+            if (handleRequest(socket, pending)) {
+                mPendingRequests.remove(socket);
+            }
         });
-        QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+        QObject::connect(socket, &QTcpSocket::disconnected, socket, [this, socket]() {
+            mPendingRequests.remove(socket);
+            socket->deleteLater();
+        });
     }
 }
 
-void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
+bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
 {
+    if (!socket) {
+        return true;
+    }
+
+    const int headerEnd = request.indexOf("\r\n\r\n");
+    if (headerEnd < 0) {
+        return false;
+    }
+
+    const int contentLength = contentLengthFromHeaders(request);
+    const int bodyStart = headerEnd + 4;
+    const int receivedBodyBytes = request.size() - bodyStart;
+    if (contentLength >= 0 && receivedBodyBytes < contentLength) {
+        qDebug() << "[LfsServer] waiting for full body" << receivedBodyBytes << "/" << contentLength;
+        return false;
+    }
+
     const QByteArray firstLine = request.split('\n').value(0).trimmed();
     const QByteArray method = firstLine.split(' ').value(0).trimmed();
     const QByteArray path = firstLine.split(' ').value(1).trimmed();
-    const int bodyStart = request.indexOf("\r\n\r\n");
-    const QByteArray body = bodyStart >= 0 ? request.mid(bodyStart + 4) : QByteArray();
+    const QByteArray body = request.mid(bodyStart, contentLength >= 0 ? contentLength : receivedBodyBytes);
 
     qDebug() << "[LfsServer] request"
              << method
@@ -95,7 +139,7 @@ void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
                         200,
                         QByteArray("application/vnd.git-lfs+json"),
                         QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-                return;
+                return true;
             }
             const QString baseUrl = QStringLiteral("http://127.0.0.1:%1").arg(mServer.serverPort());
             const QByteArray responseBody = QStringLiteral(
@@ -106,7 +150,7 @@ void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
                 .arg(baseUrl)
                 .toUtf8();
             respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
-            return;
+            return true;
         }
 
         mDownloadBatchRequestCount++;
@@ -116,7 +160,7 @@ void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
                     200,
                     QByteArray("application/vnd.git-lfs+json"),
                     QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-            return;
+            return true;
         }
 
         const QString href = QStringLiteral("http://127.0.0.1:%1/objects/%2")
@@ -130,14 +174,15 @@ void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
             .arg(href)
             .toUtf8();
         respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
-        return;
+        return true;
     }
 
     if (method == "PUT" && path.contains("/upload/")) {
         mUploadRequestCount++;
-        qDebug() << "[LfsServer] upload object request count =" << mUploadRequestCount;
+        qDebug() << "[LfsServer] upload object request count =" << mUploadRequestCount
+                 << "receivedBytes=" << body.size();
         respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));
-        return;
+        return true;
     }
 
     const QByteArray objectPathPrefix("/objects/");
@@ -152,10 +197,11 @@ void LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         } else {
             respond(socket, 404, QByteArray("application/octet-stream"), QByteArray("missing"));
         }
-        return;
+        return true;
     }
 
     respond(socket, 404, QByteArray("application/json"), QByteArray("{\"message\":\"not found\"}"));
+    return true;
 }
 
 void LfsServer::respond(QTcpSocket* socket,

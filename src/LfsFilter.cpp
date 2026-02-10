@@ -146,6 +146,8 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
         if (!state->store) {
             state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
             if (!state->store) {
+                qDebug() << "[LFS filter] no registered store for gitDirPath, using fallback policy:"
+                         << gitDirPath;
                 state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
             }
         }
@@ -205,6 +207,8 @@ int lfsStreamClose(git_writestream* stream)
             }
             state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
             if (!state->store) {
+                qDebug() << "[LFS filter] no registered store for gitDirPath (close), using fallback policy:"
+                         << gitDirPath;
                 state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
             }
             const QString filePath = resolvePathForSource(state->source);

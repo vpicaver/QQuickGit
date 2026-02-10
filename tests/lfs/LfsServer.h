@@ -2,6 +2,7 @@
 #define LFS_SERVER_H
 
 #include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QTcpServer>
@@ -28,10 +29,11 @@ public:
 
 private:
     void handleNewConnections();
-    void handleRequest(QTcpSocket* socket, const QByteArray& request);
+    bool handleRequest(QTcpSocket* socket, const QByteArray& request);
     void respond(QTcpSocket* socket, int status, const QByteArray& contentType, const QByteArray& body) const;
 
     QTcpServer mServer;
+    QHash<QTcpSocket*, QByteArray> mPendingRequests;
     QString mDownloadOid;
     QByteArray mDownloadObjectBytes;
     QString mUploadOid;
