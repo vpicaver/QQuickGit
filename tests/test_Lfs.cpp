@@ -11,6 +11,7 @@
 #include "LfsAuthProvider.h"
 #include "LfsBatchClient.h"
 #include "LfsStore.h"
+#include "LfsServer.h"
 #include "asyncfuture.h"
 
 // Qt includes
@@ -291,219 +292,6 @@ private:
         "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"\",\"size\":0,"
         "\"error\":{\"code\":404,\"message\":\"missing\"}}]}");
     int mBatchRequestCount = 0;
-};
-
-class LocalLfsDownloadServer
-{
-public:
-    bool start()
-    {
-        QObject::connect(&mServer, &QTcpServer::newConnection, &mServer, [this]() { handleNewConnections(); });
-        return mServer.listen(QHostAddress::LocalHost, 0);
-    }
-
-    QString endpoint() const
-    {
-        return QStringLiteral("http://127.0.0.1:%1/info/lfs").arg(mServer.serverPort());
-    }
-
-    void setObject(const QString& oid, const QByteArray& bytes)
-    {
-        mOid = oid;
-        mObjectBytes = bytes;
-    }
-
-    int batchRequestCount() const
-    {
-        return mBatchRequestCount;
-    }
-
-    int objectRequestCount() const
-    {
-        return mObjectRequestCount;
-    }
-
-private:
-    void respond(QTcpSocket* socket, int status, const QByteArray& contentType, const QByteArray& body)
-    {
-        const QByteArray statusText = status == 200 ? QByteArray("OK") : QByteArray("Not Found");
-        const QByteArray response =
-            "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
-            "Content-Type: " + contentType + "\r\n"
-            "Connection: close\r\n"
-            "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
-            "\r\n" + body;
-        socket->write(response);
-        socket->flush();
-        socket->disconnectFromHost();
-    }
-
-    void handleNewConnections()
-    {
-        while (mServer.hasPendingConnections()) {
-            QTcpSocket* socket = mServer.nextPendingConnection();
-            QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
-                const QByteArray request = socket->readAll();
-                if (request.isEmpty()) {
-                    return;
-                }
-
-                const QByteArray firstLine = request.split('\n').value(0).trimmed();
-                const QByteArray path = firstLine.split(' ').value(1).trimmed();
-
-                if (path.contains("/objects/batch")) {
-                    mBatchRequestCount++;
-                    if (mOid.isEmpty() || mObjectBytes.isEmpty()) {
-                        respond(socket,
-                                200,
-                                QByteArray("application/vnd.git-lfs+json"),
-                                QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-                        return;
-                    }
-
-                    const QString href = QStringLiteral("http://127.0.0.1:%1/objects/%2")
-                        .arg(mServer.serverPort())
-                        .arg(mOid);
-                    const QByteArray body = QStringLiteral(
-                        "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
-                        "\"actions\":{\"download\":{\"href\":\"%3\"}}}]}")
-                        .arg(mOid)
-                        .arg(mObjectBytes.size())
-                        .arg(href)
-                        .toUtf8();
-                    respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), body);
-                    return;
-                }
-
-                const QByteArray objectPathPrefix("/objects/");
-                const int objectPrefixIndex = path.indexOf(objectPathPrefix);
-                if (objectPrefixIndex >= 0) {
-                    mObjectRequestCount++;
-                    const QByteArray oidBytes = path.mid(objectPrefixIndex + objectPathPrefix.size());
-                    const QString requestedOid = QString::fromUtf8(oidBytes);
-                    if (!requestedOid.isEmpty() && requestedOid == mOid) {
-                        respond(socket, 200, QByteArray("application/octet-stream"), mObjectBytes);
-                    } else {
-                        respond(socket, 404, QByteArray("application/octet-stream"), QByteArray("missing"));
-                    }
-                    return;
-                }
-
-                respond(socket, 404, QByteArray("application/json"), QByteArray("{\"message\":\"not found\"}"));
-            });
-            QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-        }
-    }
-
-    QTcpServer mServer;
-    QString mOid;
-    QByteArray mObjectBytes;
-    int mBatchRequestCount = 0;
-    int mObjectRequestCount = 0;
-};
-
-class LocalLfsUploadServer
-{
-public:
-    bool start()
-    {
-        QObject::connect(&mServer, &QTcpServer::newConnection, &mServer, [this]() { handleNewConnections(); });
-        return mServer.listen(QHostAddress::LocalHost, 0);
-    }
-
-    QString endpoint() const
-    {
-        return QStringLiteral("http://127.0.0.1:%1/info/lfs").arg(mServer.serverPort());
-    }
-
-    void setExpectedObject(const QString& oid, qint64 size)
-    {
-        mOid = oid;
-        mSize = size;
-    }
-
-    int uploadBatchRequestCount() const
-    {
-        return mUploadBatchRequestCount;
-    }
-
-    int uploadRequestCount() const
-    {
-        return mUploadRequestCount;
-    }
-
-private:
-    void respond(QTcpSocket* socket, int status, const QByteArray& contentType, const QByteArray& body)
-    {
-        const QByteArray statusText = status == 200 ? QByteArray("OK") : QByteArray("Not Found");
-        const QByteArray response =
-            "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
-            "Content-Type: " + contentType + "\r\n"
-            "Connection: close\r\n"
-            "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
-            "\r\n" + body;
-        socket->write(response);
-        socket->flush();
-        socket->disconnectFromHost();
-    }
-
-    void handleNewConnections()
-    {
-        while (mServer.hasPendingConnections()) {
-            QTcpSocket* socket = mServer.nextPendingConnection();
-            QObject::connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
-                const QByteArray request = socket->readAll();
-                if (request.isEmpty()) {
-                    return;
-                }
-
-                const QByteArray firstLine = request.split('\n').value(0).trimmed();
-                const QByteArray method = firstLine.split(' ').value(0).trimmed();
-                const QByteArray path = firstLine.split(' ').value(1).trimmed();
-                const QByteArray body = request.mid(request.indexOf("\r\n\r\n") + 4);
-
-                if (path.contains("/objects/batch")) {
-                    if (body.contains("\"operation\":\"upload\"")) {
-                        mUploadBatchRequestCount++;
-                    }
-
-                    if (mOid.isEmpty() || mSize <= 0) {
-                        respond(socket,
-                                200,
-                                QByteArray("application/vnd.git-lfs+json"),
-                                QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-                        return;
-                    }
-
-                    const QString baseUrl = QStringLiteral("http://127.0.0.1:%1").arg(mServer.serverPort());
-                    const QByteArray responseBody = QStringLiteral(
-                        "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
-                        "\"actions\":{\"upload\":{\"href\":\"%3/upload/%1\"}}}]}")
-                        .arg(mOid)
-                        .arg(mSize)
-                        .arg(baseUrl)
-                        .toUtf8();
-                    respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
-                    return;
-                }
-
-                if (method == "PUT" && path.contains("/upload/")) {
-                    mUploadRequestCount++;
-                    respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));
-                    return;
-                }
-
-                respond(socket, 404, QByteArray("application/json"), QByteArray("{\"message\":\"not found\"}"));
-            });
-            QObject::connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-        }
-    }
-
-    QTcpServer mServer;
-    QString mOid;
-    qint64 mSize = 0;
-    int mUploadBatchRequestCount = 0;
-    int mUploadRequestCount = 0;
 };
 
 class LocalLfsAuthHeaderServer
@@ -2157,7 +1945,7 @@ TEST_CASE("LfsBatchClient download hash mismatch keeps existing cached object", 
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsDownloadServer server;
+    LfsServer server;
     REQUIRE(server.start());
 
     git_repository* repo = nullptr;
@@ -2190,7 +1978,7 @@ TEST_CASE("LfsBatchClient download hash mismatch keeps existing cached object", 
     REQUIRE(!existingObjectPath.isEmpty());
     REQUIRE(QFileInfo::exists(existingObjectPath));
 
-    server.setObject(expectedPointer.oid, actualBytes);
+    server.setDownloadObject(expectedPointer.oid, actualBytes);
     LfsBatchClient::Action action;
     action.href = QUrl(QStringLiteral("%1/objects/%2")
                            .arg(server.endpoint())
@@ -2478,7 +2266,7 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsDownloadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-fetch"));
@@ -2523,7 +2311,7 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
     REQUIRE(expectedPointer.size == updatedBytes.size());
 
     REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
-    lfsServer.setObject(expectedPointer.oid, updatedBytes);
+    lfsServer.setDownloadObject(expectedPointer.oid, updatedBytes);
 
     const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
     REQUIRE(!consumerGitDirPath.isEmpty());
@@ -2553,15 +2341,15 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
         QString::fromLatin1(QCryptographicHash::hash(workingBytes, QCryptographicHash::Sha256).toHex());
     CHECK(workingSha256.toStdString() == expectedPointer.oid.toStdString());
 
-    CHECK(lfsServer.batchRequestCount() > 0);
-    CHECK(lfsServer.objectRequestCount() > 0);
+    CHECK(lfsServer.downloadBatchRequestCount() > 0);
+    CHECK(lfsServer.downloadObjectRequestCount() > 0);
 }
 
 TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression][P1]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push"));
@@ -2599,7 +2387,7 @@ TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression]
     REQUIRE(LfsPointer::parse(committedBlob, &pointer));
     REQUIRE(pointer.size == workingBytes.size());
 
-    lfsServer.setExpectedObject(pointer.oid, pointer.size);
+    lfsServer.setExpectedUploadObject(pointer.oid, pointer.size);
 
     REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
     REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
@@ -2619,7 +2407,7 @@ TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LF
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-new-branch"));
@@ -2657,7 +2445,7 @@ TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LF
     REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
     REQUIRE(baselinePointer.size == baselineBytes.size());
 
-    lfsServer.setExpectedObject(baselinePointer.oid, baselinePointer.size);
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
 
     REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
     REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
@@ -2717,7 +2505,7 @@ TEST_CASE("Lfs push merge ignores LFS pointers only present in non-first-parent 
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-merge-parent-scan"));
@@ -2767,7 +2555,7 @@ TEST_CASE("Lfs push merge ignores LFS pointers only present in non-first-parent 
     REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
     REQUIRE(baselinePointer.size == workingBytes.size());
 
-    lfsServer.setExpectedObject(baselinePointer.oid, baselinePointer.size);
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
 
     auto baselinePushFuture = author.push();
     REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
@@ -2815,7 +2603,7 @@ TEST_CASE("Lfs push does not trust stale remote-tracking refs over actual remote
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-stale-tracking"));
@@ -2856,7 +2644,7 @@ TEST_CASE("Lfs push does not trust stale remote-tracking refs over actual remote
     REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
     REQUIRE(baselinePointer.size == baselineBytes.size());
 
-    lfsServer.setExpectedObject(baselinePointer.oid, baselinePointer.size);
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
     auto baselinePushFuture = author.push();
     REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
     INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
@@ -2895,7 +2683,7 @@ TEST_CASE("Lfs push does not trust stale remote-tracking refs over actual remote
     }
     git_reference_free(headRef);
 
-    lfsServer.setExpectedObject(updatedPointer.oid, updatedPointer.size);
+    lfsServer.setExpectedUploadObject(updatedPointer.oid, updatedPointer.size);
     auto updatePushFuture = author.push();
     REQUIRE(AsyncFuture::waitForFinished(updatePushFuture, 60 * 1000));
     INFO("Update push error:" << updatePushFuture.result().errorMessage().toStdString()
@@ -2912,7 +2700,7 @@ TEST_CASE("Lfs push does not fall back to stale tracking refs when remote tips a
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-advertised-tip-fallback"));
@@ -2988,7 +2776,7 @@ TEST_CASE("Lfs push does not fall back to stale tracking refs when remote tips a
 
     const int uploadBatchRequestsBeforePush = lfsServer.uploadBatchRequestCount();
     const int uploadRequestsBeforePush = lfsServer.uploadRequestCount();
-    lfsServer.setExpectedObject(topicPointer.oid, topicPointer.size);
+    lfsServer.setExpectedUploadObject(topicPointer.oid, topicPointer.size);
 
     auto pushFuture = author.push();
     REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
@@ -3007,7 +2795,7 @@ TEST_CASE("Lfs push planning uses non-SSH auth to list advertised tips before st
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     LocalGitAdvertiseAuthServer gitServer;
@@ -3080,7 +2868,7 @@ TEST_CASE("Lfs push planning uses non-SSH auth to list advertised tips before st
 
     const int uploadBatchRequestsBeforePush = lfsServer.uploadBatchRequestCount();
     const int uploadRequestsBeforePush = lfsServer.uploadRequestCount();
-    lfsServer.setExpectedObject(topicPointer.oid, topicPointer.size);
+    lfsServer.setExpectedUploadObject(topicPointer.oid, topicPointer.size);
 
     auto pushFuture = author.push();
     REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
@@ -3160,7 +2948,7 @@ TEST_CASE("Lfs push rejects wildcard refspecs with explicit error", "[LFS][regre
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
-    LocalLfsUploadServer lfsServer;
+    LfsServer lfsServer;
     REQUIRE(lfsServer.start());
 
     const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-wildcard-refspec"));
@@ -3200,7 +2988,7 @@ TEST_CASE("Lfs push rejects wildcard refspecs with explicit error", "[LFS][regre
     LfsPointer pointer;
     REQUIRE(LfsPointer::parse(committedBlob, &pointer));
     REQUIRE(pointer.size == workingBytes.size());
-    lfsServer.setExpectedObject(pointer.oid, pointer.size);
+    lfsServer.setExpectedUploadObject(pointer.oid, pointer.size);
 
     auto pushFuture = author.push(QStringLiteral("refs/heads/*:refs/heads/*"));
     REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));

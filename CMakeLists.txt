@@ -117,6 +117,22 @@ target_include_directories(qquickgit
 file(GLOB qquickgit-test_CPP_FILES "tests/*.cpp")
 file(GLOB qquickgit-testlib_H_FILES "tests/*.h")
 
+add_library(qquickgit-lfs-test-server STATIC
+    tests/lfs/LfsServer.cpp
+    tests/lfs/LfsServer.h
+)
+
+target_link_libraries(qquickgit-lfs-test-server
+    PUBLIC
+    Qt6::Core
+    Qt6::Network
+)
+
+target_include_directories(qquickgit-lfs-test-server
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/lfs
+)
+
 qt_add_executable(qquickgit-test
     ${qquickgit-test_CPP_FILES}
     ${qquickgit-test_H_FILES}
@@ -125,8 +141,8 @@ qt_add_executable(qquickgit-test
 target_link_libraries(qquickgit-test
     PRIVATE
     qquickgit
+    qquickgit-lfs-test-server
     Catch2::Catch2
     Qt6::Test
     SignalSpyChecker
 )
-
