@@ -1624,6 +1624,40 @@ TEST_CASE("LfsStoreRegistry keeps store when other repository is alive", "[LFS]"
     }
 }
 
+TEST_CASE("LfsStore canonicalizes git dir path for registry lookups", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    const QString realGitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    REQUIRE(!realGitDirPath.isEmpty());
+    const QString canonicalGitDirPath = QFileInfo(realGitDirPath).canonicalFilePath();
+    REQUIRE(!canonicalGitDirPath.isEmpty());
+
+    const QString symlinkGitDirPath = QDir(tempDir.path()).filePath(QStringLiteral("gitdir-link"));
+    if (!QFile::link(realGitDirPath, symlinkGitDirPath)) {
+        SKIP("Could not create git directory symlink for canonical-path test");
+    }
+    REQUIRE(QFileInfo(symlinkGitDirPath).isSymLink());
+    REQUIRE(QFileInfo(symlinkGitDirPath).canonicalFilePath() == canonicalGitDirPath);
+
+    auto store = std::make_shared<LfsStore>(symlinkGitDirPath);
+    REQUIRE(store);
+    CHECK(store->gitDirPath() == QDir(canonicalGitDirPath).absolutePath());
+
+    LfsStoreRegistry::registerStore(store);
+    REQUIRE(LfsStoreRegistry::storeFor(realGitDirPath) == store);
+    REQUIRE(LfsStoreRegistry::storeFor(canonicalGitDirPath) == store);
+    REQUIRE(LfsStoreRegistry::storeFor(symlinkGitDirPath) == store);
+
+    LfsStoreRegistry::unregisterStore(realGitDirPath, store);
+    CHECK(LfsStoreRegistry::storeFor(realGitDirPath) == nullptr);
+}
+
 TEST_CASE("Lfs filter streams large files without buffering", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
