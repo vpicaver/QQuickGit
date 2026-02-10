@@ -151,7 +151,7 @@ QVector<git_oid> resolvePushSourceCommits(git_repository* repo, const QString& s
         if (!oid || git_oid_is_zero(oid)) {
             return;
         }
-        for (const git_oid& existing : commitOids) {
+        for (const git_oid& existing : std::as_const(commitOids)) {
             if (git_oid_cmp(&existing, oid) == 0) {
                 return;
             }
@@ -1568,8 +1568,8 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                                                      .toStdString());
                     } else {
                         throw std::runtime_error(QString("Can't clone %1 because directory %2 already exists")
-                                                     .arg(url.toString())
-                                                     .arg(dir.absolutePath())
+                                                     .arg(url.toString(),
+                                                          dir.absolutePath())
                                                      .toStdString());
                     }
                 }
