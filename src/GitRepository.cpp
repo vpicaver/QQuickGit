@@ -1,6 +1,7 @@
 //Std includes
 #include <stdexcept>
 #include <array>
+#include <algorithm>
 
 //Our includes
 #include "GitRepository.h"
@@ -64,6 +65,34 @@ QString extractHostFromUrl(const char *url)
     }
 
     return QString();
+}
+
+QString gitErrorMessageWithPrefix(const QString& prefix)
+{
+    const git_error* lastError = git_error_last();
+    if (lastError && lastError->message) {
+        return QStringLiteral("%1: %2").arg(prefix, QString::fromUtf8(lastError->message));
+    }
+    return prefix;
+}
+
+QStringList uniqueSortedPaths(const QStringList& paths)
+{
+    QSet<QString> seen;
+    QStringList result;
+    result.reserve(paths.size());
+    for (const QString& path : paths) {
+        const QString normalized = QDir::fromNativeSeparators(path);
+        if (normalized.isEmpty() || seen.contains(normalized)) {
+            continue;
+        }
+
+        seen.insert(normalized);
+        result.append(normalized);
+    }
+
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 struct SshCallbackPayload {
@@ -2516,6 +2545,112 @@ QString GitRepository::headBranchName() const
     } else {
         return QString();
     }
+}
+
+Monad::ResultString GitRepository::headCommitOid(const QString& repositoryPath)
+{
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository")),
+                                   openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid headOid;
+    const int headResult = git_reference_name_to_id(&headOid, repo, "HEAD");
+    if (headResult == GIT_EUNBORNBRANCH || headResult == GIT_ENOTFOUND) {
+        return Monad::ResultString(QString());
+    }
+    if (headResult != GIT_OK) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve HEAD")),
+                                   headResult);
+    }
+
+    char oidBuffer[GIT_OID_HEXSZ + 1];
+    git_oid_tostr(oidBuffer, sizeof(oidBuffer), &headOid);
+    return Monad::ResultString(QString::fromLatin1(oidBuffer));
+}
+
+Monad::Result<QStringList> GitRepository::diffPathsBetweenCommits(const QString& repositoryPath,
+                                                                  const QString& beforeCommitOid,
+                                                                  const QString& afterCommitOid)
+{
+    if (afterCommitOid.isEmpty() || beforeCommitOid == afterCommitOid) {
+        return Monad::Result<QStringList>(QStringList());
+    }
+
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for diff")),
+                                          openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid afterOid;
+    if (git_oid_fromstr(&afterOid, afterCommitOid.toLatin1().constData()) != GIT_OK) {
+        return Monad::Result<QStringList>(QStringLiteral("Invalid after-head oid for commit diff."));
+    }
+
+    git_commit* afterCommit = nullptr;
+    if (git_commit_lookup(&afterCommit, repo, &afterOid) != GIT_OK || afterCommit == nullptr) {
+        return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load after-head commit")));
+    }
+    std::unique_ptr<git_commit, decltype(&git_commit_free)> afterCommitHolder(afterCommit, &git_commit_free);
+
+    git_tree* afterTree = nullptr;
+    if (git_commit_tree(&afterTree, afterCommit) != GIT_OK || afterTree == nullptr) {
+        return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load after-head tree")));
+    }
+    std::unique_ptr<git_tree, decltype(&git_tree_free)> afterTreeHolder(afterTree, &git_tree_free);
+
+    git_commit* beforeCommit = nullptr;
+    git_tree* beforeTree = nullptr;
+    if (!beforeCommitOid.isEmpty()) {
+        git_oid beforeOid;
+        if (git_oid_fromstr(&beforeOid, beforeCommitOid.toLatin1().constData()) != GIT_OK) {
+            return Monad::Result<QStringList>(QStringLiteral("Invalid before-head oid for commit diff."));
+        }
+
+        if (git_commit_lookup(&beforeCommit, repo, &beforeOid) != GIT_OK || beforeCommit == nullptr) {
+            return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load before-head commit")));
+        }
+
+        if (git_commit_tree(&beforeTree, beforeCommit) != GIT_OK || beforeTree == nullptr) {
+            git_commit_free(beforeCommit);
+            beforeCommit = nullptr;
+            return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load before-head tree")));
+        }
+    }
+    std::unique_ptr<git_commit, decltype(&git_commit_free)> beforeCommitHolder(beforeCommit, &git_commit_free);
+    std::unique_ptr<git_tree, decltype(&git_tree_free)> beforeTreeHolder(beforeTree, &git_tree_free);
+
+    git_diff* diff = nullptr;
+    git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
+    if (git_diff_tree_to_tree(&diff, repo, beforeTree, afterTree, &diffOptions) != GIT_OK || diff == nullptr) {
+        return Monad::Result<QStringList>(gitErrorMessageWithPrefix(QStringLiteral("Failed to build commit diff")));
+    }
+    std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
+
+    QStringList paths;
+    const size_t deltaCount = git_diff_num_deltas(diff);
+    paths.reserve(static_cast<int>(deltaCount) * 2);
+    for (size_t i = 0; i < deltaCount; ++i) {
+        const git_diff_delta* delta = git_diff_get_delta(diff, i);
+        if (!delta) {
+            continue;
+        }
+
+        if (delta->old_file.path && delta->old_file.path[0] != '\0') {
+            paths.append(QString::fromUtf8(delta->old_file.path));
+        }
+        if (delta->new_file.path && delta->new_file.path[0] != '\0') {
+            paths.append(QString::fromUtf8(delta->new_file.path));
+        }
+    }
+
+    return Monad::Result<QStringList>(uniqueSortedPaths(paths));
 }
 
 void GitRepository::setAccount(Account* account) {

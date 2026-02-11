@@ -705,6 +705,91 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
     }
 }
 
+TEST_CASE("GitRepository static head and diff helpers should work", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    CHECK_NOTHROW(repo.initRepository());
+
+    SECTION("headCommitOid should be empty when repository has no commits")
+    {
+        auto headResult = GitRepository::headCommitOid(tempDir.absolutePath());
+        REQUIRE(!headResult.hasError());
+        CHECK(headResult.value().isEmpty());
+    }
+
+    Account account;
+    account.setName("Sauce");
+    account.setEmail("sauce@email.com");
+    repo.setAccount(&account);
+
+    {
+        QFile file(tempDir.absoluteFilePath("alpha.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+        file.write("alpha-1\n");
+    }
+    CHECK_NOTHROW(repo.commitAll("first", "first commit"));
+
+    auto firstHeadResult = GitRepository::headCommitOid(tempDir.absolutePath());
+    REQUIRE(!firstHeadResult.hasError());
+    REQUIRE(!firstHeadResult.value().isEmpty());
+    const QString firstHead = firstHeadResult.value();
+    CHECK(firstHead.size() == 40);
+
+    SECTION("diffPathsBetweenCommits should include root commit files")
+    {
+        auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(), QString(), firstHead);
+        REQUIRE(!diffResult.hasError());
+        CHECK(diffResult.value().contains(QStringLiteral("alpha.txt")));
+    }
+
+    {
+        QFile file(tempDir.absoluteFilePath("alpha.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+        file.write("alpha-2\n");
+    }
+
+    REQUIRE(tempDir.mkpath(QStringLiteral("sub")));
+    {
+        QFile file(tempDir.absoluteFilePath("sub/beta.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+        file.write("beta-1\n");
+    }
+    CHECK_NOTHROW(repo.commitAll("second", "second commit"));
+
+    auto secondHeadResult = GitRepository::headCommitOid(tempDir.absolutePath());
+    REQUIRE(!secondHeadResult.hasError());
+    REQUIRE(!secondHeadResult.value().isEmpty());
+    const QString secondHead = secondHeadResult.value();
+    CHECK(secondHead.size() == 40);
+    CHECK(secondHead != firstHead);
+
+    SECTION("diffPathsBetweenCommits should include changed paths between commits")
+    {
+        auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(), firstHead, secondHead);
+        REQUIRE(!diffResult.hasError());
+        CHECK(diffResult.value().contains(QStringLiteral("alpha.txt")));
+        CHECK(diffResult.value().contains(QStringLiteral("sub/beta.txt")));
+    }
+
+    SECTION("diffPathsBetweenCommits should be empty when before and after are equal")
+    {
+        auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(), secondHead, secondHead);
+        REQUIRE(!diffResult.hasError());
+        CHECK(diffResult.value().isEmpty());
+    }
+
+    SECTION("diffPathsBetweenCommits should return an error for invalid oid")
+    {
+        auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(),
+                                                                 firstHead,
+                                                                 QStringLiteral("invalid-oid"));
+        CHECK(diffResult.hasError());
+    }
+}
+
 
 TEST_CASE("GitRepository testRemoteConnection should work", "[GitRepository]") {
 

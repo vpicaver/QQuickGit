@@ -16,6 +16,7 @@ class GitRepositoryData;
 #include <QDir>
 #include <QUrl>
 #include <QFuture>
+#include <QStringList>
 #include <memory>
 
 namespace QQuickGit {
@@ -123,6 +124,10 @@ public:
                                 ResetMode mode = ResetMode::Hard);
 
     QString headBranchName() const;
+    static Monad::ResultString headCommitOid(const QString& repositoryPath);
+    static Monad::Result<QStringList> diffPathsBetweenCommits(const QString& repositoryPath,
+                                                              const QString& beforeCommitOid,
+                                                              const QString& afterCommitOid);
 
     static void initGitEngine();
     static void shutdownGitEngine();
