@@ -1818,10 +1818,17 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                 .context(this, [=]() -> GitFuture {
                     const auto prePushResult = prePushUploadFuture.result();
                     if (prePushResult.hasError()) {
-                        qDebug() << "[LFS push] pre-push upload failed:" << prePushResult.errorMessage();
-                        return AsyncFuture::completed(prePushResult);
+                        const bool unsupportedLfsRemote =
+                            prePushResult.errorMessage() == QStringLiteral("Unsupported LFS remote URL");
+                        if (unsupportedLfsRemote) {
+                            qWarning() << "[LFS push] skipping LFS upload for unsupported remote URL; continuing with git push";
+                        } else {
+                            qDebug() << "[LFS push] pre-push upload failed:" << prePushResult.errorMessage();
+                            return AsyncFuture::completed(prePushResult);
+                        }
+                    } else {
+                        qDebug() << "[LFS push] pre-push upload complete";
                     }
-                    qDebug() << "[LFS push] pre-push upload complete";
 
                     return QtConcurrent::run([=]() {
                         return mtry([=]() mutable ->ResultBase {
