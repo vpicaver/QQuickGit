@@ -1266,6 +1266,15 @@ QDir GitRepository::directory()
 
 void GitRepository::initRepository()
 {
+    if (d->mLfsStore) {
+        LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
+        d->mLfsStore.reset();
+    }
+    if (d->repo) {
+        git_repository_free(d->repo);
+        d->repo = nullptr;
+    }
+
     auto path = d->mDirectory.absolutePath().toLocal8Bit();
     int error = git_repository_open(&(d->repo), path);
     if(error != GIT_OK) {
