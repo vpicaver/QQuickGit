@@ -169,6 +169,27 @@ bool hasRefGlobPattern(const QString& ref)
         || ref.contains(QLatin1Char('['));
 }
 
+bool pushRejectedByRemoteAdvanceMessage(const QString& errorMessage)
+{
+    const QString normalizedMessage = errorMessage.toLower();
+    return normalizedMessage.contains(QStringLiteral("non-fast-forward"))
+           || normalizedMessage.contains(QStringLiteral("failed to push some refs"))
+           || normalizedMessage.contains(QStringLiteral("updates were rejected"))
+           || normalizedMessage.contains(QStringLiteral("fetch first"))
+           || normalizedMessage.contains(QStringLiteral("tip of your current branch is behind"))
+           || normalizedMessage.contains(QStringLiteral("cannot lock ref"))
+           || normalizedMessage.contains(QStringLiteral("contains commits that are not present locally"))
+           || normalizedMessage.contains(QStringLiteral("cannot push because a reference that you are trying to update on the remote"));
+}
+
+int classifyPushErrorCode(int libgitError, const QString& errorMessage)
+{
+    if (libgitError == GIT_ENONFASTFORWARD || pushRejectedByRemoteAdvanceMessage(errorMessage)) {
+        return static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance);
+    }
+    return static_cast<int>(GitRepository::GitErrorCode::PushFailed);
+}
+
 QVector<git_oid> resolvePushSourceCommits(git_repository* repo, const QString& sourceRef)
 {
     QVector<git_oid> commitOids;
@@ -1511,6 +1532,11 @@ bool GitRepository::isRepository(const QDir& dir)
     return false;
 }
 
+bool GitRepository::isPushRejectedByRemoteAdvanceError(int errorCode)
+{
+    return errorCode == static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance);
+}
+
 QFuture<ResultBase> GitRepository::clone(const QUrl &url)
 {
     Q_ASSERT(d->repo == nullptr);
@@ -1841,7 +1867,9 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
             const LfsPushRefSpec parsedRefSpec = parsePushRefSpec(fixRefSpec);
             if (hasRefGlobPattern(parsedRefSpec.sourceRef) || hasRefGlobPattern(parsedRefSpec.destinationRef)) {
-                return AsyncFuture::completed(ResultBase(QStringLiteral("Wildcard push refspecs are not supported"), 2));
+                return AsyncFuture::completed(ResultBase(
+                    QStringLiteral("Wildcard push refspecs are not supported"),
+                    static_cast<int>(GitRepository::GitErrorCode::PushWildcardRefSpecUnsupported)));
             }
 
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
@@ -1892,7 +1920,12 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                             callbackPayload.agentAttempts = 0;
                             options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
-                            check(git_remote_push(gitRemote, &refspecs, &options));
+                            const int pushError = git_remote_push(gitRemote, &refspecs, &options);
+                            if (pushError != GIT_OK) {
+                                const QString errorMessage = gitErrorMessageWithPrefix(QStringLiteral("Failed to push"));
+                                return ResultBase(errorMessage,
+                                                  classifyPushErrorCode(pushError, errorMessage));
+                            }
 
                             git_remote_free(gitRemote);
 

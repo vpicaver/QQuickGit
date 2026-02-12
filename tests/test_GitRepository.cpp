@@ -790,6 +790,64 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
     }
 }
 
+TEST_CASE("GitRepository push should classify remote-advance rejection", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-push-rejection.git"));
+    const QString authorPath = tempDir.absoluteFilePath(QStringLiteral("author"));
+    const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    REQUIRE(QDir().mkpath(authorPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.initRepository();
+    author.setAccount(&account);
+    author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+    auto writeState = [](const QString& directoryPath, const QString& contents) {
+        QFile file(QDir(directoryPath).absoluteFilePath(QStringLiteral("state.txt")));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write(contents.toUtf8());
+    };
+
+    writeState(authorPath, QStringLiteral("author-initial\n"));
+    CHECK_NOTHROW(author.commitAll(QStringLiteral("Initial"), QStringLiteral("author initial commit")));
+    auto initialPushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(initialPushFuture, defaultTimeout));
+    REQUIRE(!initialPushFuture.result().hasError());
+
+    GitRepository peer;
+    peer.setDirectory(QDir(peerPath));
+    peer.setAccount(&account);
+    waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+
+    writeState(peerPath, QStringLiteral("peer-advance\n"));
+    CHECK_NOTHROW(peer.commitAll(QStringLiteral("Peer Advance"), QStringLiteral("advance remote tip")));
+    auto peerPushFuture = peer.push();
+    REQUIRE(AsyncFuture::waitForFinished(peerPushFuture, defaultTimeout));
+    REQUIRE(!peerPushFuture.result().hasError());
+
+    writeState(authorPath, QStringLiteral("author-diverge\n"));
+    CHECK_NOTHROW(author.commitAll(QStringLiteral("Author Diverge"), QStringLiteral("local divergent commit")));
+    auto rejectedPushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(rejectedPushFuture, defaultTimeout));
+    const ResultBase rejectedPushResult = rejectedPushFuture.result();
+    REQUIRE(rejectedPushResult.hasError());
+    CHECK(rejectedPushResult.errorCode()
+          == static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance));
+    CHECK(GitRepository::isPushRejectedByRemoteAdvanceError(rejectedPushResult.errorCode()));
+}
+
 
 TEST_CASE("GitRepository testRemoteConnection should work", "[GitRepository]") {
 

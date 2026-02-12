@@ -47,6 +47,13 @@ public:
     };
     Q_ENUM(ResetMode)
 
+    enum class GitErrorCode : int {
+        PushRejectedByRemoteAdvance = Monad::ResultBase::CustomError + 1,
+        PushWildcardRefSpecUnsupported = Monad::ResultBase::CustomError + 2,
+        PushFailed = Monad::ResultBase::CustomError + 3
+    };
+    Q_ENUM(GitErrorCode)
+
     class MergeResult {
         friend GitRepository;
 
@@ -135,6 +142,7 @@ public:
     Q_INVOKABLE GitFuture clone(const QUrl& url);
 
     static bool isRepository(const QDir &dir);
+    static bool isPushRejectedByRemoteAdvanceError(int errorCode);
 
 signals:
     void directoryChanged();
