@@ -1443,14 +1443,16 @@ QVector<GitRemoteInfo> GitRepository::remotes() const
 {
     QVector<GitRemoteInfo> remotes;
 
-    git_strarray remoteNames;
-    git_remote_list(&remoteNames, d->repo);
-    remotes.reserve(remoteNames.count);
+    if(d->repo) {
+        git_strarray remoteNames;
+        git_remote_list(&remoteNames, d->repo);
+        remotes.reserve(remoteNames.count);
 
-    for(size_t i = 0; i < remoteNames.count; i++) {
-        QString name = QString::fromLocal8Bit(remoteNames.strings[i]);
-        GitRemoteInfo info(name, remoteUrl(name));
-        remotes.append(info);
+        for(size_t i = 0; i < remoteNames.count; i++) {
+            QString name = QString::fromLocal8Bit(remoteNames.strings[i]);
+            GitRemoteInfo info(name, remoteUrl(name));
+            remotes.append(info);
+        }
     }
 
     return remotes;
