@@ -805,6 +805,41 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
         CHECK(mergeBaseResult.value() == firstHead);
     }
 
+    SECTION("aheadBehindCommitCounts should report forward and reverse commit deltas")
+    {
+        auto forwardResult = GitRepository::aheadBehindCommitCounts(tempDir.absolutePath(),
+                                                                    secondHead,
+                                                                    firstHead);
+        REQUIRE(!forwardResult.hasError());
+        CHECK(forwardResult.value().ahead == 1);
+        CHECK(forwardResult.value().behind == 0);
+
+        auto reverseResult = GitRepository::aheadBehindCommitCounts(tempDir.absolutePath(),
+                                                                    firstHead,
+                                                                    secondHead);
+        REQUIRE(!reverseResult.hasError());
+        CHECK(reverseResult.value().ahead == 0);
+        CHECK(reverseResult.value().behind == 1);
+    }
+
+    SECTION("aheadBehindCommitCounts should be zero when comparing the same commit")
+    {
+        auto countsResult = GitRepository::aheadBehindCommitCounts(tempDir.absolutePath(),
+                                                                   secondHead,
+                                                                   secondHead);
+        REQUIRE(!countsResult.hasError());
+        CHECK(countsResult.value().ahead == 0);
+        CHECK(countsResult.value().behind == 0);
+    }
+
+    SECTION("aheadBehindCommitCounts should return error for invalid refs")
+    {
+        auto invalidResult = GitRepository::aheadBehindCommitCounts(tempDir.absolutePath(),
+                                                                    QStringLiteral("missing-local-ref"),
+                                                                    secondHead);
+        CHECK(invalidResult.hasError());
+    }
+
     SECTION("diffPathsBetweenCommits should be empty when before and after are equal")
     {
         auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(), secondHead, secondHead);
@@ -889,6 +924,87 @@ TEST_CASE("GitRepository push should classify remote-advance rejection", "[GitRe
     CHECK(rejectedPushResult.errorCode()
           == static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance));
     CHECK(GitRepository::isPushRejectedByRemoteAdvanceError(rejectedPushResult.errorCode()));
+}
+
+TEST_CASE("GitRepository remoteAheadBehindCommitCounts should read advertised remote tips", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-ahead-behind.git"));
+    const QString authorPath = tempDir.absoluteFilePath(QStringLiteral("author"));
+    const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    REQUIRE(QDir().mkpath(authorPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.initRepository();
+    author.setAccount(&account);
+    author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+    auto writeState = [](const QString& directoryPath, const QString& contents) {
+        QFile file(QDir(directoryPath).absoluteFilePath(QStringLiteral("state.txt")));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write(contents.toUtf8());
+    };
+
+    writeState(authorPath, QStringLiteral("author-initial\n"));
+    CHECK_NOTHROW(author.commitAll(QStringLiteral("Initial"), QStringLiteral("author initial commit")));
+    auto initialPushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(initialPushFuture, defaultTimeout));
+    REQUIRE(!initialPushFuture.result().hasError());
+
+    GitRepository peer;
+    peer.setDirectory(QDir(peerPath));
+    peer.setAccount(&account);
+    waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+
+    writeState(peerPath, QStringLiteral("peer-advance\n"));
+    CHECK_NOTHROW(peer.commitAll(QStringLiteral("Peer Advance"), QStringLiteral("advance remote tip")));
+    auto peerPushFuture = peer.push();
+    REQUIRE(AsyncFuture::waitForFinished(peerPushFuture, defaultTimeout));
+    REQUIRE(!peerPushFuture.result().hasError());
+
+    SECTION("without fetch, local repository still sees remote behind/ahead from remote advertisement")
+    {
+        auto remoteCountsFuture = author.remoteAheadBehindCommitCounts();
+        REQUIRE(AsyncFuture::waitForFinished(remoteCountsFuture, defaultTimeout));
+        const auto remoteCountsResult = remoteCountsFuture.result();
+        INFO("Remote ahead/behind error:" << remoteCountsResult.errorMessage().toStdString());
+        REQUIRE(!remoteCountsResult.hasError());
+        CHECK(remoteCountsResult.value().ahead == 0);
+        CHECK(remoteCountsResult.value().behind == 1);
+    }
+
+    SECTION("diverged history reports both ahead and behind")
+    {
+        writeState(authorPath, QStringLiteral("author-diverge\n"));
+        CHECK_NOTHROW(author.commitAll(QStringLiteral("Author Diverge"), QStringLiteral("local divergent commit")));
+
+        auto remoteCountsFuture = author.remoteAheadBehindCommitCounts();
+        REQUIRE(AsyncFuture::waitForFinished(remoteCountsFuture, defaultTimeout));
+        const auto remoteCountsResult = remoteCountsFuture.result();
+        INFO("Remote ahead/behind error:" << remoteCountsResult.errorMessage().toStdString());
+        REQUIRE(!remoteCountsResult.hasError());
+        CHECK(remoteCountsResult.value().ahead == 1);
+        CHECK(remoteCountsResult.value().behind == 1);
+    }
+
+    SECTION("missing remote branch returns error")
+    {
+        auto missingBranchFuture = author.remoteAheadBehindCommitCounts(QStringLiteral("origin"),
+                                                                        QStringLiteral("missing-branch"));
+        REQUIRE(AsyncFuture::waitForFinished(missingBranchFuture, defaultTimeout));
+        CHECK(missingBranchFuture.result().hasError());
+    }
 }
 
 

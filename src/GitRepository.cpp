@@ -2573,6 +2573,10 @@ void GitRepository::addRemoteHelper(const QString &name, const QUrl &url)
 
 QString GitRepository::headBranchName() const
 {
+    if(d->repo == nullptr) {
+        return QString();
+    }
+
     git_reference* head;
     git_repository_head(&head, d->repo);
 
@@ -2587,6 +2591,152 @@ QString GitRepository::headBranchName() const
     } else {
         return QString();
     }
+}
+
+GitRepository::AheadBehindFuture GitRepository::remoteAheadBehindCommitCounts(const QString& remote,
+                                                                              const QString& branchName) const
+{
+    const QString repositoryPath = d->mDirectory.absolutePath();
+    const QString fixedRemote = remote.isEmpty() ? QStringLiteral("origin") : remote;
+    const QString fixedBranch = branchName.isEmpty() ? headBranchName() : branchName;
+    const QString localRefSpec = QStringLiteral("refs/heads/%1").arg(fixedBranch);
+    const QString remoteRefSpec = QStringLiteral("refs/heads/%1").arg(fixedBranch);
+
+    return QtConcurrent::run([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec]() {
+        return mtry([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec]() -> Monad::Result<AheadBehindCounts> {
+            if (repositoryPath.isEmpty()) {
+                return Monad::Result<AheadBehindCounts>(QStringLiteral("Repository path is empty."));
+            }
+            if (fixedBranch.isEmpty()) {
+                return Monad::Result<AheadBehindCounts>(QStringLiteral("Current branch is empty."));
+            }
+
+            git_repository* repo = nullptr;
+            const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+            if (openResult != GIT_OK || repo == nullptr) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for remote ahead/behind")),
+                    openResult);
+            }
+            std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+            git_object* localObj = nullptr;
+            const int localResult = git_revparse_single(&localObj, repo, localRefSpec.toLocal8Bit().constData());
+            if (localResult != GIT_OK || localObj == nullptr) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve local branch for remote ahead/behind")),
+                    localResult);
+            }
+            std::unique_ptr<git_object, decltype(&git_object_free)> localObjHolder(localObj, &git_object_free);
+
+            git_remote* gitRemote = nullptr;
+            const int lookupResult = git_remote_lookup(&gitRemote, repo, fixedRemote.toLocal8Bit().constData());
+            if (lookupResult != GIT_OK || gitRemote == nullptr) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to lookup remote for ahead/behind")),
+                    lookupResult);
+            }
+            std::unique_ptr<git_remote, decltype(&git_remote_free)> gitRemoteHolder(gitRemote, &git_remote_free);
+
+            git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
+            PrePushCredentialPayload credentialPayload;
+            callbacks.credentials = prePushRemoteCredentialCallback;
+            callbacks.payload = &credentialPayload;
+            const int connectResult = git_remote_connect(gitRemote, GIT_DIRECTION_FETCH, &callbacks, nullptr, nullptr);
+            if (connectResult != GIT_OK) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to connect remote for ahead/behind")),
+                    connectResult);
+            }
+
+            const git_remote_head** remoteHeads = nullptr;
+            size_t remoteHeadCount = 0;
+            const int lsResult = git_remote_ls(&remoteHeads, &remoteHeadCount, gitRemote);
+            git_remote_disconnect(gitRemote);
+            if (lsResult != GIT_OK) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to list remote refs for ahead/behind")),
+                    lsResult);
+            }
+
+            const QByteArray remoteRefSpecBytes = remoteRefSpec.toLocal8Bit();
+            const git_oid* remoteOid = nullptr;
+            for (size_t i = 0; i < remoteHeadCount; ++i) {
+                const git_remote_head* remoteHead = remoteHeads[i];
+                if (remoteHead == nullptr || remoteHead->name == nullptr) {
+                    continue;
+                }
+
+                if (QByteArray(remoteHead->name) == remoteRefSpecBytes) {
+                    remoteOid = &remoteHead->oid;
+                    break;
+                }
+            }
+
+            if (remoteOid == nullptr) {
+                return Monad::Result<AheadBehindCounts>(
+                    QStringLiteral("Failed to resolve remote branch '%1/%2'.").arg(fixedRemote, fixedBranch));
+            }
+
+            git_odb* objectDb = nullptr;
+            const int odbResult = git_repository_odb(&objectDb, repo);
+            if (odbResult != GIT_OK || objectDb == nullptr) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to open object database for ahead/behind")),
+                    odbResult);
+            }
+            std::unique_ptr<git_odb, decltype(&git_odb_free)> objectDbHolder(objectDb, &git_odb_free);
+
+            const bool hasRemoteTipObject = git_odb_exists(objectDb, remoteOid) == 1;
+            if (!hasRemoteTipObject) {
+                // Lightweight remote checks do not download objects. If the advertised
+                // remote tip is unknown locally, we can still report "behind" and
+                // estimate local-only "ahead" against the last fetched tracking tip.
+                AheadBehindCounts fallbackCounts;
+                fallbackCounts.behind = 1;
+
+                const QString trackingRefSpec = QStringLiteral("refs/remotes/%1/%2").arg(fixedRemote, fixedBranch);
+                git_object* trackingObj = nullptr;
+                const int trackingResult = git_revparse_single(&trackingObj,
+                                                               repo,
+                                                               trackingRefSpec.toLocal8Bit().constData());
+                if (trackingResult == GIT_OK && trackingObj != nullptr) {
+                    std::unique_ptr<git_object, decltype(&git_object_free)> trackingObjHolder(trackingObj,
+                                                                                               &git_object_free);
+                    size_t ahead = 0;
+                    size_t behind = 0;
+                    const int localGraphResult = git_graph_ahead_behind(&ahead,
+                                                                        &behind,
+                                                                        repo,
+                                                                        git_object_id(localObj),
+                                                                        git_object_id(trackingObj));
+                    if (localGraphResult == GIT_OK) {
+                        fallbackCounts.ahead = ahead;
+                    }
+                }
+
+                return Monad::Result<AheadBehindCounts>(fallbackCounts);
+            }
+
+            size_t ahead = 0;
+            size_t behind = 0;
+            const int graphResult = git_graph_ahead_behind(&ahead,
+                                                           &behind,
+                                                           repo,
+                                                           git_object_id(localObj),
+                                                           remoteOid);
+            if (graphResult != GIT_OK) {
+                return Monad::Result<AheadBehindCounts>(
+                    gitErrorMessageWithPrefix(QStringLiteral("Failed to compute remote ahead/behind")),
+                    graphResult);
+            }
+
+            AheadBehindCounts counts;
+            counts.ahead = ahead;
+            counts.behind = behind;
+            return Monad::Result<AheadBehindCounts>(counts);
+        });
+    });
 }
 
 Monad::ResultString GitRepository::headCommitOid(const QString& repositoryPath)
@@ -2653,6 +2803,61 @@ Monad::ResultString GitRepository::mergeBaseCommitOid(const QString& repositoryP
     char oidBuffer[GIT_OID_HEXSZ + 1];
     git_oid_tostr(oidBuffer, sizeof(oidBuffer), &mergeBaseOid);
     return Monad::ResultString(QString::fromLatin1(oidBuffer));
+}
+
+Monad::Result<GitRepository::AheadBehindCounts> GitRepository::aheadBehindCommitCounts(
+    const QString& repositoryPath,
+    const QString& localRefSpec,
+    const QString& upstreamRefSpec)
+{
+    if (localRefSpec.isEmpty() || upstreamRefSpec.isEmpty()) {
+        return Monad::Result<AheadBehindCounts>(QStringLiteral("Local or upstream ref is empty."));
+    }
+
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::Result<AheadBehindCounts>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for ahead/behind")),
+            openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_object* localObj = nullptr;
+    const int localResult = git_revparse_single(&localObj, repo, localRefSpec.toLocal8Bit().constData());
+    if (localResult != GIT_OK || localObj == nullptr) {
+        return Monad::Result<AheadBehindCounts>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve local ref for ahead/behind")),
+            localResult);
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> localObjHolder(localObj, &git_object_free);
+
+    git_object* upstreamObj = nullptr;
+    const int upstreamResult = git_revparse_single(&upstreamObj, repo, upstreamRefSpec.toLocal8Bit().constData());
+    if (upstreamResult != GIT_OK || upstreamObj == nullptr) {
+        return Monad::Result<AheadBehindCounts>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve upstream ref for ahead/behind")),
+            upstreamResult);
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> upstreamObjHolder(upstreamObj, &git_object_free);
+
+    size_t ahead = 0;
+    size_t behind = 0;
+    const int graphResult = git_graph_ahead_behind(&ahead,
+                                                   &behind,
+                                                   repo,
+                                                   git_object_id(localObj),
+                                                   git_object_id(upstreamObj));
+    if (graphResult != GIT_OK) {
+        return Monad::Result<AheadBehindCounts>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to compute ahead/behind")),
+            graphResult);
+    }
+
+    AheadBehindCounts counts;
+    counts.ahead = ahead;
+    counts.behind = behind;
+    return Monad::Result<AheadBehindCounts>(counts);
 }
 
 Monad::Result<QStringList> GitRepository::diffPathsBetweenCommits(const QString& repositoryPath,

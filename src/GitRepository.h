@@ -35,6 +35,11 @@ class GitRepository : public QObject
     Q_PROPERTY(QVector<GitRemoteInfo> remotes READ remotes NOTIFY remotesChanged)
 
 public:
+    struct AheadBehindCounts {
+        size_t ahead = 0;
+        size_t behind = 0;
+    };
+
     enum class CheckoutMode {
         Safe,
         Force
@@ -81,6 +86,7 @@ public:
 
     typedef QFuture<Monad::ResultBase> GitFuture;
     typedef QFuture<Monad::Result<GitRepository::MergeResult>> MergeFuture;
+    typedef QFuture<Monad::Result<GitRepository::AheadBehindCounts>> AheadBehindFuture;
 
     GitRepository(QObject* parent = nullptr);
     ~GitRepository();
@@ -132,10 +138,15 @@ public:
                                 ResetMode mode = ResetMode::Hard);
 
     QString headBranchName() const;
+    Q_INVOKABLE AheadBehindFuture remoteAheadBehindCommitCounts(const QString& remote = QString(),
+                                                                const QString& branchName = QString()) const;
     static Monad::ResultString headCommitOid(const QString& repositoryPath);
     static Monad::ResultString mergeBaseCommitOid(const QString& repositoryPath,
                                                   const QString& firstCommitOid,
                                                   const QString& secondCommitOid);
+    static Monad::Result<AheadBehindCounts> aheadBehindCommitCounts(const QString& repositoryPath,
+                                                                    const QString& localRefSpec,
+                                                                    const QString& upstreamRefSpec);
     static Monad::Result<QStringList> diffPathsBetweenCommits(const QString& repositoryPath,
                                                               const QString& beforeCommitOid,
                                                               const QString& afterCommitOid);
