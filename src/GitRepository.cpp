@@ -2614,6 +2614,47 @@ Monad::ResultString GitRepository::headCommitOid(const QString& repositoryPath)
     return Monad::ResultString(QString::fromLatin1(oidBuffer));
 }
 
+Monad::ResultString GitRepository::mergeBaseCommitOid(const QString& repositoryPath,
+                                                      const QString& firstCommitOid,
+                                                      const QString& secondCommitOid)
+{
+    if (firstCommitOid.isEmpty() || secondCommitOid.isEmpty()) {
+        return Monad::ResultString(QString());
+    }
+
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for merge-base")),
+                                   openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid firstOid;
+    if (git_oid_fromstr(&firstOid, firstCommitOid.toLatin1().constData()) != GIT_OK) {
+        return Monad::ResultString(QStringLiteral("Invalid first oid for merge-base."));
+    }
+
+    git_oid secondOid;
+    if (git_oid_fromstr(&secondOid, secondCommitOid.toLatin1().constData()) != GIT_OK) {
+        return Monad::ResultString(QStringLiteral("Invalid second oid for merge-base."));
+    }
+
+    git_oid mergeBaseOid;
+    const int mergeBaseResult = git_merge_base(&mergeBaseOid, repo, &firstOid, &secondOid);
+    if (mergeBaseResult == GIT_ENOTFOUND) {
+        return Monad::ResultString(QString());
+    }
+    if (mergeBaseResult != GIT_OK) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve merge-base")),
+                                   mergeBaseResult);
+    }
+
+    char oidBuffer[GIT_OID_HEXSZ + 1];
+    git_oid_tostr(oidBuffer, sizeof(oidBuffer), &mergeBaseOid);
+    return Monad::ResultString(QString::fromLatin1(oidBuffer));
+}
+
 Monad::Result<QStringList> GitRepository::diffPathsBetweenCommits(const QString& repositoryPath,
                                                                   const QString& beforeCommitOid,
                                                                   const QString& afterCommitOid)
@@ -2693,6 +2734,69 @@ Monad::Result<QStringList> GitRepository::diffPathsBetweenCommits(const QString&
     }
 
     return Monad::Result<QStringList>(uniqueSortedPaths(paths));
+}
+
+Monad::Result<QByteArray> GitRepository::fileContentAtCommit(const QString& repositoryPath,
+                                                             const QString& commitOid,
+                                                             const QString& relativePath)
+{
+    if (commitOid.isEmpty() || relativePath.isEmpty()) {
+        return Monad::Result<QByteArray>(QByteArray());
+    }
+
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for commit file lookup")),
+                                         openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid commitId;
+    if (git_oid_fromstr(&commitId, commitOid.toLatin1().constData()) != GIT_OK) {
+        return Monad::Result<QByteArray>(QStringLiteral("Invalid commit oid for commit file lookup."));
+    }
+
+    git_commit* commit = nullptr;
+    if (git_commit_lookup(&commit, repo, &commitId) != GIT_OK || commit == nullptr) {
+        return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load commit for file lookup")));
+    }
+    std::unique_ptr<git_commit, decltype(&git_commit_free)> commitHolder(commit, &git_commit_free);
+
+    git_tree* tree = nullptr;
+    if (git_commit_tree(&tree, commit) != GIT_OK || tree == nullptr) {
+        return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load commit tree for file lookup")));
+    }
+    std::unique_ptr<git_tree, decltype(&git_tree_free)> treeHolder(tree, &git_tree_free);
+
+    const QString normalizedPath = QDir::fromNativeSeparators(relativePath);
+    git_tree_entry* entry = nullptr;
+    const int entryResult = git_tree_entry_bypath(&entry, tree, normalizedPath.toUtf8().constData());
+    if (entryResult == GIT_ENOTFOUND) {
+        return Monad::Result<QByteArray>(QByteArray());
+    }
+    if (entryResult != GIT_OK || entry == nullptr) {
+        return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve path in commit tree")));
+    }
+    std::unique_ptr<git_tree_entry, decltype(&git_tree_entry_free)> entryHolder(entry, &git_tree_entry_free);
+
+    if (git_tree_entry_type(entry) != GIT_OBJECT_BLOB) {
+        return Monad::Result<QByteArray>(QByteArray());
+    }
+
+    git_blob* blob = nullptr;
+    if (git_blob_lookup(&blob, repo, git_tree_entry_id(entry)) != GIT_OK || blob == nullptr) {
+        return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load blob from commit tree")));
+    }
+    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+    const size_t rawSize = git_blob_rawsize(blob);
+    if (raw == nullptr || rawSize == 0) {
+        return Monad::Result<QByteArray>(QByteArray());
+    }
+
+    return Monad::Result<QByteArray>(QByteArray(raw, static_cast<int>(rawSize)));
 }
 
 void GitRepository::setAccount(Account* account) {

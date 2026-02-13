@@ -774,6 +774,37 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
         CHECK(diffResult.value().contains(QStringLiteral("sub/beta.txt")));
     }
 
+    SECTION("fileContentAtCommit should read file contents for a commit path")
+    {
+        auto firstContentResult = GitRepository::fileContentAtCommit(tempDir.absolutePath(),
+                                                                     firstHead,
+                                                                     QStringLiteral("alpha.txt"));
+        REQUIRE(!firstContentResult.hasError());
+        CHECK(firstContentResult.value() == QByteArray("alpha-1\n"));
+
+        auto secondContentResult = GitRepository::fileContentAtCommit(tempDir.absolutePath(),
+                                                                      secondHead,
+                                                                      QStringLiteral("alpha.txt"));
+        REQUIRE(!secondContentResult.hasError());
+        CHECK(secondContentResult.value() == QByteArray("alpha-2\n"));
+    }
+
+    SECTION("fileContentAtCommit should return empty for missing commit path")
+    {
+        auto missingResult = GitRepository::fileContentAtCommit(tempDir.absolutePath(),
+                                                                secondHead,
+                                                                QStringLiteral("missing.txt"));
+        REQUIRE(!missingResult.hasError());
+        CHECK(missingResult.value().isEmpty());
+    }
+
+    SECTION("mergeBaseCommitOid should resolve the common ancestor")
+    {
+        auto mergeBaseResult = GitRepository::mergeBaseCommitOid(tempDir.absolutePath(), firstHead, secondHead);
+        REQUIRE(!mergeBaseResult.hasError());
+        CHECK(mergeBaseResult.value() == firstHead);
+    }
+
     SECTION("diffPathsBetweenCommits should be empty when before and after are equal")
     {
         auto diffResult = GitRepository::diffPathsBetweenCommits(tempDir.absolutePath(), secondHead, secondHead);
@@ -787,6 +818,18 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
                                                                  firstHead,
                                                                  QStringLiteral("invalid-oid"));
         CHECK(diffResult.hasError());
+    }
+
+    SECTION("mergeBaseCommitOid should return empty when no merge-base is found")
+    {
+        auto mergeBaseResult = GitRepository::mergeBaseCommitOid(tempDir.absolutePath(),
+                                                                 firstHead,
+                                                                 QStringLiteral("0000000000000000000000000000000000000000"));
+        if (!mergeBaseResult.hasError()) {
+            CHECK(mergeBaseResult.value().isEmpty());
+        } else {
+            CHECK(!mergeBaseResult.errorMessage().isEmpty());
+        }
     }
 }
 

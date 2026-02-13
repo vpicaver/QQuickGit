@@ -17,6 +17,7 @@ class GitRepositoryData;
 #include <QUrl>
 #include <QFuture>
 #include <QStringList>
+#include <QByteArray>
 #include <memory>
 
 namespace QQuickGit {
@@ -132,9 +133,15 @@ public:
 
     QString headBranchName() const;
     static Monad::ResultString headCommitOid(const QString& repositoryPath);
+    static Monad::ResultString mergeBaseCommitOid(const QString& repositoryPath,
+                                                  const QString& firstCommitOid,
+                                                  const QString& secondCommitOid);
     static Monad::Result<QStringList> diffPathsBetweenCommits(const QString& repositoryPath,
                                                               const QString& beforeCommitOid,
                                                               const QString& afterCommitOid);
+    static Monad::Result<QByteArray> fileContentAtCommit(const QString& repositoryPath,
+                                                          const QString& commitOid,
+                                                          const QString& relativePath);
 
     static void initGitEngine();
     static void shutdownGitEngine();
