@@ -17,6 +17,7 @@
 #include "git2.h"
 #include "git2/config.h"
 #include "git2/remote.h"
+#include "GitUtilities.h"
 
 namespace {
 constexpr int LfsBatchTimeoutMs = 30000;
@@ -762,16 +763,15 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
                                    static_cast<int>(LfsFetchErrorCode::NoRemote));
     }
 
-    QUrl url(QString::fromUtf8(remoteUrl));
+    const QString remoteUrlValue = QString::fromUtf8(remoteUrl);
+    QUrl url = GitUtilities::lfsEndpointFromRemoteUrl(remoteUrlValue);
     if (!isHttpUrl(url)) {
-        qDebug() << "[LFS endpoint] non-http remote url:" << url;
+        qDebug() << "[LFS endpoint] non-http remote url:" << remoteUrlValue;
         return Monad::Result<QUrl>(QStringLiteral("Unsupported LFS remote URL"),
                                    static_cast<int>(LfsFetchErrorCode::NoRemote));
     }
 
-    const QString path = trimTrailingSlash(url.path()) + QStringLiteral("/info/lfs");
-    url.setPath(path);
-    qDebug() << "[LFS endpoint] derived from remote url:" << url;
+    qDebug() << "[LFS endpoint] derived from remote url:" << url << "from" << remoteUrlValue;
     return Monad::Result<QUrl>(url);
 }
 

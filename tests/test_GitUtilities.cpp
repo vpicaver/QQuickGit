@@ -34,3 +34,28 @@ TEST_CASE("GitUtilities should fix up ssh url correctly", "[GitUtilities]") {
         CHECK(url2.toString().toStdString() == test.second.toString().toStdString());
     }
 }
+
+TEST_CASE("GitUtilities derives LFS endpoint from remote url", "[GitUtilities]")
+{
+    const QList<std::pair<QString, QString>> tests{
+        {QStringLiteral("git@github.com:Cavewhere/PhakeCave3000.git"),
+         QStringLiteral("https://github.com/Cavewhere/PhakeCave3000.git/info/lfs")},
+        {QStringLiteral("ssh://git@github.com/Cavewhere/PhakeCave3000.git"),
+         QStringLiteral("https://github.com/Cavewhere/PhakeCave3000.git/info/lfs")},
+        {QStringLiteral("https://github.com/Cavewhere/PhakeCave3000.git"),
+         QStringLiteral("https://github.com/Cavewhere/PhakeCave3000.git/info/lfs")},
+        {QStringLiteral("http://example.com/repo.git/"),
+         QStringLiteral("http://example.com/repo.git/info/lfs")}
+    };
+
+    for (const auto& test : tests) {
+        const QUrl endpoint = GitUtilities::lfsEndpointFromRemoteUrl(test.first);
+        CHECK(endpoint.toString().toStdString() == test.second.toStdString());
+    }
+}
+
+TEST_CASE("GitUtilities rejects unsupported LFS endpoint remote urls", "[GitUtilities]")
+{
+    CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QString()).isEmpty());
+    CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QStringLiteral("file:///tmp/repo.git")).isEmpty());
+}

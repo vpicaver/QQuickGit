@@ -308,6 +308,11 @@ public:
         return QStringLiteral("http://127.0.0.1:%1/test.git").arg(mServer.serverPort());
     }
 
+    quint16 port() const
+    {
+        return mServer.serverPort();
+    }
+
     void requireHeader(const QByteArray& name, const QByteArray& value)
     {
         mRequiredName = name;
@@ -1522,6 +1527,51 @@ TEST_CASE("Lfs batch does not apply URL-scoped http.extraheader when only path c
     REQUIRE(server.batchRequestCount() == 1);
     CHECK(server.authorizedRequestCount() == 0);
     CHECK(batchFuture.result().hasError());
+}
+
+TEST_CASE("Lfs batch authenticates with remote.lfsurl when git remote is ssh", "[LFS][regression][P1]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LocalLfsAuthHeaderServer server;
+    REQUIRE(server.start());
+
+    GitRepository repository;
+    repository.setDirectory(QDir(tempDir.path()));
+    repository.initRepository();
+
+    const QString sshRemoteUrl =
+        QStringLiteral("ssh://git@127.0.0.1:%1/test.git").arg(server.port());
+    REQUIRE(configureRemoteUrl(tempDir.path(), QStringLiteral("origin"), sshRemoteUrl));
+
+    const QString lfsEndpoint = server.remoteUrl() + QStringLiteral("/info/lfs");
+    REQUIRE(setGitConfigString(tempDir.path(),
+                               "remote.origin.lfsurl",
+                               lfsEndpoint));
+
+    const QString extraHeaderKey = QStringLiteral("http.%1/.extraheader").arg(lfsEndpoint);
+    REQUIRE(setGitConfigString(tempDir.path(),
+                               extraHeaderKey.toUtf8().constData(),
+                               QStringLiteral("X-QQuickGit-Auth: scoped-token")));
+
+    const QString gitDirPath = gitDirPathFromWorkTree(tempDir.path());
+    REQUIRE(!gitDirPath.isEmpty());
+
+    LfsBatchClient client(gitDirPath);
+    const LfsBatchClient::ObjectSpec objectSpec{
+        QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        1
+    };
+
+    auto batchFuture = client.batch(QStringLiteral("download"), {objectSpec});
+    REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
+    INFO("Batch error:" << batchFuture.result().errorMessage().toStdString()
+         << "code:" << batchFuture.result().errorCode());
+
+    REQUIRE(server.batchRequestCount() == 1);
+    CHECK(server.authorizedRequestCount() == 1);
+    REQUIRE(!batchFuture.result().hasError());
 }
 
 TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {

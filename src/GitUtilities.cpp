@@ -15,7 +15,7 @@ QUrl GitUtilities::fixGitUrl(const QString &sshUrl)
 {
     QUrl url(sshUrl);
 
-    if(url.isValid()) {
+    if(url.isValid() && !url.scheme().isEmpty()) {
         return url;
     }
 
@@ -24,6 +24,37 @@ QUrl GitUtilities::fixGitUrl(const QString &sshUrl)
         auto newUrl = QStringLiteral("ssh://") + parts.at(0) + "/" + parts.at(1);
         url = QUrl(newUrl);
     }
+
+    return url;
+}
+
+QUrl GitUtilities::lfsEndpointFromRemoteUrl(const QString& remoteUrl)
+{
+    QUrl url = fixGitUrl(remoteUrl.trimmed());
+    if (!url.isValid() || url.scheme().isEmpty()) {
+        return QUrl();
+    }
+
+    const QString scheme = url.scheme().toLower();
+    if (scheme == QStringLiteral("ssh") || scheme == QStringLiteral("git")) {
+        QUrl httpsUrl(url);
+        httpsUrl.setScheme(QStringLiteral("https"));
+        httpsUrl.setUserName(QString());
+        httpsUrl.setPassword(QString());
+        url = httpsUrl;
+    }
+
+    const QString normalizedScheme = url.scheme().toLower();
+    if (normalizedScheme != QStringLiteral("http") && normalizedScheme != QStringLiteral("https")) {
+        return QUrl();
+    }
+
+    QString path = url.path();
+    while (path.endsWith('/')) {
+        path.chop(1);
+    }
+    path += QStringLiteral("/info/lfs");
+    url.setPath(path);
 
     return url;
 }
