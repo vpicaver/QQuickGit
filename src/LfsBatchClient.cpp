@@ -10,6 +10,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QMetaObject>
 #include <memory>
 #include <algorithm>
 
@@ -18,6 +19,7 @@
 #include "git2/config.h"
 #include "git2/remote.h"
 #include "GitUtilities.h"
+#include "LfsAuthFailureNotifier.h"
 
 namespace {
 constexpr int LfsBatchTimeoutMs = 30000;
@@ -185,6 +187,16 @@ QString enrichReplyErrorMessage(const QString& baseMessage, QNetworkReply* reply
     return message;
 }
 
+void notifyLfsAuthFailure(const QUrl& url, int httpStatus, const QString& message)
+{
+    auto* notifier = QQuickGit::LfsAuthFailureNotifier::instance();
+    QMetaObject::invokeMethod(notifier,
+                              [notifier, url, httpStatus, message]() {
+                                  notifier->publish(url, httpStatus, message);
+                              },
+                              Qt::QueuedConnection);
+}
+
 }
 
 namespace QQuickGit {
@@ -199,6 +211,11 @@ std::shared_ptr<LfsAuthProvider> LfsBatchClient::lfsAuthProvider()
 {
     QMutexLocker locker(&gLfsAuthProviderMutex);
     return gLfsAuthProvider;
+}
+
+LfsAuthFailureNotifier* LfsBatchClient::authFailureNotifier()
+{
+    return LfsAuthFailureNotifier::instance();
 }
 
 LfsBatchClient::LfsBatchClient(QString gitDirPath, QObject* parent)
@@ -266,7 +283,7 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
         }
     };
 
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish]() mutable {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, endpoint]() mutable {
         if (!reply) {
             finish(Monad::Result<BatchResponse>(QStringLiteral("Missing LFS reply"),
                                                 static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -282,6 +299,12 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
                                                                             httpStatus),
                                                     static_cast<int>(LfsFetchErrorCode::Offline)));
             } else {
+                if (httpStatus == 401 || httpStatus == 403) {
+                    notifyLfsAuthFailure(endpoint, httpStatus,
+                                         enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
+                                                                 reply,
+                                                                 httpStatus));
+                }
                 finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
                                                                             reply,
                                                                             httpStatus),
@@ -294,6 +317,10 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
             int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
             if (httpStatus == 401 || httpStatus == 403) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
+                notifyLfsAuthFailure(endpoint, httpStatus,
+                                     enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
+                                                             reply,
+                                                             httpStatus));
             }
             finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
                                                                         reply,
@@ -330,6 +357,9 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
             if (!errorObject.isEmpty()) {
                 objectResponse.errorCode = errorObject.value(QStringLiteral("code")).toInt();
                 objectResponse.errorMessage = errorObject.value(QStringLiteral("message")).toString();
+                if (objectResponse.errorCode == 401 || objectResponse.errorCode == 403) {
+                    notifyLfsAuthFailure(endpoint, objectResponse.errorCode, objectResponse.errorMessage);
+                }
             }
 
             const QJsonObject actions = object.value(QStringLiteral("actions")).toObject();
@@ -423,7 +453,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
     });
 
 
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, writer, writeError, expected, finish, this]() mutable {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, writer, writeError, expected, finish, this, action]() mutable {
         if (!reply) {
             writer->discard();
             finish(Monad::ResultBase(QStringLiteral("Missing LFS reply"),
@@ -449,6 +479,13 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
                                                                  reply),
                                          static_cast<int>(LfsFetchErrorCode::Offline)));
             } else {
+                if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 401
+                    || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 403) {
+                    notifyLfsAuthFailure(action.href,
+                                         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                                         enrichReplyErrorMessage(QStringLiteral("LFS download failed"),
+                                                                 reply));
+                }
                 finish(Monad::ResultBase(enrichReplyErrorMessage(QStringLiteral("LFS download failed"),
                                                                  reply),
                                          static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -462,6 +499,10 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
             int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
             if (httpStatus == 401 || httpStatus == 403) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
+                notifyLfsAuthFailure(action.href, httpStatus,
+                                     enrichReplyErrorMessage(QStringLiteral("LFS download failed (%1)").arg(httpStatus),
+                                                             reply,
+                                                             httpStatus));
             } else if (httpStatus == 404) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::NotFound);
             }
@@ -541,7 +582,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::uploadObject(const Action& action,
         }
     };
 
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish]() mutable {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, action]() mutable {
         if (!reply) {
             finish(Monad::ResultBase(QStringLiteral("Missing LFS reply"),
                                      static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -555,6 +596,13 @@ QFuture<Monad::ResultBase> LfsBatchClient::uploadObject(const Action& action,
                                                                  reply),
                                          static_cast<int>(LfsFetchErrorCode::Offline)));
             } else {
+                if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 401
+                    || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 403) {
+                    notifyLfsAuthFailure(action.href,
+                                         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                                         enrichReplyErrorMessage(QStringLiteral("LFS upload failed"),
+                                                                 reply));
+                }
                 finish(Monad::ResultBase(enrichReplyErrorMessage(QStringLiteral("LFS upload failed"),
                                                                  reply),
                                          static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -567,6 +615,10 @@ QFuture<Monad::ResultBase> LfsBatchClient::uploadObject(const Action& action,
             int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
             if (httpStatus == 401 || httpStatus == 403) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
+                notifyLfsAuthFailure(action.href, httpStatus,
+                                     enrichReplyErrorMessage(QStringLiteral("LFS upload failed (%1)").arg(httpStatus),
+                                                             reply,
+                                                             httpStatus));
             }
             finish(Monad::ResultBase(enrichReplyErrorMessage(QStringLiteral("LFS upload failed (%1)").arg(httpStatus),
                                                              reply,
@@ -620,7 +672,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::verifyObject(const Action& action,
         }
     };
 
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish]() mutable {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, action]() mutable {
         if (!reply) {
             finish(Monad::ResultBase(QStringLiteral("Missing LFS reply"),
                                      static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -636,6 +688,12 @@ QFuture<Monad::ResultBase> LfsBatchClient::verifyObject(const Action& action,
                                                                  httpStatus),
                                          static_cast<int>(LfsFetchErrorCode::Offline)));
             } else {
+                if (httpStatus == 401 || httpStatus == 403) {
+                    notifyLfsAuthFailure(action.href, httpStatus,
+                                         enrichReplyErrorMessage(QStringLiteral("LFS verify failed"),
+                                                                 reply,
+                                                                 httpStatus));
+                }
                 finish(Monad::ResultBase(enrichReplyErrorMessage(QStringLiteral("LFS verify failed"),
                                                                  reply,
                                                                  httpStatus),
@@ -648,6 +706,10 @@ QFuture<Monad::ResultBase> LfsBatchClient::verifyObject(const Action& action,
             int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
             if (httpStatus == 401 || httpStatus == 403) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
+                notifyLfsAuthFailure(action.href, httpStatus,
+                                     enrichReplyErrorMessage(QStringLiteral("LFS verify failed (%1)").arg(httpStatus),
+                                                             reply,
+                                                             httpStatus));
             } else if (httpStatus == 404) {
                 errorCode = static_cast<int>(LfsFetchErrorCode::NotFound);
             }

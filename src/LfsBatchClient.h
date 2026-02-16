@@ -21,6 +21,8 @@ class QNetworkAccessManager;
 
 namespace QQuickGit {
 
+class LfsAuthFailureNotifier;
+
 class LfsBatchClient : public QObject
 {
     Q_OBJECT
@@ -67,6 +69,7 @@ public:
 
     static void setLfsAuthProvider(std::shared_ptr<LfsAuthProvider> provider);
     static std::shared_ptr<LfsAuthProvider> lfsAuthProvider();
+    static LfsAuthFailureNotifier* authFailureNotifier();
 
 private:
     QString mGitDirPath;

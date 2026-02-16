@@ -40,8 +40,8 @@ find_package(Catch2 REQUIRED)
 find_package(openssl)
 
 # Collect source files qquickgitLib
-file(GLOB qquickgit_CPP_FILES "src/*.cpp")
-file(GLOB qquickgit_H_FILES "src/*.h")
+file(GLOB qquickgit_CPP_FILES CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB qquickgit_H_FILES CONFIGURE_DEPENDS "src/*.h")
 
 # Make the file paths relative to the project directory
 set(qquickgit_RELATIVE_CPP_FILES "")
@@ -57,7 +57,7 @@ foreach(file ${qquickgit_H_FILES})
 endforeach()
 
 # Get all QML and JS files
-file(GLOB qquickgit_QML_FILES "qml/*.qml" "qml/*.js")
+file(GLOB qquickgit_QML_FILES CONFIGURE_DEPENDS "qml/*.qml" "qml/*.js")
 
 # Define the list of QML singletons
 set(qml_singletons
@@ -114,8 +114,8 @@ target_include_directories(qquickgit
 )
 
 # Collect source files qquickgitLib
-file(GLOB qquickgit-test_CPP_FILES "tests/*.cpp")
-file(GLOB qquickgit-testlib_H_FILES "tests/*.h")
+file(GLOB qquickgit-test_CPP_FILES CONFIGURE_DEPENDS "tests/*.cpp")
+file(GLOB qquickgit-testlib_H_FILES CONFIGURE_DEPENDS "tests/*.h")
 
 add_library(qquickgit-lfs-test-server STATIC
     tests/lfs/LfsServer.cpp
