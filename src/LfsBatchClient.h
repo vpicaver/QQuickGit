@@ -74,8 +74,18 @@ public:
     static LfsAuthFailureNotifier* authFailureNotifier();
 
 private:
+    struct CachedSshAuth {
+        bool valid = false;
+        QString remoteUrl;
+        QString operation;
+        qint64 cachedAtMs = 0;
+        QUrl href;
+        QMap<QByteArray, QByteArray> headers;
+    };
+
     QString mGitDirPath;
     QNetworkAccessManager* mManager = nullptr;
+    mutable CachedSshAuth mCachedSshAuth;
 
     static bool isHttpUrl(const QUrl& url);
     static bool parseAuthFromUrl(const QUrl& url, QByteArray* headerOut);

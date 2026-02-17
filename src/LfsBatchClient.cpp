@@ -1,6 +1,7 @@
 #include "LfsBatchClient.h"
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -24,6 +25,7 @@
 
 namespace {
 constexpr int LfsBatchTimeoutMs = 30000;
+constexpr qint64 SshLfsAuthCacheTtlMs = 30 * 1000;
 constexpr const char* LfsJsonMime = "application/vnd.git-lfs+json";
 constexpr int ErrorBodyPreviewBytes = 512;
 QMutex gLfsAuthProviderMutex;
@@ -293,11 +295,6 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
                                                                             const QVector<ObjectSpec>& objects,
                                                                             const QString& remoteName) const
 {
-    qDebug() << "[LFS batch] request"
-             << "operation=" << operation
-             << "objects=" << objects.size()
-             << "remote=" << remoteName
-             << "gitDirPath=" << mGitDirPath;
     git_repository* repo = nullptr;
     if (git_repository_open(&repo, mGitDirPath.toUtf8().constData()) != GIT_OK) {
         return AsyncFuture::completed(Monad::Result<BatchResponse>(QStringLiteral("Failed to open git repository"),
@@ -348,7 +345,7 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
             }
         };
 
-        QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, endpoint]() mutable {
+        QObject::connect(reply, &QNetworkReply::finished, reply, [this, reply, finish, endpoint]() mutable {
             if (!reply) {
                 finish(Monad::Result<BatchResponse>(QStringLiteral("Missing LFS reply"),
                                                     static_cast<int>(LfsFetchErrorCode::Transfer)));
@@ -365,6 +362,7 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
                                                         static_cast<int>(LfsFetchErrorCode::Offline)));
                 } else {
                     if (httpStatus == 401 || httpStatus == 403) {
+                        mCachedSshAuth.valid = false;
                         notifyLfsAuthFailure(endpoint, httpStatus,
                                              enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
                                                                      reply,
@@ -381,6 +379,7 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
             if (httpStatus >= 400) {
                 int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
                 if (httpStatus == 401 || httpStatus == 403) {
+                    mCachedSshAuth.valid = false;
                     errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
                     notifyLfsAuthFailure(endpoint, httpStatus,
                                          enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
@@ -453,7 +452,6 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
 
     auto endpointResult = resolveLfsEndpoint(repo, remoteName);
     if (endpointResult.hasError()) {
-        qDebug() << "[LFS batch] endpoint error:" << endpointResult.errorMessage();
         return AsyncFuture::completed(Monad::Result<BatchResponse>(endpointResult.errorMessage(), endpointResult.errorCode()));
     }
     const QUrl lfsEndpoint = endpointResult.value();
@@ -474,15 +472,25 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
                 QStringLiteral("SSH LFS authentication requires a configured remote URL"),
                 static_cast<int>(LfsFetchErrorCode::Auth)));
         }
+        const QString remoteUrl = remoteUrlResult.value();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool cacheHit = mCachedSshAuth.valid
+                              && mCachedSshAuth.remoteUrl == remoteUrl
+                              && mCachedSshAuth.operation == operation
+                              && (nowMs - mCachedSshAuth.cachedAtMs) >= 0
+                              && (nowMs - mCachedSshAuth.cachedAtMs) < SshLfsAuthCacheTtlMs;
+        if (cacheHit) {
+            return sendBatchRequest(mCachedSshAuth.href, mCachedSshAuth.headers);
+        }
 
         const auto sshOperation = operation == QStringLiteral("upload")
             ? SshLfsAuthenticator::Operation::Upload
             : SshLfsAuthenticator::Operation::Download;
 
-        const auto sshAuthFuture = SshLfsAuthenticator::authenticate(remoteUrlResult.value(), sshOperation);
+        const auto sshAuthFuture = SshLfsAuthenticator::authenticate(remoteUrl, sshOperation);
         return AsyncFuture::observe(sshAuthFuture).context(
             this,
-            [sendBatchRequest](const Monad::Result<SshLfsAuthenticator::AuthResult>& sshAuthResult)
+            [this, sendBatchRequest, operation, remoteUrl](const Monad::Result<SshLfsAuthenticator::AuthResult>& sshAuthResult)
                 -> QFuture<Monad::Result<BatchResponse>> {
                 if (sshAuthResult.hasError()) {
                     return AsyncFuture::completed(
@@ -492,6 +500,12 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
                 }
 
                 const auto sshAuth = sshAuthResult.value();
+                mCachedSshAuth.valid = true;
+                mCachedSshAuth.remoteUrl = remoteUrl;
+                mCachedSshAuth.operation = operation;
+                mCachedSshAuth.cachedAtMs = QDateTime::currentMSecsSinceEpoch();
+                mCachedSshAuth.href = sshAuth.href;
+                mCachedSshAuth.headers = sshAuth.headers;
                 return sendBatchRequest(sshAuth.href, sshAuth.headers);
             }).future();
     }
