@@ -40,6 +40,16 @@ public:
         size_t behind = 0;
     };
 
+    struct RemoteConnectionReport {
+        bool transportOk = false;
+        QString transportErrorMessage;
+        bool lfsProbeAttempted = false;
+        bool lfsOk = false;
+        bool lfsUnauthorized = false;
+        int lfsHttpStatus = 0;
+        QString lfsErrorMessage;
+    };
+
     enum class CheckoutMode {
         Safe,
         Force
@@ -106,6 +116,8 @@ public:
     QVector<GitRemoteInfo> remotes() const;
 
     Q_INVOKABLE static QFuture<QString> testRemoteConnection(const QUrl& url);
+    static QFuture<RemoteConnectionReport> testRemoteConnectionDetailed(const QUrl& url,
+                                                                        bool probeLfs = false);
 
     static QString repositoryNameFromUrl(const QUrl& url);
 

@@ -12,6 +12,7 @@
 #include "LfsBatchClient.h"
 #include "LfsStore.h"
 #include "LfsServer.h"
+#include "SshLfsAuthenticator.h"
 #include "asyncfuture.h"
 
 // Qt includes
@@ -702,9 +703,25 @@ QString lfsTestRepoUrl()
                         QStringLiteral("https://github.com/vpicaver/lfs-test.git"));
 }
 
-QString lfsAuthEndpoint()
+QString lfsEndpointFromRepoUrl(const QString& repoUrl)
 {
-    return envOrDefault("QQGIT_LFS_TEST_AUTH_LFS_URL", QString());
+    QUrl url(repoUrl);
+    if (!url.isValid() || url.scheme().isEmpty() || url.host().isEmpty()) {
+        return QString();
+    }
+
+    QString path = url.path();
+    if (path.endsWith(QStringLiteral("/"))) {
+        path.chop(1);
+    }
+    if (path.endsWith(QStringLiteral("/info/lfs"), Qt::CaseInsensitive)) {
+        url.setPath(path);
+        return url.toString();
+    }
+
+    path += QStringLiteral("/info/lfs");
+    url.setPath(path);
+    return url.toString();
 }
 
 QString lfsAuthUsername()
@@ -717,19 +734,42 @@ QString lfsAuthToken()
     return envOrDefault("QQGIT_LFS_TEST_AUTH_TOKEN", QString());
 }
 
-QStringList missingUploadAuthEnvVars()
+QString sshLfsTestRemoteUrl()
+{
+    return envOrDefault("QQGIT_SSH_LFS_TEST_REMOTE_URL",
+                        QStringLiteral("ssh://git@github.com/vpicaver/lfs-test.git"));
+}
+
+QStringList missingSshLfsDownloadEnvVars()
 {
     QStringList missing;
-    if (lfsAuthEndpoint().isEmpty()) {
-        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_LFS_URL (e.g. https://github.com/vpicaver/lfs-test.git/info/lfs)");
+    if (qgetenv("QQGIT_SSH_LFS_TEST_ENABLE") != QByteArray("1")) {
+        missing << QStringLiteral("QQGIT_SSH_LFS_TEST_ENABLE=1");
     }
-    if (lfsAuthUsername().isEmpty()) {
-        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_USERNAME (e.g. vpicaver)");
-    }
-    if (lfsAuthToken().isEmpty()) {
-        missing << QStringLiteral("QQGIT_LFS_TEST_AUTH_TOKEN (e.g. github_pat_xxx)");
+    if (sshLfsTestRemoteUrl().isEmpty()) {
+        missing << QStringLiteral("QQGIT_SSH_LFS_TEST_REMOTE_URL (e.g. ssh://git@github.com/<owner>/<repo>.git)");
     }
     return missing;
+}
+
+QStringList missingSshLfsUploadEnvVars()
+{
+    return missingSshLfsDownloadEnvVars();
+}
+
+bool hasHeaderCaseInsensitive(const QMap<QByteArray, QByteArray>& headers, const QByteArray& key)
+{
+    for (auto it = headers.begin(); it != headers.end(); ++it) {
+        if (it.key().compare(key, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QStringList missingUploadAuthEnvVars()
+{
+    return missingSshLfsUploadEnvVars();
 }
 
 QByteArray basicAuthHeader(const QString& username, const QString& token)
@@ -3084,6 +3124,52 @@ TEST_CASE("Lfs push rejects wildcard refspecs with explicit error", "[LFS][regre
     CHECK(lfsServer.uploadRequestCount() == 0);
 }
 
+TEST_CASE("SshLfsAuthenticator download authenticates against GitHub", "[LFS][network][ssh][download]") {
+    const QStringList missingEnv = missingSshLfsDownloadEnvVars();
+    if (!missingEnv.isEmpty()) {
+        const QString skipMessage =
+            QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
+        SKIP(skipMessage.toStdString());
+    }
+
+    const auto future = SshLfsAuthenticator::authenticate(sshLfsTestRemoteUrl(),
+                                                           SshLfsAuthenticator::Operation::Download);
+    REQUIRE(AsyncFuture::waitForFinished(future, 90 * 1000));
+    INFO("SSH download auth error:" << future.result().errorMessage().toStdString()
+         << "code:" << future.result().errorCode());
+    REQUIRE(!future.result().hasError());
+
+    const auto auth = future.result().value();
+    INFO("SSH download href:" << auth.href.toString().toStdString());
+    CHECK(auth.href.isValid());
+    CHECK(auth.href.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0);
+    CHECK_FALSE(auth.href.host().isEmpty());
+    CHECK(hasHeaderCaseInsensitive(auth.headers, QByteArray("Authorization")));
+}
+
+TEST_CASE("SshLfsAuthenticator upload authenticates against GitHub", "[LFS][network][ssh][upload]") {
+    const QStringList missingEnv = missingSshLfsUploadEnvVars();
+    if (!missingEnv.isEmpty()) {
+        const QString skipMessage =
+            QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
+        SKIP(skipMessage.toStdString());
+    }
+
+    const auto future = SshLfsAuthenticator::authenticate(sshLfsTestRemoteUrl(),
+                                                           SshLfsAuthenticator::Operation::Upload);
+    REQUIRE(AsyncFuture::waitForFinished(future, 90 * 1000));
+    INFO("SSH upload auth error:" << future.result().errorMessage().toStdString()
+         << "code:" << future.result().errorCode());
+    REQUIRE(!future.result().hasError());
+
+    const auto auth = future.result().value();
+    INFO("SSH upload href:" << auth.href.toString().toStdString());
+    CHECK(auth.href.isValid());
+    CHECK(auth.href.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0);
+    CHECK_FALSE(auth.href.host().isEmpty());
+    CHECK(hasHeaderCaseInsensitive(auth.headers, QByteArray("Authorization")));
+}
+
 TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS][network][upload]") {
     const QStringList missingEnv = missingUploadAuthEnvVars();
     if (!missingEnv.isEmpty()) {
@@ -3091,9 +3177,10 @@ TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS]
             QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
         SKIP(skipMessage.toStdString());
     }
-    const QString authLfsUrl = lfsAuthEndpoint();
-    const QString username = lfsAuthUsername();
-    const QString token = lfsAuthToken();
+    const QString sshRemoteUrl = sshLfsTestRemoteUrl();
+    const QString sshLfsUrl = sshRemoteUrl.endsWith(QStringLiteral("/info/lfs"))
+        ? sshRemoteUrl
+        : (sshRemoteUrl + QStringLiteral("/info/lfs"));
 
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
@@ -3102,14 +3189,15 @@ TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS]
     GitRepository repository;
     repository.setDirectory(QDir(repoPath));
 
-    auto cloneFuture = repository.clone(QUrl(lfsTestRepoUrl()));
+    auto cloneFuture = repository.clone(QUrl(sshRemoteUrl));
     REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
     INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString());
     REQUIRE(!cloneFuture.result().hasError());
 
-    ScopedLfsAuthProvider authProvider(std::make_shared<EnvLfsAuthProvider>(username, token));
+    // Explicitly disable static/global HTTP auth so this test validates SSH-derived auth headers.
+    ScopedLfsAuthProvider authProvider(nullptr);
 
-    REQUIRE(setGitConfigString(repoPath, "lfs.url", authLfsUrl));
+    REQUIRE(setGitConfigString(repoPath, "lfs.url", sshLfsUrl));
 
     const QString gitDirPath = gitDirPathFromWorkTree(repoPath);
     REQUIRE(!gitDirPath.isEmpty());
@@ -3127,6 +3215,7 @@ TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS]
     auto batchFuture = client.batch(QStringLiteral("upload"), {spec});
     REQUIRE(AsyncFuture::waitForFinished(batchFuture, 60 * 1000));
     INFO("Upload batch error:" << batchFuture.result().errorMessage().toStdString());
+    INFO("Expected auth path: SSH git-lfs-authenticate -> RemoteAuth header");
     REQUIRE(!batchFuture.result().hasError());
 
     const auto response = batchFuture.result().value();

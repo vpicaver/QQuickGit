@@ -104,6 +104,7 @@ target_link_libraries(qquickgit
     Qt6::Network
     monad
     asyncfuture
+    qlibssh2
     libgit2::libgit2
     openssl::openssl
 )

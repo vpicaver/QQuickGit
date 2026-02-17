@@ -79,6 +79,7 @@ private:
     static bool parseAuthFromUrl(const QUrl& url, QByteArray* headerOut);
     static void applyHeaders(QNetworkRequest* request, const QMap<QByteArray, QByteArray>& headers);
     static Monad::Result<QUrl> resolveLfsEndpoint(git_repository* repo, const QString& remoteName);
+    static Monad::ResultString resolveRemoteUrl(git_repository* repo, const QString& remoteName);
     static QString defaultRemoteName(git_repository* repo);
     static QByteArray buildBatchRequestBody(const QString& operation, const QVector<ObjectSpec>& objects);
     static bool isOfflineError(QNetworkReply::NetworkError error);

@@ -20,6 +20,7 @@
 #include "git2/remote.h"
 #include "GitUtilities.h"
 #include "LfsAuthFailureNotifier.h"
+#include "SshLfsAuthenticator.h"
 
 namespace {
 constexpr int LfsBatchTimeoutMs = 30000;
@@ -243,152 +244,187 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
     auto repoGuard = git_repository_free;
     std::unique_ptr<git_repository, decltype(repoGuard)> repoHolder(repo, repoGuard);
 
+    const auto sendBatchRequest =
+        [this, operation, objects](const QUrl& endpoint,
+                                   const QMap<QByteArray, QByteArray>& explicitHeaders)
+        -> QFuture<Monad::Result<BatchResponse>> {
+        if (!isHttpUrl(endpoint)) {
+            return AsyncFuture::completed(Monad::Result<BatchResponse>(QStringLiteral("Unsupported LFS remote URL"),
+                                                                       static_cast<int>(LfsFetchErrorCode::NoRemote)));
+        }
+
+        QUrl batchUrl(endpoint);
+        batchUrl.setPath(trimTrailingSlash(endpoint.path()) + QStringLiteral("/objects/batch"));
+
+        QNetworkRequest request(batchUrl);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, LfsJsonMime);
+        request.setRawHeader("Accept", LfsJsonMime);
+
+        applyHeaders(&request, explicitHeaders);
+        applyAuthHeader(&request, endpoint);
+
+        git_repository* requestRepo = nullptr;
+        if (git_repository_open(&requestRepo, mGitDirPath.toUtf8().constData()) == GIT_OK) {
+            applyExtraHeaders(requestRepo, endpoint, &request);
+            git_repository_free(requestRepo);
+        }
+
+        const QByteArray payload = buildBatchRequestBody(operation, objects);
+
+        auto deferred = AsyncFuture::deferred<Monad::Result<BatchResponse>>();
+        deferred.reportStarted();
+
+        request.setTransferTimeout(LfsBatchTimeoutMs);
+
+        QNetworkReply* reply = mManager->post(request, payload);
+
+        auto finish = [deferred, reply](const Monad::Result<BatchResponse>& result) mutable {
+            deferred.complete(result);
+            if (reply) {
+                reply->deleteLater();
+            }
+        };
+
+        QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, endpoint]() mutable {
+            if (!reply) {
+                finish(Monad::Result<BatchResponse>(QStringLiteral("Missing LFS reply"),
+                                                    static_cast<int>(LfsFetchErrorCode::Transfer)));
+                return;
+            }
+
+            const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (reply->error() != QNetworkReply::NoError) {
+                const QNetworkReply::NetworkError netError = reply->error();
+                if (isOfflineError(netError)) {
+                    finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (offline)"),
+                                                                                reply,
+                                                                                httpStatus),
+                                                        static_cast<int>(LfsFetchErrorCode::Offline)));
+                } else {
+                    if (httpStatus == 401 || httpStatus == 403) {
+                        notifyLfsAuthFailure(endpoint, httpStatus,
+                                             enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
+                                                                     reply,
+                                                                     httpStatus));
+                    }
+                    finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
+                                                                                reply,
+                                                                                httpStatus),
+                                                        static_cast<int>(LfsFetchErrorCode::Transfer)));
+                }
+                return;
+            }
+
+            if (httpStatus >= 400) {
+                int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
+                if (httpStatus == 401 || httpStatus == 403) {
+                    errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
+                    notifyLfsAuthFailure(endpoint, httpStatus,
+                                         enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
+                                                                 reply,
+                                                                 httpStatus));
+                }
+                finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
+                                                                            reply,
+                                                                            httpStatus),
+                                                    errorCode));
+                return;
+            }
+
+            QJsonParseError parseError{};
+            const QJsonDocument document = QJsonDocument::fromJson(reply->readAll(), &parseError);
+            if (document.isNull() || !document.isObject()) {
+                finish(Monad::Result<BatchResponse>(QStringLiteral("Invalid LFS batch response"),
+                                                    static_cast<int>(LfsFetchErrorCode::Protocol)));
+                return;
+            }
+
+            BatchResponse response;
+            const QJsonObject root = document.object();
+            response.transfer = root.value(QStringLiteral("transfer")).toString();
+
+            const QJsonArray objectsArray = root.value(QStringLiteral("objects")).toArray();
+            response.objects.reserve(objectsArray.size());
+
+            for (const auto& entry : objectsArray) {
+                if (!entry.isObject()) {
+                    continue;
+                }
+                const QJsonObject object = entry.toObject();
+                ObjectResponse objectResponse;
+                objectResponse.oid = object.value(QStringLiteral("oid")).toString();
+                objectResponse.size = static_cast<qint64>(object.value(QStringLiteral("size")).toDouble());
+
+                const QJsonObject errorObject = object.value(QStringLiteral("error")).toObject();
+                if (!errorObject.isEmpty()) {
+                    objectResponse.errorCode = errorObject.value(QStringLiteral("code")).toInt();
+                    objectResponse.errorMessage = errorObject.value(QStringLiteral("message")).toString();
+                    if (objectResponse.errorCode == 401 || objectResponse.errorCode == 403) {
+                        notifyLfsAuthFailure(endpoint, objectResponse.errorCode, objectResponse.errorMessage);
+                    }
+                }
+
+                const QJsonObject actions = object.value(QStringLiteral("actions")).toObject();
+                for (auto it = actions.begin(); it != actions.end(); ++it) {
+                    if (!it.value().isObject()) {
+                        continue;
+                    }
+                    const QJsonObject actionObject = it.value().toObject();
+                    Action action;
+                    action.href = QUrl(actionObject.value(QStringLiteral("href")).toString());
+                    const QJsonObject headers = actionObject.value(QStringLiteral("header")).toObject();
+                    for (auto headerIt = headers.begin(); headerIt != headers.end(); ++headerIt) {
+                        action.headers.insert(headerIt.key().toUtf8(), headerIt.value().toString().toUtf8());
+                    }
+                    objectResponse.actions.insert(it.key(), action);
+                }
+
+                response.objects.push_back(objectResponse);
+            }
+
+            finish(Monad::Result<BatchResponse>(response));
+        });
+
+        return deferred.future();
+    };
+
     auto endpointResult = resolveLfsEndpoint(repo, remoteName);
     if (endpointResult.hasError()) {
         qDebug() << "[LFS batch] endpoint error:" << endpointResult.errorMessage();
         return AsyncFuture::completed(Monad::Result<BatchResponse>(endpointResult.errorMessage(), endpointResult.errorCode()));
     }
+    const QUrl lfsEndpoint = endpointResult.value();
+    const QString endpointScheme = lfsEndpoint.scheme().toLower();
+    if (endpointScheme == QStringLiteral("ssh") || endpointScheme == QStringLiteral("git")) {
+        auto remoteUrlResult = resolveRemoteUrl(repo, remoteName);
+        if (remoteUrlResult.hasError()) {
+            return AsyncFuture::completed(Monad::Result<BatchResponse>(
+                QStringLiteral("SSH LFS authentication requires a configured remote URL"),
+                static_cast<int>(LfsFetchErrorCode::Auth)));
+        }
 
-    QUrl endpoint = endpointResult.value();
-    qDebug() << "[LFS batch] endpoint:" << endpoint;
-    if (!isHttpUrl(endpoint)) {
-        return AsyncFuture::completed(Monad::Result<BatchResponse>(QStringLiteral("Unsupported LFS remote URL"),
-                                                                   static_cast<int>(LfsFetchErrorCode::NoRemote)));
+        const auto sshOperation = operation == QStringLiteral("upload")
+            ? SshLfsAuthenticator::Operation::Upload
+            : SshLfsAuthenticator::Operation::Download;
+
+        const auto sshAuthFuture = SshLfsAuthenticator::authenticate(remoteUrlResult.value(), sshOperation);
+        return AsyncFuture::observe(sshAuthFuture).context(
+            this,
+            [sendBatchRequest](const Monad::Result<SshLfsAuthenticator::AuthResult>& sshAuthResult)
+                -> QFuture<Monad::Result<BatchResponse>> {
+                if (sshAuthResult.hasError()) {
+                    return AsyncFuture::completed(
+                        Monad::Result<BatchResponse>(QStringLiteral("SSH LFS authentication failed: %1")
+                                                         .arg(sshAuthResult.errorMessage()),
+                                                     static_cast<int>(LfsFetchErrorCode::Auth)));
+                }
+
+                const auto sshAuth = sshAuthResult.value();
+                return sendBatchRequest(sshAuth.href, sshAuth.headers);
+            }).future();
     }
 
-    QUrl batchUrl(endpoint);
-    batchUrl.setPath(trimTrailingSlash(endpoint.path()) + QStringLiteral("/objects/batch"));
-
-    QNetworkAccessManager manager;
-    QNetworkRequest request(batchUrl);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, LfsJsonMime);
-    request.setRawHeader("Accept", LfsJsonMime);
-
-    applyAuthHeader(&request, endpoint);
-    applyExtraHeaders(repo, endpoint, &request);
-
-    const QByteArray payload = buildBatchRequestBody(operation, objects);
-
-    auto deferred = AsyncFuture::deferred<Monad::Result<BatchResponse>>();
-    deferred.reportStarted();
-
-    request.setTransferTimeout(LfsBatchTimeoutMs);
-
-    QNetworkReply* reply = mManager->post(request, payload);
-
-    auto finish = [deferred, reply](const Monad::Result<BatchResponse>& result) mutable {
-        deferred.complete(result);
-        if (reply) {
-            reply->deleteLater();
-        }
-    };
-
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, finish, endpoint]() mutable {
-        if (!reply) {
-            finish(Monad::Result<BatchResponse>(QStringLiteral("Missing LFS reply"),
-                                                static_cast<int>(LfsFetchErrorCode::Transfer)));
-            return;
-        }
-
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (reply->error() != QNetworkReply::NoError) {
-            const QNetworkReply::NetworkError netError = reply->error();
-            if (isOfflineError(netError)) {
-                finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (offline)"),
-                                                                            reply,
-                                                                            httpStatus),
-                                                    static_cast<int>(LfsFetchErrorCode::Offline)));
-            } else {
-                if (httpStatus == 401 || httpStatus == 403) {
-                    notifyLfsAuthFailure(endpoint, httpStatus,
-                                         enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
-                                                                 reply,
-                                                                 httpStatus));
-                }
-                finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed"),
-                                                                            reply,
-                                                                            httpStatus),
-                                                    static_cast<int>(LfsFetchErrorCode::Transfer)));
-            }
-            return;
-        }
-
-        if (httpStatus >= 400) {
-            int errorCode = static_cast<int>(LfsFetchErrorCode::Transfer);
-            if (httpStatus == 401 || httpStatus == 403) {
-                errorCode = static_cast<int>(LfsFetchErrorCode::Auth);
-                notifyLfsAuthFailure(endpoint, httpStatus,
-                                     enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
-                                                             reply,
-                                                             httpStatus));
-            }
-            finish(Monad::Result<BatchResponse>(enrichReplyErrorMessage(QStringLiteral("LFS batch request failed (%1)").arg(httpStatus),
-                                                                        reply,
-                                                                        httpStatus),
-                                                errorCode));
-            return;
-        }
-
-        QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(reply->readAll(), &parseError);
-        if (document.isNull() || !document.isObject()) {
-            finish(Monad::Result<BatchResponse>(QStringLiteral("Invalid LFS batch response"),
-                                                static_cast<int>(LfsFetchErrorCode::Protocol)));
-            return;
-        }
-
-        BatchResponse response;
-        const QJsonObject root = document.object();
-        response.transfer = root.value(QStringLiteral("transfer")).toString();
-
-        const QJsonArray objectsArray = root.value(QStringLiteral("objects")).toArray();
-        response.objects.reserve(objectsArray.size());
-
-        for (const auto& entry : objectsArray) {
-            if (!entry.isObject()) {
-                continue;
-            }
-            const QJsonObject object = entry.toObject();
-            ObjectResponse objectResponse;
-            objectResponse.oid = object.value(QStringLiteral("oid")).toString();
-            objectResponse.size = static_cast<qint64>(object.value(QStringLiteral("size")).toDouble());
-
-            const QJsonObject errorObject = object.value(QStringLiteral("error")).toObject();
-            if (!errorObject.isEmpty()) {
-                objectResponse.errorCode = errorObject.value(QStringLiteral("code")).toInt();
-                objectResponse.errorMessage = errorObject.value(QStringLiteral("message")).toString();
-                if (objectResponse.errorCode == 401 || objectResponse.errorCode == 403) {
-                    notifyLfsAuthFailure(endpoint, objectResponse.errorCode, objectResponse.errorMessage);
-                }
-            }
-
-            const QJsonObject actions = object.value(QStringLiteral("actions")).toObject();
-            for (auto it = actions.begin(); it != actions.end(); ++it) {
-                if (!it.value().isObject()) {
-                    continue;
-                }
-                const QJsonObject actionObject = it.value().toObject();
-                Action action;
-                action.href = QUrl(actionObject.value(QStringLiteral("href")).toString());
-                const QJsonObject headers = actionObject.value(QStringLiteral("header")).toObject();
-                for (auto headerIt = headers.begin(); headerIt != headers.end(); ++headerIt) {
-                    action.headers.insert(headerIt.key().toUtf8(), headerIt.value().toString().toUtf8());
-                }
-                objectResponse.actions.insert(it.key(), action);
-            }
-
-            response.objects.push_back(objectResponse);
-        }
-
-        qDebug() << "[LFS batch] response"
-                 << "httpStatus=" << httpStatus
-                 << "objects=" << response.objects.size()
-                 << "transfer=" << response.transfer;
-
-        finish(Monad::Result<BatchResponse>(response));
-    });
-
-    return deferred.future();
+    return sendBatchRequest(lfsEndpoint, {});
 }
 
 QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
@@ -835,6 +871,38 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
 
     qDebug() << "[LFS endpoint] derived from remote url:" << url << "from" << remoteUrlValue;
     return Monad::Result<QUrl>(url);
+}
+
+Monad::ResultString LfsBatchClient::resolveRemoteUrl(git_repository* repo, const QString& remoteName)
+{
+    if (!repo) {
+        return Monad::ResultString(QStringLiteral("Missing git repository"),
+                                   static_cast<int>(LfsFetchErrorCode::NoRemote));
+    }
+
+    QString resolvedRemote = remoteName;
+    if (resolvedRemote.isEmpty()) {
+        resolvedRemote = defaultRemoteName(repo);
+    }
+    if (resolvedRemote.isEmpty()) {
+        return Monad::ResultString(QStringLiteral("No git remote configured"),
+                                   static_cast<int>(LfsFetchErrorCode::NoRemote));
+    }
+
+    git_remote* remote = nullptr;
+    if (git_remote_lookup(&remote, repo, resolvedRemote.toUtf8().constData()) != GIT_OK) {
+        return Monad::ResultString(QStringLiteral("Failed to resolve git remote"),
+                                   static_cast<int>(LfsFetchErrorCode::NoRemote));
+    }
+
+    std::unique_ptr<git_remote, decltype(&git_remote_free)> remoteHolder(remote, &git_remote_free);
+    const char* remoteUrl = git_remote_url(remote);
+    if (!remoteUrl || QString::fromUtf8(remoteUrl).trimmed().isEmpty()) {
+        return Monad::ResultString(QStringLiteral("Missing remote URL"),
+                                   static_cast<int>(LfsFetchErrorCode::NoRemote));
+    }
+
+    return Monad::ResultString(QString::fromUtf8(remoteUrl).trimmed());
 }
 
 QString LfsBatchClient::defaultRemoteName(git_repository* repo)

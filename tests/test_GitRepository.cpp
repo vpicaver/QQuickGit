@@ -1040,6 +1040,21 @@ TEST_CASE("GitRepository testRemoteConnection should work", "[GitRepository]") {
 
 }
 
+TEST_CASE("GitRepository testRemoteConnectionDetailed should report transport and lfs states", "[GitRepository]") {
+    auto reportFuture = GitRepository::testRemoteConnectionDetailed(QUrl("xyz"), true);
+    REQUIRE(AsyncFuture::waitForFinished(reportFuture, 2000));
+    const auto report = reportFuture.result();
+    CHECK(!report.transportOk);
+    CHECK(report.transportErrorMessage.toStdString() == "unsupported URL protocol");
+    CHECK(!report.lfsProbeAttempted);
+
+    reportFuture = GitRepository::testRemoteConnectionDetailed(QUrl(""), true);
+    REQUIRE(AsyncFuture::waitForFinished(reportFuture, 2000));
+    const auto emptyUrlReport = reportFuture.result();
+    CHECK(!emptyUrlReport.transportOk);
+    CHECK(emptyUrlReport.transportErrorMessage.toStdString() == "cannot set empty URL");
+}
+
 TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     QDir cloneDir("clone-test");
 

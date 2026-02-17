@@ -30,6 +30,7 @@
 #include <QtConcurrent>
 #include <QUuid>
 #include <QHash>
+#include <QRegularExpression>
 
 //Async includes
 #include "asyncfuture.h"
@@ -74,6 +75,16 @@ QString gitErrorMessageWithPrefix(const QString& prefix)
         return QStringLiteral("%1: %2").arg(prefix, QString::fromUtf8(lastError->message));
     }
     return prefix;
+}
+
+int parseHttpStatusFromMessage(const QString& message)
+{
+    static const QRegularExpression expression(QStringLiteral("httpStatus=(\\d{3})"));
+    const QRegularExpressionMatch match = expression.match(message);
+    if (!match.hasMatch()) {
+        return 0;
+    }
+    return match.captured(1).toInt();
 }
 
 QStringList uniqueSortedPaths(const QStringList& paths)
@@ -1458,21 +1469,23 @@ QVector<GitRemoteInfo> GitRepository::remotes() const
     return remotes;
 }
 
-QFuture<QString> GitRepository::testRemoteConnection(const QUrl &url)
+QFuture<GitRepository::RemoteConnectionReport> GitRepository::testRemoteConnectionDetailed(const QUrl& url,
+                                                                                            bool probeLfs)
 {
-    return QtConcurrent::run([url]()->QString  {
+    return QtConcurrent::run([url, probeLfs]() -> RemoteConnectionReport {
+        RemoteConnectionReport report;
         try {
             GitRepository tempRepository;
             tempRepository.setDirectory(QDir::temp().absoluteFilePath(QUuid::createUuid().toString(QUuid::WithoutBraces)));
             tempRepository.initRepository();
-            QString remoteName = "test";
+            const QString remoteName = QStringLiteral("test");
 
             int error = GIT_OK;
             {
                 auto remote = makeScopedPtr(git_remote_free);
                 error = git_remote_lookup(&remote, tempRepository.d->repo, remoteName.toLocal8Bit());
             }
-            if(error != GIT_OK) {
+            if (error != GIT_OK) {
                 tempRepository.addRemoteHelper(remoteName, url);
             } else {
                 check(git_remote_set_url(tempRepository.d->repo,
@@ -1487,15 +1500,62 @@ QFuture<QString> GitRepository::testRemoteConnection(const QUrl &url)
             callbacks.credentials = GitRepositoryData::credentailCallBack;
 
             check(git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nullptr, nullptr));
+            report.transportOk = true;
 
-        }  catch (const std::runtime_error& error) {
-            return QString::fromLocal8Bit(error.what()).trimmed();
+            if (!probeLfs) {
+                return report;
+            }
+
+            report.lfsProbeAttempted = true;
+            const char* gitDirRaw = git_repository_path(tempRepository.d->repo);
+            if (!gitDirRaw) {
+                report.lfsErrorMessage = QStringLiteral("Unable to resolve git metadata path for LFS probe.");
+                return report;
+            }
+
+            LfsBatchClient client(QString::fromUtf8(gitDirRaw));
+            const auto batchFuture = client.batch(QStringLiteral("download"),
+                                                  QVector<LfsBatchClient::ObjectSpec>(),
+                                                  remoteName);
+
+            if (!AsyncFuture::waitForFinished(batchFuture, 10000)) {
+                report.lfsErrorMessage = QStringLiteral("LFS probe timed out.");
+                return report;
+            }
+
+            const auto batchResult = batchFuture.result();
+            if (!batchResult.hasError()) {
+                report.lfsOk = true;
+                return report;
+            }
+
+            report.lfsErrorMessage = batchResult.errorMessage();
+            report.lfsHttpStatus = parseHttpStatusFromMessage(report.lfsErrorMessage);
+
+            const int authCode = static_cast<int>(LfsFetchErrorCode::Auth);
+            if (batchResult.errorCode() == authCode || report.lfsHttpStatus == 401 || report.lfsHttpStatus == 403) {
+                report.lfsUnauthorized = true;
+            }
+        } catch (const std::runtime_error& error) {
+            report.transportOk = false;
+            report.transportErrorMessage = QString::fromLocal8Bit(error.what()).trimmed();
         }
 
+        return report;
+    });
+}
+
+QFuture<QString> GitRepository::testRemoteConnection(const QUrl &url)
+{
+    return QtConcurrent::run([url]()->QString  {
+        const auto reportFuture = GitRepository::testRemoteConnectionDetailed(url, false);
+        AsyncFuture::waitForFinished(reportFuture, 20000);
+        const auto report = reportFuture.result();
+        if (!report.transportOk) {
+            return report.transportErrorMessage;
+        }
         return QString();
     });
-
-
 }
 
 QString GitRepository::repositoryNameFromUrl(const QUrl &url)
