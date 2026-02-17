@@ -10,6 +10,7 @@
 #include <QUrl>
 #include <QVector>
 #include <memory>
+#include <functional>
 
 struct git_repository;
 class QNetworkRequest;
@@ -59,7 +60,8 @@ public:
 
     QFuture<Monad::ResultBase> downloadObject(const Action& action,
                                               const LfsStore& store,
-                                              const LfsPointer& expected) const;
+                                              const LfsPointer& expected,
+                                              std::function<void(qint64 downloadedBytes, qint64 totalBytes)> progressCallback = {}) const;
 
     QFuture<Monad::ResultBase> uploadObject(const Action& action,
                                             const QString& objectPath,

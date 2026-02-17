@@ -859,12 +859,19 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
         }
 
         const QString relativePath = QString::fromUtf8(entry->path);
-        QFile file(QDir(plan.workDir).filePath(relativePath));
-        if (!file.open(QIODevice::ReadOnly)) {
+        git_blob* blob = nullptr;
+        if (git_blob_lookup(&blob, repo, &entry->id) != GIT_OK || !blob) {
+            continue;
+        }
+        std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+        const char* rawContent = static_cast<const char*>(git_blob_rawcontent(blob));
+        const size_t rawSize = git_blob_rawsize(blob);
+        if (!rawContent || rawSize == 0) {
             continue;
         }
 
-        const QByteArray prefix = file.read(1024);
+        const QByteArray prefix(rawContent, static_cast<int>(std::min<size_t>(rawSize, 1024)));
         LfsPointer pointer;
         if (!LfsPointer::parse(prefix, &pointer)) {
             continue;
@@ -920,14 +927,63 @@ Monad::ResultBase hydratePointerFiles(const LfsHydrationPlan& plan)
     return Monad::ResultBase();
 }
 
-GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, QObject* context)
+using LfsHydrationProgress = std::function<void(const QString& text, int current, int total)>;
+
+QString formatBytesForProgress(qint64 bytes)
+{
+    const double value = static_cast<double>(std::max<qint64>(0, bytes));
+    constexpr double kb = 1024.0;
+    constexpr double mb = 1024.0 * kb;
+    constexpr double gb = 1024.0 * mb;
+
+    if (value >= gb) {
+        return QStringLiteral("%1 GB").arg(value / gb, 0, 'f', 2);
+    }
+    if (value >= mb) {
+        return QStringLiteral("%1 MB").arg(value / mb, 0, 'f', 2);
+    }
+    if (value >= kb) {
+        return QStringLiteral("%1 KB").arg(value / kb, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 B").arg(static_cast<qint64>(value));
+}
+
+QString formatLfsDownloadProgressText(const QString& relativePath,
+                                      int currentObject,
+                                      int totalObjects,
+                                      qint64 downloadedBytes,
+                                      qint64 totalBytes)
+{
+    const QString totalText = totalBytes > 0
+        ? formatBytesForProgress(totalBytes)
+        : QStringLiteral("?");
+    return QStringLiteral("Downloading LFS: %1 (%2/%3) - %4/%5")
+        .arg(relativePath)
+        .arg(currentObject)
+        .arg(totalObjects)
+        .arg(formatBytesForProgress(downloadedBytes))
+        .arg(totalText);
+}
+
+GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
+                                                 QObject* context,
+                                                 const LfsHydrationProgress& progress = {})
 {
     if (plan.pointerFiles.isEmpty()) {
         return AsyncFuture::completed(Monad::ResultBase());
     }
 
+    if (progress) {
+        const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
+        progress(QStringLiteral("Hydrating LFS files"), 0, std::max(1, pointerFileCount));
+    }
+
     auto store = std::make_shared<LfsStore>(plan.gitDirPath, LfsPolicy());
     if (plan.missingPointers.isEmpty()) {
+        if (progress) {
+            const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
+            progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+        }
         return AsyncFuture::completed(hydratePointerFiles(plan));
     }
 
@@ -938,15 +994,51 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan, Q
     auto nextIndex = std::make_shared<int>(0);
     auto step = std::make_shared<std::function<void()>>();
 
-    *step = [deferred, context, store, plan, pointers, nextIndex, step]() mutable {
+    *step = [deferred, context, store, plan, pointers, nextIndex, step, progress]() mutable {
         if (*nextIndex >= pointers->size()) {
+            if (progress) {
+                const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
+                progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+            }
             deferred.complete(hydratePointerFiles(plan));
             return;
         }
 
         const LfsPointer pointer = pointers->at(*nextIndex);
+        const int currentObject = *nextIndex + 1;
+        const int totalObjects = static_cast<int>(pointers->size());
+        QString relativePath = pointer.oid;
+        for (const auto& item : plan.pointerFiles) {
+            if (item.pointer.oid == pointer.oid) {
+                relativePath = item.relativePath;
+                break;
+            }
+        }
+        if (progress) {
+            progress(formatLfsDownloadProgressText(relativePath,
+                                                   currentObject,
+                                                   totalObjects,
+                                                   0,
+                                                   pointer.size),
+                     currentObject,
+                     totalObjects);
+        }
         (*nextIndex)++;
-        auto fetchFuture = store->fetchObject(pointer);
+        auto fetchFuture = store->fetchObject(
+            pointer,
+            QString(),
+            [progress, currentObject, totalObjects, relativePath](qint64 downloadedBytes, qint64 totalBytes) {
+                if (!progress) {
+                    return;
+                }
+                progress(formatLfsDownloadProgressText(relativePath,
+                                                       currentObject,
+                                                       totalObjects,
+                                                       downloadedBytes,
+                                                       totalBytes),
+                         currentObject,
+                         totalObjects);
+            });
         AsyncFuture::observe(fetchFuture)
             .context(context, [deferred, step, fetchFuture]() mutable {
                 const auto result = fetchFuture.result();
@@ -986,17 +1078,19 @@ QFuture<Monad::Result<LfsHydrationPlan>> prepareLfsHydrationPlan(const QDir& rep
     });
 }
 
-GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir, QObject* context)
+GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir,
+                                                     QObject* context,
+                                                     const LfsHydrationProgress& progress = {})
 {
     auto prepareFuture = prepareLfsHydrationPlan(repositoryDir);
     return AsyncFuture::observe(prepareFuture)
-        .context(context, [prepareFuture, context]() -> GitRepository::GitFuture {
+        .context(context, [prepareFuture, context, progress]() -> GitRepository::GitFuture {
             const auto prepareResult = prepareFuture.result();
             if (prepareResult.hasError()) {
                 return AsyncFuture::completed(Monad::ResultBase(prepareResult.errorMessage(),
                                                                 prepareResult.errorCode()));
             }
-            return runLfsHydrationPipeline(prepareResult.value(), context);
+            return runLfsHydrationPipeline(prepareResult.value(), context, progress);
         }).future();
 }
 
@@ -1742,7 +1836,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
         });
 
         return AsyncFuture::observe(future)
-            .context(this, [future, this]() -> GitFuture {
+            .context(this, [future, this, progressInterface]() mutable -> GitFuture {
                 const auto cloneResult = future.result();
                 if (cloneResult.hasError()) {
                     return AsyncFuture::completed(ResultBase(cloneResult.errorMessage(), cloneResult.errorCode()));
@@ -1759,7 +1853,15 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     LfsStoreRegistry::registerStore(d->mLfsStore);
                 }
                 ensureLfsAttributes();
-                return runLfsHydrationForDirectory(d->mDirectory, this);
+                auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
+                    const int safeTotal = std::max(1, total);
+                    const int safeCurrent = std::clamp(current, 0, safeTotal);
+                    setProgress(&progressInterface,
+                                ProgressState(text,
+                                              static_cast<size_t>(safeCurrent),
+                                              static_cast<size_t>(safeTotal)));
+                };
+                return runLfsHydrationForDirectory(d->mDirectory, this, lfsProgress);
             }).future();
     });
 }
@@ -2079,8 +2181,7 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
         [=](QFutureInterface<ResultBase> progressInterface)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
-
-            return QtConcurrent::run(
+            auto fetchFuture = QtConcurrent::run(
                 [=]() mutable
                 {
                     return mtry(
@@ -2108,6 +2209,24 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
                             return ResultBase();
                         });
                 });
+
+            return AsyncFuture::observe(fetchFuture)
+                .context(this, [=]() mutable -> GitFuture {
+                    const auto fetchResult = fetchFuture.result();
+                    if (fetchResult.hasError()) {
+                        return AsyncFuture::completed(fetchResult);
+                    }
+
+                    auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
+                        const int safeTotal = std::max(1, total);
+                        const int safeCurrent = std::clamp(current, 0, safeTotal);
+                        setProgress(&progressInterface,
+                                    ProgressState(text,
+                                                  static_cast<size_t>(safeCurrent),
+                                                  static_cast<size_t>(safeTotal)));
+                    };
+                    return runLfsHydrationForDirectory(d->mDirectory, this, lfsProgress);
+                }).future();
         });
 }
 

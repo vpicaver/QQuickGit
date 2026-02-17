@@ -7,6 +7,7 @@
 #include <QString>
 
 #include <memory>
+#include <functional>
 #include <QCryptographicHash>
 #include <QFile>
 
@@ -53,7 +54,9 @@ public:
 
     Monad::Result<QByteArray> readObject(const QString& oid) const;
 
-    QFuture<Monad::ResultBase> fetchObject(const LfsPointer& pointer, const QString& remoteName = QString()) const;
+    QFuture<Monad::ResultBase> fetchObject(const LfsPointer& pointer,
+                                           const QString& remoteName = QString(),
+                                           std::function<void(qint64 downloadedBytes, qint64 totalBytes)> progressCallback = {}) const;
     static bool shouldFallbackForFetchError(int errorCode);
     QObject* lfsContext() const;
 

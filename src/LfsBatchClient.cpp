@@ -501,7 +501,8 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
 
 QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
                                                           const LfsStore& store,
-                                                          const LfsPointer& expected) const
+                                                          const LfsPointer& expected,
+                                                          std::function<void(qint64 downloadedBytes, qint64 totalBytes)> progressCallback) const
 {
     if (!action.href.isValid()) {
         return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Missing LFS download href"),
@@ -515,6 +516,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
 
     auto writer = std::make_shared<LfsStore::StreamWriter>(beginResult.value());
     auto writeError = std::make_shared<Monad::ResultBase>();
+    auto downloadedBytes = std::make_shared<qint64>(0);
 
     auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
     deferred.reportStarted();
@@ -533,6 +535,17 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
 
     QNetworkReply* reply = mManager->get(request);
 
+    QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                     [progressCallback, expected](qint64 received, qint64 total) {
+        if (!progressCallback) {
+            return;
+        }
+
+        const qint64 normalizedTotal = total > 0 ? total : expected.size;
+        const qint64 normalizedReceived = std::max<qint64>(0, received);
+        progressCallback(normalizedReceived, normalizedTotal);
+    });
+
     auto finish = [deferred, reply](const Monad::ResultBase& result) mutable {
         deferred.complete(result);
         if (reply) {
@@ -540,7 +553,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
         }
     };
 
-    QObject::connect(reply, &QNetworkReply::readyRead, reply, [reply, writer, writeError]() mutable {
+    QObject::connect(reply, &QNetworkReply::readyRead, reply, [reply, writer, writeError, downloadedBytes, progressCallback, expected]() mutable {
         if (writeError->hasError()) {
             return;
         }
@@ -550,6 +563,11 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
             if (result.hasError()) {
                 *writeError = result;
                 reply->abort();
+            } else {
+                *downloadedBytes += chunk.size();
+                if (progressCallback) {
+                    progressCallback(*downloadedBytes, expected.size);
+                }
             }
         }
     });
@@ -561,7 +579,7 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
     });
 
 
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, writer, writeError, expected, finish, this, action]() mutable {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, writer, writeError, expected, finish, this, action, downloadedBytes, progressCallback]() mutable {
         if (!reply) {
             writer->discard();
             finish(Monad::ResultBase(QStringLiteral("Missing LFS reply"),
@@ -575,6 +593,11 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
                 auto result = writer->write(remaining.constData(), static_cast<size_t>(remaining.size()));
                 if (result.hasError()) {
                     *writeError = result;
+                } else {
+                    *downloadedBytes += remaining.size();
+                    if (progressCallback) {
+                        progressCallback(*downloadedBytes, expected.size);
+                    }
                 }
             }
         }
@@ -638,6 +661,10 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
             finish(Monad::ResultBase(QStringLiteral("LFS download hash mismatch"),
                                      static_cast<int>(LfsFetchErrorCode::Protocol)));
             return;
+        }
+
+        if (progressCallback) {
+            progressCallback(expected.size, expected.size);
         }
 
         finish(Monad::ResultBase());

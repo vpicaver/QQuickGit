@@ -12,6 +12,7 @@
 #include "LfsBatchClient.h"
 #include "LfsStore.h"
 #include "LfsServer.h"
+#include "ProgressState.h"
 #include "SshLfsAuthenticator.h"
 #include "asyncfuture.h"
 
@@ -662,6 +663,58 @@ bool findLfsPointerByOidInRepo(const QString& repoPath,
             }
             return true;
         }
+    }
+
+    return false;
+}
+
+bool findFirstLfsPointerInIndex(const QString& repoPath, LfsPointer* pointerOut, QString* relativePathOut)
+{
+    if (!pointerOut) {
+        return false;
+    }
+
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        return false;
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_index* index = nullptr;
+    if (git_repository_index(&index, repo) != GIT_OK || !index) {
+        return false;
+    }
+    std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
+
+    const size_t entryCount = git_index_entrycount(index);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_index_entry* entry = git_index_get_byindex(index, i);
+        if (!entry || !entry->path) {
+            continue;
+        }
+
+        git_blob* blob = nullptr;
+        if (git_blob_lookup(&blob, repo, &entry->id) != GIT_OK || !blob) {
+            continue;
+        }
+        std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+        const char* rawData = static_cast<const char*>(git_blob_rawcontent(blob));
+        const size_t rawSize = git_blob_rawsize(blob);
+        if (!rawData || rawSize == 0) {
+            continue;
+        }
+
+        LfsPointer pointer;
+        if (!LfsPointer::parse(QByteArray(rawData, static_cast<int>(rawSize)), &pointer)) {
+            continue;
+        }
+
+        *pointerOut = pointer;
+        if (relativePathOut) {
+            *relativePathOut = QString::fromUtf8(entry->path);
+        }
+        return true;
     }
 
     return false;
@@ -3269,4 +3322,110 @@ TEST_CASE("LfsBatchClient upload and round-trip download against GitHub", "[LFS]
     auto readResult = store.readObject(pointer.oid);
     REQUIRE(!readResult.hasError());
     CHECK(readResult.value() == payload);
+}
+
+TEST_CASE("GitRepository clone reports LFS hydration progress against GitHub SSH", "[LFS][network][ssh][progress][clone]") {
+    const QStringList missingEnv = missingSshLfsDownloadEnvVars();
+    if (!missingEnv.isEmpty()) {
+        const QString skipMessage =
+            QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
+        SKIP(skipMessage.toStdString());
+    }
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-progress-clone"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(sshLfsTestRemoteUrl()));
+    QStringList progressTexts;
+    AsyncFuture::observe(cloneFuture).onProgress([&progressTexts, cloneFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(cloneFuture.progressText());
+        progressTexts.append(state.text());
+    });
+
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 120 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString()
+         << "code:" << cloneFuture.result().errorCode());
+    REQUIRE(!cloneFuture.result().hasError());
+    REQUIRE(!progressTexts.isEmpty());
+
+    bool sawLfsProgress = false;
+    for (const QString& text : std::as_const(progressTexts)) {
+        if (text.contains(QStringLiteral("Downloading LFS objects"))
+            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            sawLfsProgress = true;
+            break;
+        }
+    }
+    INFO("Observed progress texts:" << progressTexts.join(QStringLiteral(" | ")).toStdString());
+    CHECK(sawLfsProgress);
+}
+
+TEST_CASE("GitRepository fetch reports LFS hydration progress against GitHub SSH", "[LFS][network][ssh][progress][fetch]") {
+    const QStringList missingEnv = missingSshLfsDownloadEnvVars();
+    if (!missingEnv.isEmpty()) {
+        const QString skipMessage =
+            QStringLiteral("Missing required env var(s): %1").arg(missingEnv.join(QStringLiteral(", ")));
+        SKIP(skipMessage.toStdString());
+    }
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("lfs-progress-fetch"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+
+    auto cloneFuture = repository.clone(QUrl(sshLfsTestRemoteUrl()));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 120 * 1000));
+    INFO("Clone error:" << cloneFuture.result().errorMessage().toStdString()
+         << "code:" << cloneFuture.result().errorCode());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    LfsPointer pointer;
+    QString pointerPath;
+    const bool pointerFromWorkingTree = findFirstLfsPointerInRepo(repoPath, &pointer, &pointerPath);
+    const bool pointerFromIndex = pointerFromWorkingTree
+        ? true
+        : findFirstLfsPointerInIndex(repoPath, &pointer, &pointerPath);
+    INFO("Pointer source:"
+         << (pointerFromWorkingTree ? "working-tree" : (pointerFromIndex ? "index" : "none")));
+    INFO("Pointer path candidate:" << pointerPath.toStdString());
+    REQUIRE(pointerFromIndex);
+    REQUIRE(pointer.isValid());
+
+    const QString gitDirPath = gitDirPathFromWorkTree(repoPath);
+    REQUIRE(!gitDirPath.isEmpty());
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    REQUIRE(!objectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(QFile::remove(objectPath));
+
+    auto fetchFuture = repository.fetch();
+    QStringList progressTexts;
+    AsyncFuture::observe(fetchFuture).onProgress([&progressTexts, fetchFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(fetchFuture.progressText());
+        progressTexts.append(state.text());
+    });
+
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 120 * 1000));
+    INFO("Fetch error:" << fetchFuture.result().errorMessage().toStdString()
+         << "code:" << fetchFuture.result().errorCode());
+    REQUIRE(!fetchFuture.result().hasError());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(!progressTexts.isEmpty());
+
+    bool sawLfsProgress = false;
+    for (const QString& text : std::as_const(progressTexts)) {
+        if (text.contains(QStringLiteral("Downloading LFS objects"))
+            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            sawLfsProgress = true;
+            break;
+        }
+    }
+    INFO("Observed progress texts:" << progressTexts.join(QStringLiteral(" | ")).toStdString());
+    CHECK(sawLfsProgress);
 }

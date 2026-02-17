@@ -431,7 +431,9 @@ Monad::Result<QByteArray> LfsStore::readObject(const QString& oid) const
     return Monad::Result<QByteArray>(file.readAll());
 }
 
-QFuture<Monad::ResultBase> LfsStore::fetchObject(const LfsPointer& pointer, const QString& remoteName) const
+QFuture<Monad::ResultBase> LfsStore::fetchObject(const LfsPointer& pointer,
+                                                 const QString& remoteName,
+                                                 std::function<void(qint64 downloadedBytes, qint64 totalBytes)> progressCallback) const
 {
     if (!pointer.isValid()) {
         return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Invalid LFS pointer"),
@@ -449,7 +451,7 @@ QFuture<Monad::ResultBase> LfsStore::fetchObject(const LfsPointer& pointer, cons
 
     return AsyncFuture::observe(batchFuture)
         .context(client.get(),
-                 [client, downloadStore, expected](const Monad::Result<LfsBatchClient::BatchResponse>& batchResult) {
+                 [client, downloadStore, expected, progressCallback](const Monad::Result<LfsBatchClient::BatchResponse>& batchResult) {
         if (batchResult.hasError()) {
             return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
         }
@@ -483,7 +485,10 @@ QFuture<Monad::ResultBase> LfsStore::fetchObject(const LfsPointer& pointer, cons
                                                             static_cast<int>(LfsFetchErrorCode::Protocol)));
         }
 
-        return client->downloadObject(objectResponse->actions.value(QStringLiteral("download")), *downloadStore, expected);
+        return client->downloadObject(objectResponse->actions.value(QStringLiteral("download")),
+                                      *downloadStore,
+                                      expected,
+                                      progressCallback);
     }, []() {
         return AsyncFuture::completed(
             Monad::ResultBase(QStringLiteral("LFS batch request canceled"),
