@@ -37,6 +37,69 @@ QString trimTrailingSlash(QString value)
     return value;
 }
 
+QString resolveRemoteNameForConfig(git_repository* repo, const QString& remoteName)
+{
+    if (!repo) {
+        return QString();
+    }
+    if (!remoteName.trimmed().isEmpty()) {
+        return remoteName.trimmed();
+    }
+
+    git_strarray remotes{};
+    if (git_remote_list(&remotes, repo) != GIT_OK || remotes.count == 0) {
+        return QString();
+    }
+
+    QString firstRemote;
+    for (size_t i = 0; i < remotes.count; ++i) {
+        const QString name = QString::fromUtf8(remotes.strings[i]);
+        if (name == QStringLiteral("origin")) {
+            git_strarray_dispose(&remotes);
+            return name;
+        }
+        if (firstRemote.isEmpty()) {
+            firstRemote = name;
+        }
+    }
+
+    git_strarray_dispose(&remotes);
+    return firstRemote;
+}
+
+bool hasExplicitLfsEndpointConfig(git_repository* repo, const QString& remoteName)
+{
+    if (!repo) {
+        return false;
+    }
+
+    git_config* config = nullptr;
+    if (git_repository_config(&config, repo) != GIT_OK || !config) {
+        return false;
+    }
+    std::unique_ptr<git_config, decltype(&git_config_free)> configHolder(config, &git_config_free);
+
+    git_buf lfsUrlBuf = GIT_BUF_INIT;
+    const int lfsUrlResult = git_config_get_string_buf(&lfsUrlBuf, config, "lfs.url");
+    const bool hasGlobalLfsUrl = (lfsUrlResult == GIT_OK && lfsUrlBuf.ptr && QString::fromUtf8(lfsUrlBuf.ptr).trimmed().size() > 0);
+    git_buf_dispose(&lfsUrlBuf);
+    if (hasGlobalLfsUrl) {
+        return true;
+    }
+
+    const QString resolvedRemote = resolveRemoteNameForConfig(repo, remoteName);
+    if (resolvedRemote.isEmpty()) {
+        return false;
+    }
+
+    const QString remoteLfsKey = QStringLiteral("remote.%1.lfsurl").arg(resolvedRemote);
+    git_buf remoteLfsBuf = GIT_BUF_INIT;
+    const int remoteLfsResult = git_config_get_string_buf(&remoteLfsBuf, config, remoteLfsKey.toUtf8().constData());
+    const bool hasRemoteLfsUrl = (remoteLfsResult == GIT_OK && remoteLfsBuf.ptr && QString::fromUtf8(remoteLfsBuf.ptr).trimmed().size() > 0);
+    git_buf_dispose(&remoteLfsBuf);
+    return hasRemoteLfsUrl;
+}
+
 QString toHeaderName(const QString& line)
 {
     const int index = line.indexOf(':');
@@ -395,8 +458,17 @@ QFuture<Monad::Result<LfsBatchClient::BatchResponse>> LfsBatchClient::batch(cons
     }
     const QUrl lfsEndpoint = endpointResult.value();
     const QString endpointScheme = lfsEndpoint.scheme().toLower();
-    if (endpointScheme == QStringLiteral("ssh") || endpointScheme == QStringLiteral("git")) {
-        auto remoteUrlResult = resolveRemoteUrl(repo, remoteName);
+
+    auto remoteUrlResult = resolveRemoteUrl(repo, remoteName);
+    const QString remoteScheme = remoteUrlResult.hasError()
+        ? QString()
+        : GitUtilities::fixGitUrl(remoteUrlResult.value()).scheme().toLower();
+    const bool remoteIsSsh = (remoteScheme == QStringLiteral("ssh") || remoteScheme == QStringLiteral("git"));
+    const bool endpointIsSsh = (endpointScheme == QStringLiteral("ssh") || endpointScheme == QStringLiteral("git"));
+    const bool explicitLfsEndpoint = hasExplicitLfsEndpointConfig(repo, remoteName);
+
+    const bool shouldUseSshAuthenticate = endpointIsSsh || (remoteIsSsh && !explicitLfsEndpoint);
+    if (shouldUseSshAuthenticate) {
         if (remoteUrlResult.hasError()) {
             return AsyncFuture::completed(Monad::Result<BatchResponse>(
                 QStringLiteral("SSH LFS authentication requires a configured remote URL"),
