@@ -23,6 +23,7 @@
 //Qt includes
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
@@ -841,37 +842,39 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
         return Monad::Result<LfsHydrationPlan>(LfsHydrationPlan{});
     }
 
-    git_index* index = nullptr;
-    if (git_repository_index(&index, repo) != GIT_OK || !index) {
-        return Monad::Result<LfsHydrationPlan>(QStringLiteral("Failed to read git index"));
-    }
-    std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
-
     LfsHydrationPlan plan;
     plan.workDir = QString::fromUtf8(workDirRaw);
     plan.gitDirPath = QDir(QString::fromUtf8(gitDirRaw)).absolutePath();
+
+    const QDir workDir(plan.workDir);
+    if (!workDir.exists()) {
+        return Monad::Result<LfsHydrationPlan>(plan);
+    }
+
     QSet<QString> pendingOids;
-    const size_t entryCount = git_index_entrycount(index);
-    for (size_t i = 0; i < entryCount; ++i) {
-        const git_index_entry* entry = git_index_get_byindex(index, i);
-        if (!entry || !entry->path) {
+    QDirIterator it(plan.workDir,
+                    QDir::Files | QDir::NoSymLinks,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo info = it.fileInfo();
+        const QString relativePath = QDir::fromNativeSeparators(
+            workDir.relativeFilePath(info.absoluteFilePath()));
+        if (relativePath.isEmpty()
+            || relativePath == QStringLiteral(".git")
+            || relativePath.startsWith(QStringLiteral(".git/"))) {
             continue;
         }
 
-        const QString relativePath = QString::fromUtf8(entry->path);
-        git_blob* blob = nullptr;
-        if (git_blob_lookup(&blob, repo, &entry->id) != GIT_OK || !blob) {
+        QFile file(info.absoluteFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
             continue;
         }
-        std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-        const char* rawContent = static_cast<const char*>(git_blob_rawcontent(blob));
-        const size_t rawSize = git_blob_rawsize(blob);
-        if (!rawContent || rawSize == 0) {
+        const QByteArray prefix = file.read(1024);
+        if (prefix.isEmpty()) {
             continue;
         }
 
-        const QByteArray prefix(rawContent, static_cast<int>(std::min<size_t>(rawSize, 1024)));
         LfsPointer pointer;
         if (!LfsPointer::parse(prefix, &pointer)) {
             continue;

@@ -1581,6 +1581,86 @@ TEST_CASE("Lfs batch applies URL-scoped http.extraheader from git config", "[LFS
     REQUIRE(!batchFuture.result().hasError());
 }
 
+TEST_CASE("Lfs hydration skips pointer blobs missing from working tree", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("strict-hydration-repo"));
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+    repository.initRepository();
+
+    const QString bareRemotePath = QDir(tempDir.path()).filePath(QStringLiteral("strict-hydration-remote.git"));
+    git_repository* bareRemote = nullptr;
+    REQUIRE(git_repository_init(&bareRemote, bareRemotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(bareRemote != nullptr);
+    git_repository_free(bareRemote);
+
+    REQUIRE(configureRemoteUrl(repoPath,
+                               QStringLiteral("origin"),
+                               QUrl::fromLocalFile(bareRemotePath).toString()));
+
+    const QByteArray payload("strict-hydration-payload");
+    const QString payloadOid =
+        QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex());
+    LfsPointer pointer;
+    pointer.oid = payloadOid;
+    pointer.size = payload.size();
+
+    git_repository* rawRepo = nullptr;
+    REQUIRE(git_repository_open(&rawRepo, repoPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(rawRepo != nullptr);
+
+    const QByteArray pointerText = pointer.toPointerText();
+    REQUIRE(!pointerText.isEmpty());
+
+    git_oid pointerBlobOid;
+    REQUIRE(git_blob_create_frombuffer(&pointerBlobOid,
+                                       rawRepo,
+                                       pointerText.constData(),
+                                       static_cast<size_t>(pointerText.size())) == GIT_OK);
+
+    git_index* index = nullptr;
+    REQUIRE(git_repository_index(&index, rawRepo) == GIT_OK);
+    REQUIRE(index != nullptr);
+
+    git_index_entry entry{};
+    entry.mode = GIT_FILEMODE_BLOB;
+    entry.id = pointerBlobOid;
+    const QByteArray stagedOnlyPath("staged-only.bin");
+    entry.path = stagedOnlyPath.constData();
+
+    REQUIRE(git_index_add(index, &entry) == GIT_OK);
+    REQUIRE(git_index_write(index) == GIT_OK);
+
+    git_index_free(index);
+    git_repository_free(rawRepo);
+
+    CHECK(!QFileInfo::exists(QDir(repoPath).filePath(QString::fromUtf8(stagedOnlyPath))));
+
+    auto fetchFuture = repository.fetch(QStringLiteral("origin"));
+    QStringList progressTexts;
+    AsyncFuture::observe(fetchFuture).onProgress([&progressTexts, fetchFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(fetchFuture.progressText());
+        progressTexts.append(state.text());
+    });
+
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 60 * 1000));
+    INFO("Fetch error:" << fetchFuture.result().errorMessage().toStdString());
+    REQUIRE(!fetchFuture.result().hasError());
+    INFO("Observed progress texts:" << progressTexts.join(QStringLiteral(" | ")).toStdString());
+
+    bool sawLfsHydrationProgress = false;
+    for (const QString& text : std::as_const(progressTexts)) {
+        if (text.contains(QStringLiteral("Downloading LFS"))
+            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            sawLfsHydrationProgress = true;
+            break;
+        }
+    }
+    CHECK(!sawLfsHydrationProgress);
+}
+
 TEST_CASE("Lfs batch does not apply URL-scoped http.extraheader when only path case differs",
           "[LFS][regression][P1]") {
     QTemporaryDir tempDir;
