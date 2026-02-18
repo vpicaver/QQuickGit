@@ -25,7 +25,7 @@
 
 namespace {
 constexpr int LfsBatchTimeoutMs = 30000;
-constexpr qint64 SshLfsAuthCacheTtlMs = 30 * 1000;
+constexpr qint64 SshLfsAuthCacheTtlMs = 60 * 1000;
 constexpr const char* LfsJsonMime = "application/vnd.git-lfs+json";
 constexpr int ErrorBodyPreviewBytes = 512;
 QMutex gLfsAuthProviderMutex;
