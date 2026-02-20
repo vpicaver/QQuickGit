@@ -1538,11 +1538,12 @@ QUrl GitRepository::remoteUrl(QString name) const
 {
     name = fixUpRemote(name);
 
-    git_remote* remote;
+    git_remote* remote = nullptr;
     int error = git_remote_lookup(&remote, d->repo, name.toLocal8Bit());
     QUrl url;
     if(error == GIT_OK) {
         url = QUrl(QString::fromLocal8Bit(git_remote_url(remote)));
+        git_remote_free(remote);
     }
     return url;
 }
@@ -1552,8 +1553,11 @@ QVector<GitRemoteInfo> GitRepository::remotes() const
     QVector<GitRemoteInfo> remotes;
 
     if(d->repo) {
-        git_strarray remoteNames;
-        git_remote_list(&remoteNames, d->repo);
+        git_strarray remoteNames = {nullptr, 0};
+        const int error = git_remote_list(&remoteNames, d->repo);
+        if (error != GIT_OK) {
+            return remotes;
+        }
         remotes.reserve(remoteNames.count);
 
         for(size_t i = 0; i < remoteNames.count; i++) {
@@ -1561,6 +1565,8 @@ QVector<GitRemoteInfo> GitRepository::remotes() const
             GitRemoteInfo info(name, remoteUrl(name));
             remotes.append(info);
         }
+
+        git_strarray_dispose(&remoteNames);
     }
 
     return remotes;
@@ -2761,20 +2767,22 @@ QString GitRepository::headBranchName() const
         return QString();
     }
 
-    git_reference* head;
-    git_repository_head(&head, d->repo);
-
-    if(head) {
-        const char* branchName;
-        git_branch_name(&branchName, head);
-
-        QString name = QString::fromLocal8Bit(branchName);
-
-        git_reference_free(head);
-        return name;
-    } else {
+    git_reference* head = nullptr;
+    const int headError = git_repository_head(&head, d->repo);
+    if (headError != GIT_OK || head == nullptr) {
         return QString();
     }
+
+    QString name;
+    if (git_reference_is_branch(head) != 0) {
+        const char* branchName = nullptr;
+        if (git_branch_name(&branchName, head) == GIT_OK && branchName != nullptr) {
+            name = QString::fromLocal8Bit(branchName);
+        }
+    }
+
+    git_reference_free(head);
+    return name;
 }
 
 GitRepository::AheadBehindFuture GitRepository::remoteAheadBehindCommitCounts(const QString& remote,
