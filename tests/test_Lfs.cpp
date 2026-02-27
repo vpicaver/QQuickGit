@@ -1741,6 +1741,97 @@ TEST_CASE("Lfs hydration skips pointer blobs missing from working tree", "[LFS][
     CHECK(!sawLfsHydrationProgress);
 }
 
+TEST_CASE("Lfs fetch restores missing object for hydrated tracked file", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-fetch-hydrated"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-fetch-hydrated"));
+    const QString trackedFileName = QStringLiteral("fetch-hydrated.png");
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray initialBytes = createPngFile(authorFilePath, Qt::darkCyan);
+    REQUIRE(!initialBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS file"), QStringLiteral("LFS fetch hydrated baseline")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QByteArray authorBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!authorBlob.isEmpty());
+    LfsPointer expectedPointer;
+    REQUIRE(LfsPointer::parse(authorBlob, &expectedPointer));
+    REQUIRE(expectedPointer.size == initialBytes.size());
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(authorPath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+    LfsStore consumerStore(consumerGitDirPath);
+    auto seedResult = consumerStore.storeBytes(initialBytes);
+    INFO("Seed error:" << seedResult.errorMessage().toStdString());
+    REQUIRE(!seedResult.hasError());
+    requireGitFutureSuccess(consumer.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+
+    const QString consumerFilePath = QDir(consumerPath).filePath(trackedFileName);
+    REQUIRE(QFileInfo::exists(consumerFilePath));
+    CHECK(readFileBytes(consumerFilePath) == initialBytes);
+
+    lfsServer.setDownloadObject(expectedPointer.oid, initialBytes);
+
+    const QString objectPath = LfsStore::objectPath(consumerGitDirPath, expectedPointer.oid);
+    REQUIRE(!objectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(QFile::remove(objectPath));
+    CHECK_FALSE(QFileInfo::exists(objectPath));
+
+    auto fetchFuture = consumer.fetch();
+    QStringList progressTexts;
+    AsyncFuture::observe(fetchFuture).onProgress([&progressTexts, fetchFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(fetchFuture.progressText());
+        progressTexts.append(state.text());
+    });
+
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 60 * 1000));
+    INFO("Fetch error:" << fetchFuture.result().errorMessage().toStdString()
+         << "code:" << fetchFuture.result().errorCode());
+    REQUIRE(!fetchFuture.result().hasError());
+    REQUIRE(QFileInfo::exists(objectPath));
+    CHECK(readFileBytes(consumerFilePath) == initialBytes);
+
+    bool sawLfsProgress = false;
+    for (const QString& text : std::as_const(progressTexts)) {
+        if (text.contains(QStringLiteral("Downloading LFS"))
+            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            sawLfsProgress = true;
+            break;
+        }
+    }
+    INFO("Observed progress texts:" << progressTexts.join(QStringLiteral(" | ")).toStdString());
+    CHECK(sawLfsProgress);
+}
+
 TEST_CASE("Lfs batch does not apply URL-scoped http.extraheader when only path case differs",
           "[LFS][regression][P1]") {
     QTemporaryDir tempDir;

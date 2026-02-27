@@ -1016,6 +1016,32 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
     }
 
     QSet<QString> pendingOids;
+    QSet<QString> plannedPaths;
+    auto addPointerCandidate = [&](const QString& relativePath, const LfsPointer& pointer) {
+        if (relativePath.isEmpty()
+            || relativePath == QStringLiteral(".git")
+            || relativePath.startsWith(QStringLiteral(".git/"))
+            || plannedPaths.contains(relativePath)) {
+            return;
+        }
+
+        const QString absolutePath = workDir.filePath(relativePath);
+        const QFileInfo fileInfo(absolutePath);
+        if (!fileInfo.exists() || !fileInfo.isFile()) {
+            return;
+        }
+
+        const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
+        plan.pointerFiles.push_back(PointerWorkItem{relativePath, objectPath, pointer});
+        plannedPaths.insert(relativePath);
+        if (objectPath.isEmpty() || QFileInfo::exists(objectPath) || pendingOids.contains(pointer.oid)) {
+            return;
+        }
+
+        pendingOids.insert(pointer.oid);
+        plan.missingPointers.push_back(pointer);
+    };
+
     QDirIterator it(plan.workDir,
                     QDir::Files | QDir::NoSymLinks,
                     QDirIterator::Subdirectories);
@@ -1043,14 +1069,38 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
         if (!LfsPointer::parse(prefix, &pointer)) {
             continue;
         }
-        const QString objectPath = LfsStore::objectPath(plan.gitDirPath, pointer.oid);
-        plan.pointerFiles.push_back(PointerWorkItem{relativePath, objectPath, pointer});
-        if (objectPath.isEmpty() || QFileInfo::exists(objectPath) || pendingOids.contains(pointer.oid)) {
-            continue;
-        }
+        addPointerCandidate(relativePath, pointer);
+    }
 
-        pendingOids.insert(pointer.oid);
-        plan.missingPointers.push_back(pointer);
+    git_index* index = nullptr;
+    if (git_repository_index(&index, repo) == GIT_OK && index != nullptr) {
+        std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
+        const size_t entryCount = git_index_entrycount(index);
+        for (size_t i = 0; i < entryCount; ++i) {
+            const git_index_entry* entry = git_index_get_byindex(index, i);
+            if (entry == nullptr || entry->path == nullptr || git_oid_is_zero(&entry->id)) {
+                continue;
+            }
+
+            git_blob* blob = nullptr;
+            if (git_blob_lookup(&blob, repo, &entry->id) != GIT_OK || blob == nullptr) {
+                continue;
+            }
+            std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+            const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+            const auto size = static_cast<int>(git_blob_rawsize(blob));
+            if (raw == nullptr || size <= 0) {
+                continue;
+            }
+
+            LfsPointer pointer;
+            if (!LfsPointer::parse(QByteArray(raw, size), &pointer)) {
+                continue;
+            }
+
+            addPointerCandidate(QString::fromUtf8(entry->path), pointer);
+        }
     }
 
     return Monad::Result<LfsHydrationPlan>(plan);
