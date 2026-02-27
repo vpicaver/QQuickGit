@@ -107,6 +107,170 @@ QStringList uniqueSortedPaths(const QStringList& paths)
     return result;
 }
 
+QString oidToQString(const git_oid* oid)
+{
+    if (oid == nullptr) {
+        return QString();
+    }
+
+    char buffer[GIT_OID_HEXSZ + 1] = {};
+    git_oid_tostr(buffer, sizeof(buffer), oid);
+    return QString::fromLatin1(buffer);
+}
+
+QString entryPath(const git_status_entry* entry)
+{
+    if (entry == nullptr) {
+        return QString();
+    }
+
+    if (entry->index_to_workdir != nullptr && entry->index_to_workdir->new_file.path != nullptr) {
+        return QString::fromUtf8(entry->index_to_workdir->new_file.path);
+    }
+    if (entry->head_to_index != nullptr && entry->head_to_index->new_file.path != nullptr) {
+        return QString::fromUtf8(entry->head_to_index->new_file.path);
+    }
+    return QString();
+}
+
+QByteArray blobBytesForIndexPath(git_repository* repo, const QString& relativePath)
+{
+    if (repo == nullptr || relativePath.isEmpty()) {
+        return QByteArray();
+    }
+
+    git_index* index = nullptr;
+    if (git_repository_index(&index, repo) != GIT_OK || index == nullptr) {
+        return QByteArray();
+    }
+    std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
+
+    const QByteArray pathUtf8 = relativePath.toUtf8();
+    const git_index_entry* indexEntry = git_index_get_bypath(index, pathUtf8.constData(), 0);
+    if (indexEntry == nullptr || git_oid_is_zero(&indexEntry->id)) {
+        return QByteArray();
+    }
+
+    git_blob* blob = nullptr;
+    if (git_blob_lookup(&blob, repo, &indexEntry->id) != GIT_OK || blob == nullptr) {
+        return QByteArray();
+    }
+    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
+
+    const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+    const auto size = static_cast<int>(git_blob_rawsize(blob));
+    if (raw == nullptr || size <= 0) {
+        return QByteArray();
+    }
+
+    return QByteArray(raw, size);
+}
+
+bool hydratedLfsFileMatchesIndexPointer(git_repository* repo,
+                                        const QString& workTreeRoot,
+                                        const git_status_entry* entry)
+{
+    if (repo == nullptr || entry == nullptr) {
+        return false;
+    }
+
+    const unsigned int benignStatus = GIT_STATUS_WT_MODIFIED;
+    if (entry->status != benignStatus) {
+        return false;
+    }
+
+    const QString relativePath = entryPath(entry);
+    if (relativePath.isEmpty()) {
+        return false;
+    }
+
+    const QByteArray blobData = blobBytesForIndexPath(repo, relativePath);
+    if (blobData.isEmpty()) {
+        return false;
+    }
+
+    LfsPointer pointer;
+    if (!LfsPointer::parse(blobData, &pointer) || !pointer.isValid()) {
+        return false;
+    }
+
+    const QString absolutePath = QDir(workTreeRoot).filePath(relativePath);
+    const QFileInfo fileInfo(absolutePath);
+    if (!fileInfo.exists() || !fileInfo.isFile() || fileInfo.size() != pointer.size) {
+        return false;
+    }
+
+    QFile workingFile(absolutePath);
+    if (!workingFile.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!workingFile.atEnd()) {
+        const QByteArray chunk = workingFile.read(256 * 1024);
+        if (chunk.isEmpty() && workingFile.error() != QFile::NoError) {
+            return false;
+        }
+        if (!chunk.isEmpty()) {
+            hash.addData(chunk);
+        }
+    }
+
+    return QString::fromLatin1(hash.result().toHex()) == pointer.oid;
+}
+
+int filteredStatusEntryCount(git_repository* repo,
+                             const QString& workTreeRoot,
+                             git_status_list* list)
+{
+    if (list == nullptr) {
+        return 0;
+    }
+
+    int count = 0;
+    const size_t entryCount = git_status_list_entrycount(list);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (hydratedLfsFileMatchesIndexPointer(repo, workTreeRoot, entry)) {
+            continue;
+        }
+        ++count;
+    }
+    return count;
+}
+
+bool onlyBenignHydratedLfsStatusEntries(git_repository* repo,
+                                        const QString& workTreeRoot)
+{
+    if (repo == nullptr) {
+        return false;
+    }
+
+    git_status_list* list = nullptr;
+    git_status_options options = GIT_STATUS_OPTIONS_INIT;
+    options.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    options.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+
+    if (git_status_list_new(&list, repo, &options) != GIT_OK || list == nullptr) {
+        return false;
+    }
+    std::unique_ptr<git_status_list, decltype(&git_status_list_free)> listHolder(list, &git_status_list_free);
+
+    const size_t entryCount = git_status_list_entrycount(list);
+    if (entryCount == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (!hydratedLfsFileMatchesIndexPointer(repo, workTreeRoot, entry)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 struct SshCallbackPayload {
     QFutureInterface<ResultBase>* progressInterface = nullptr;
     int agentMaxAttempts = 1;
@@ -1912,8 +2076,8 @@ void GitRepository::checkStatus()
         opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
 
         git_status_list_new(&list, d->repo, &opt);
-        auto count = git_status_list_entrycount(list);
-        setModifiedFileCount(static_cast<int>(count));
+        const int count = filteredStatusEntryCount(d->repo, d->mDirectory.absolutePath(), list);
+        setModifiedFileCount(count);
         git_status_list_free(list);
     }
 }
@@ -1925,6 +2089,7 @@ void GitRepository::commitAll(const QString &subject,
 
     git_index_matched_path_cb matched_cb = NULL;
     git_index *index;
+    git_tree* parentTree = nullptr;
 
     auto match_cb = [](const char *path, const char *spec, void *payload)->int
     {
@@ -1933,6 +2098,18 @@ void GitRepository::commitAll(const QString &subject,
 
     std::array<const char*, 1> paths = {"*"};
     git_strarray array = {const_cast<char**>(paths.data()), 1};
+
+    git_status_list* statusList = nullptr;
+    git_status_options statusOptions = GIT_STATUS_OPTIONS_INIT;
+    statusOptions.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    statusOptions.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+    check(git_status_list_new(&statusList, d->repo, &statusOptions));
+    const int pendingEntryCount = filteredStatusEntryCount(d->repo, d->mDirectory.absolutePath(), statusList);
+    git_status_list_free(statusList);
+    if (pendingEntryCount <= 0) {
+        return;
+    }
+
     check(git_repository_index(&index, d->repo));
     //    check(git_index_update_all(index, &array, match_cb, nullptr));
     check(git_index_add_all(index, &array, GIT_INDEX_ADD_DEFAULT, match_cb, nullptr));
@@ -1949,6 +2126,8 @@ void GitRepository::commitAll(const QString &subject,
         printf("HEAD not found. Creating first commit\n");
     } else if (error != 0) {
         check(error);
+    } else if (parent != nullptr) {
+        check(git_commit_tree(&parentTree, reinterpret_cast<git_commit*>(parent)));
     }
 
     check(git_index_write_tree(&tree_oid, index));
@@ -2003,6 +2182,14 @@ void GitRepository::commitAll(const QString &subject,
 
     check(git_tree_lookup(&tree, d->repo, &tree_oid));
 
+    const bool treeMatchesParent = parentTree != nullptr && git_oid_equal(git_tree_id(parentTree), &tree_oid);
+    if (treeMatchesParent) {
+        git_index_free(index);
+        git_tree_free(parentTree);
+        git_tree_free(tree);
+        return;
+    }
+
     check(git_signature_now(&signature,
                             account()->name().toLocal8Bit(),
                             account()->email().toLocal8Bit()));
@@ -2022,8 +2209,8 @@ void GitRepository::commitAll(const QString &subject,
 
     git_index_free(index);
     git_signature_free(signature);
+    git_tree_free(parentTree);
     git_tree_free(tree);
-    git_index_free(index);
 
 }
 
@@ -2267,7 +2454,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         return commits;
     };
 
-    auto perform_fastforward = [](git_repository *repo, const git_oid *target_oid, int is_unborn)->int
+    auto perform_fastforward = [this](git_repository *repo, const git_oid *target_oid, int is_unborn)->int
     {
         git_checkout_options ff_checkout_options = GIT_CHECKOUT_OPTIONS_INIT;
         git_reference *target_ref;
@@ -2315,6 +2502,9 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 
         /* Checkout the result so the workdir is in the expected state */
         ff_checkout_options.checkout_strategy = GIT_CHECKOUT_SAFE;
+        if (onlyBenignHydratedLfsStatusEntries(repo, d->mDirectory.absolutePath())) {
+            ff_checkout_options.checkout_strategy = GIT_CHECKOUT_FORCE;
+        }
         err = git_checkout_tree(repo, target, &ff_checkout_options);
         if (err != 0) {
             fprintf(stderr, "failed to checkout HEAD reference\n");

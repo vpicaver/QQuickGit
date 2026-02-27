@@ -173,6 +173,86 @@ QString headOidString(git_repository* repo)
     return result;
 }
 
+QString headTreeOidString(git_repository* repo)
+{
+    git_reference* head = nullptr;
+    if (git_repository_head(&head, repo) != GIT_OK) {
+        return QString();
+    }
+
+    const git_oid* headId = git_reference_target(head);
+    if (!headId) {
+        git_reference_free(head);
+        return QString();
+    }
+
+    git_commit* commit = nullptr;
+    if (git_commit_lookup(&commit, repo, headId) != GIT_OK) {
+        git_reference_free(head);
+        return QString();
+    }
+
+    git_tree* tree = nullptr;
+    if (git_commit_tree(&tree, commit) != GIT_OK) {
+        git_commit_free(commit);
+        git_reference_free(head);
+        return QString();
+    }
+
+    const git_oid* treeId = git_tree_id(tree);
+    const char* oidStr = treeId ? git_oid_tostr_s(treeId) : nullptr;
+    const QString result = oidStr ? QString::fromLatin1(oidStr) : QString();
+
+    git_tree_free(tree);
+    git_commit_free(commit);
+    git_reference_free(head);
+    return result;
+}
+
+struct GitStatusEntryInfo
+{
+    unsigned int status = 0;
+    QString path;
+};
+
+QList<GitStatusEntryInfo> statusEntries(git_repository* repo)
+{
+    QList<GitStatusEntryInfo> entries;
+    if (repo == nullptr) {
+        return entries;
+    }
+
+    git_status_list* list = nullptr;
+    git_status_options options = GIT_STATUS_OPTIONS_INIT;
+    options.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    options.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+
+    if (git_status_list_new(&list, repo, &options) != GIT_OK || list == nullptr) {
+        return entries;
+    }
+
+    const size_t count = git_status_list_entrycount(list);
+    entries.reserve(static_cast<qsizetype>(count));
+    for (size_t i = 0; i < count; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (entry == nullptr) {
+            continue;
+        }
+
+        QString path;
+        if (entry->index_to_workdir != nullptr && entry->index_to_workdir->new_file.path != nullptr) {
+            path = QString::fromUtf8(entry->index_to_workdir->new_file.path);
+        } else if (entry->head_to_index != nullptr && entry->head_to_index->new_file.path != nullptr) {
+            path = QString::fromUtf8(entry->head_to_index->new_file.path);
+        }
+
+        entries.append({entry->status, path});
+    }
+
+    git_status_list_free(list);
+    return entries;
+}
+
 QByteArray createPngFile(const QString& path, const QColor& color)
 {
     QImage image(10, 10, QImage::Format_ARGB32);
@@ -2600,6 +2680,326 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
 
     CHECK(lfsServer.downloadBatchRequestCount() > 0);
     CHECK(lfsServer.downloadObjectRequestCount() > 0);
+}
+
+TEST_CASE("Lfs pull delete ignores hydrated file modifications", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-reset-dirty"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-reset-dirty"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-reset-dirty.git"));
+    const QString trackedFileName = QStringLiteral("reset-dirty.png");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray initialBytes = createPngFile(authorFilePath, Qt::red);
+    REQUIRE(!initialBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS file"), QStringLiteral("LFS reset dirty baseline")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString baselineCommit = headOidString(authorRepo);
+    REQUIRE(!baselineCommit.isEmpty());
+    const QByteArray baselineBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!baselineBlob.isEmpty());
+    LfsPointer baselinePointer;
+    REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+    auto baselinePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
+    INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
+         << "code:" << baselinePushFuture.result().errorCode());
+    REQUIRE(!baselinePushFuture.result().hasError());
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    consumer.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    consumer.setAccount(&account);
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(remotePath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+    LfsStore consumerStore(consumerGitDirPath);
+    auto seedBaselineResult = consumerStore.storeBytes(initialBytes);
+    INFO("Seed baseline error:" << seedBaselineResult.errorMessage().toStdString());
+    REQUIRE(!seedBaselineResult.hasError());
+
+    REQUIRE(QFile::remove(authorFilePath));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Delete LFS file"), QStringLiteral("LFS reset dirty delete")));
+    auto deletePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(deletePushFuture, 60 * 1000));
+    INFO("Delete push error:" << deletePushFuture.result().errorMessage().toStdString()
+         << "code:" << deletePushFuture.result().errorCode());
+    REQUIRE(!deletePushFuture.result().hasError());
+
+    auto pullFuture = consumer.pull();
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
+    INFO("Pull error:" << pullFuture.result().errorMessage().toStdString()
+         << "code:" << pullFuture.result().errorCode());
+    REQUIRE(!pullFuture.result().hasError());
+    CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::FastForward);
+
+    const QString consumerFilePath = QDir(consumerPath).filePath(trackedFileName);
+    CHECK_FALSE(QFileInfo::exists(consumerFilePath));
+
+    consumer.checkStatus();
+    CHECK(consumer.modifiedFileCount() == 0);
+
+    git_repository* consumerRepo = nullptr;
+    REQUIRE(git_repository_open(&consumerRepo, consumerPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(consumerRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> consumerRepoHolder(consumerRepo, &git_repository_free);
+
+    const QList<GitStatusEntryInfo> entries = statusEntries(consumerRepo);
+    CHECK(entries.isEmpty());
+}
+
+TEST_CASE("Lfs hydrated file state does not create spurious commit", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-empty-commit"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-empty-commit"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-empty-commit.git"));
+    const QString trackedFileName = QStringLiteral("empty-commit.png");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray initialBytes = createPngFile(authorFilePath, Qt::blue);
+    REQUIRE(!initialBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS file"), QStringLiteral("LFS empty commit baseline")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString baselineCommit = headOidString(authorRepo);
+    REQUIRE(!baselineCommit.isEmpty());
+    const QByteArray baselineBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!baselineBlob.isEmpty());
+    LfsPointer baselinePointer;
+    REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+    auto baselinePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
+    INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
+         << "code:" << baselinePushFuture.result().errorCode());
+    REQUIRE(!baselinePushFuture.result().hasError());
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    consumer.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    consumer.setAccount(&account);
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(remotePath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+    LfsStore consumerStore(consumerGitDirPath);
+    auto seedBaselineResult = consumerStore.storeBytes(initialBytes);
+    INFO("Seed baseline error:" << seedBaselineResult.errorMessage().toStdString());
+    REQUIRE(!seedBaselineResult.hasError());
+
+    REQUIRE(QFile::remove(authorFilePath));
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Delete LFS file"), QStringLiteral("LFS empty commit delete")));
+    auto deletePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(deletePushFuture, 60 * 1000));
+    INFO("Delete push error:" << deletePushFuture.result().errorMessage().toStdString()
+         << "code:" << deletePushFuture.result().errorCode());
+    REQUIRE(!deletePushFuture.result().hasError());
+
+    auto pullFuture = consumer.pull();
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
+    INFO("Pull error:" << pullFuture.result().errorMessage().toStdString()
+         << "code:" << pullFuture.result().errorCode());
+    REQUIRE(!pullFuture.result().hasError());
+    CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::FastForward);
+
+    consumer.checkStatus();
+    REQUIRE(consumer.modifiedFileCount() == 0);
+
+    git_repository* consumerRepo = nullptr;
+    REQUIRE(git_repository_open(&consumerRepo, consumerPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(consumerRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> consumerRepoHolder(consumerRepo, &git_repository_free);
+
+    const QString headBeforeCommit = headOidString(consumerRepo);
+    const QString treeBeforeCommit = headTreeOidString(consumerRepo);
+    REQUIRE(!treeBeforeCommit.isEmpty());
+
+    REQUIRE_NOTHROW(consumer.commitAll(QStringLiteral("Empty local sync commit"),
+                                       QStringLiteral("Should be a no-op when nothing really changed")));
+
+    const QString headAfterCommit = headOidString(consumerRepo);
+    const QString treeAfterCommit = headTreeOidString(consumerRepo);
+
+    CHECK(headAfterCommit == headBeforeCommit);
+    CHECK(treeAfterCommit == treeBeforeCommit);
+    consumer.checkStatus();
+    CHECK(consumer.modifiedFileCount() == 0);
+}
+
+TEST_CASE("Lfs real hydrated file edit remains dirty and commitable", "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-real-edit"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-real-edit"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-real-edit.git"));
+    const QString trackedFileName = QStringLiteral("real-edit.png");
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray initialBytes = createPngFile(authorFilePath, Qt::blue);
+    REQUIRE(!initialBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS file"), QStringLiteral("LFS real edit baseline")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QByteArray baselineBlob = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!baselineBlob.isEmpty());
+    LfsPointer baselinePointer;
+    REQUIRE(LfsPointer::parse(baselineBlob, &baselinePointer));
+    lfsServer.setExpectedUploadObject(baselinePointer.oid, baselinePointer.size);
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+    auto baselinePushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(baselinePushFuture, 60 * 1000));
+    INFO("Baseline push error:" << baselinePushFuture.result().errorMessage().toStdString()
+         << "code:" << baselinePushFuture.result().errorCode());
+    REQUIRE(!baselinePushFuture.result().hasError());
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    consumer.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    consumer.setAccount(&account);
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(remotePath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+    LfsStore consumerStore(consumerGitDirPath);
+    auto seedBaselineResult = consumerStore.storeBytes(initialBytes);
+    INFO("Seed baseline error:" << seedBaselineResult.errorMessage().toStdString());
+    REQUIRE(!seedBaselineResult.hasError());
+    requireGitFutureSuccess(consumer.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+
+    const QString consumerFilePath = QDir(consumerPath).filePath(trackedFileName);
+    const QByteArray hydratedBytes = readFileBytes(consumerFilePath);
+    REQUIRE(hydratedBytes == initialBytes);
+
+    const QByteArray editedBytes = createPngFile(consumerFilePath, Qt::red);
+    REQUIRE(!editedBytes.isEmpty());
+    REQUIRE(editedBytes != hydratedBytes);
+
+    consumer.checkStatus();
+    REQUIRE(consumer.modifiedFileCount() == 1);
+
+    git_repository* consumerRepo = nullptr;
+    REQUIRE(git_repository_open(&consumerRepo, consumerPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(consumerRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> consumerRepoHolder(consumerRepo, &git_repository_free);
+
+    const QList<GitStatusEntryInfo> entriesBeforeCommit = statusEntries(consumerRepo);
+    REQUIRE(entriesBeforeCommit.size() == 1);
+    CHECK(entriesBeforeCommit.first().path == trackedFileName);
+    CHECK((entriesBeforeCommit.first().status & GIT_STATUS_WT_MODIFIED) != 0);
+
+    const QString headBeforeCommit = headOidString(consumerRepo);
+    REQUIRE(!headBeforeCommit.isEmpty());
+
+    REQUIRE_NOTHROW(consumer.commitAll(QStringLiteral("Update hydrated LFS file"),
+                                       QStringLiteral("A real worktree edit should commit")));
+
+    const QString headAfterCommit = headOidString(consumerRepo);
+    CHECK(headAfterCommit != headBeforeCommit);
+
+    const QByteArray committedBlob = readBlobFromHead(consumerRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!committedBlob.isEmpty());
+    LfsPointer editedPointer;
+    REQUIRE(LfsPointer::parse(committedBlob, &editedPointer));
+    CHECK(editedPointer.oid != baselinePointer.oid);
+    CHECK(editedPointer.size == editedBytes.size());
+
+    consumer.checkStatus();
+    CHECK(consumer.modifiedFileCount() == 0);
+    CHECK(readFileBytes(consumerFilePath) == editedBytes);
 }
 
 TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression][P1]") {
