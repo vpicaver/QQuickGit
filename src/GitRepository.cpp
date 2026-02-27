@@ -272,7 +272,7 @@ bool onlyBenignHydratedLfsStatusEntries(git_repository* repo,
 }
 
 struct SshCallbackPayload {
-    QFutureInterface<ResultBase>* progressInterface = nullptr;
+    std::function<void(const ProgressState&)> reportProgress;
     int agentMaxAttempts = 1;
     int agentAttempts = 0;
     bool allowAgent = true;
@@ -287,13 +287,13 @@ struct PrePushCredentialPayload {
     int sshKeyAttempts = 0;
 };
 
-QFutureInterface<ResultBase>* progressFromPayload(void* payload)
+std::function<void(const ProgressState&)> progressFromPayload(void* payload)
 {
     auto typed = reinterpret_cast<SshCallbackPayload*>(payload);
     if(!typed) {
-        return nullptr;
+        return {};
     }
-    return typed->progressInterface;
+    return typed->reportProgress;
 }
 
 struct PointerWorkItem {
@@ -1337,6 +1337,7 @@ GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<Git
             return mergeResult;
         }).future();
 }
+
 }
 
 template<typename ProgressInterface>
@@ -1461,12 +1462,12 @@ public:
                                 void* payload)
     {
 
-        auto progressInterface = progressFromPayload(payload);
-        if(progressInterface) {
+        auto reportProgress = progressFromPayload(payload);
+        if(reportProgress) {
             auto progress = ProgressState(QStringLiteral("Transfering ... ") + bytesToString(bytes),
                                           current,
                                           total);
-            setProgress(progressInterface, progress);
+            reportProgress(progress);
         }
         qDebug() << "Current progress:" << bytes << current << total << current / static_cast<double>(total) * 100;
         return GIT_OK;
@@ -1490,12 +1491,12 @@ public:
                 return bytesToString(stats->received_bytes);
             };
 
-            auto progressInterface = progressFromPayload(payload);
-            if(progressInterface) {
+            auto reportProgress = progressFromPayload(payload);
+            if(reportProgress) {
                 auto progress = ProgressState(QStringLiteral("Fetching ... ") + recieved(),
                                               current(),
                                               total());
-                setProgress(progressInterface, progress);
+                reportProgress(progress);
             }
         }
 
@@ -1525,13 +1526,12 @@ public:
         //                 << payload;
 
         if(payload) {
-            auto progressInterface = progressFromPayload(payload);
-            if(progressInterface) {
+            auto reportProgress = progressFromPayload(payload);
+            if(reportProgress) {
                 auto progress = ProgressState(QStringLiteral("Checkout ... ") + path,
                                               current,
                                               total);
-                //We have to incremrent the progress by one to singal that the text changed
-                setProgress(progressInterface, std::move(progress));
+                reportProgress(progress);
             }
         }
     }
@@ -1911,6 +1911,40 @@ bool GitRepository::isRepository(const QDir& dir)
     return false;
 }
 
+namespace {
+GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
+                                               const QString& remote,
+                                               std::function<void(const ProgressState&)> reportProgress)
+{
+    const QByteArray path = repositoryDir.absolutePath().toLocal8Bit();
+    const QString fixedRemote = remote;
+    return QtConcurrent::run([path, fixedRemote, reportProgress]() mutable {
+        return mtry([path, fixedRemote, reportProgress]() mutable -> ResultBase {
+            git_repository* repo = nullptr;
+            GitRepositoryData::check(git_repository_open(&repo, path));
+            std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+            git_remote* gitRemote = nullptr;
+            GitRepositoryData::check(git_remote_lookup(&gitRemote, repo, fixedRemote.toLocal8Bit()));
+            std::unique_ptr<git_remote, decltype(&git_remote_free)> gitRemoteHolder(gitRemote, &git_remote_free);
+
+            git_fetch_options options = GIT_FETCH_OPTIONS_INIT;
+            options.callbacks.credentials = GitRepositoryData::credentailCallBack;
+            options.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
+            SshCallbackPayload callbackPayload;
+            callbackPayload.reportProgress = reportProgress;
+            callbackPayload.allowAgent = true;
+            callbackPayload.agentMaxAttempts = 1;
+            callbackPayload.agentAttempts = 0;
+            options.callbacks.payload = static_cast<void*>(&callbackPayload);
+
+            GitRepositoryData::check(git_remote_fetch(gitRemote, nullptr, &options, nullptr));
+            return ResultBase();
+        });
+    });
+}
+}
+
 bool GitRepository::isPushRejectedByRemoteAdvanceError(int errorCode)
 {
     return errorCode == static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance);
@@ -1982,7 +2016,9 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         clone_opts.fetch_opts.callbacks.credentials = GitRepositoryData::credentailCallBack;
                         clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
                         SshCallbackPayload callbackPayload;
-                        callbackPayload.progressInterface = &progressInterface;
+                        callbackPayload.reportProgress = [progressInterface](const ProgressState& progress) mutable {
+                            setProgress(&progressInterface, progress);
+                        };
                         callbackPayload.allowAgent = allowAgent;
                         callbackPayload.agentMaxAttempts = 1;
                         callbackPayload.agentAttempts = 0;
@@ -2324,7 +2360,9 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                             options.callbacks.credentials = GitRepositoryData::credentailCallBack;
                             options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
                             SshCallbackPayload callbackPayload;
-                            callbackPayload.progressInterface = &progressInterface;
+                            callbackPayload.reportProgress = [progressInterface](const ProgressState& progress) mutable {
+                                setProgress(&progressInterface, progress);
+                            };
                             callbackPayload.allowAgent = true;
                             callbackPayload.agentMaxAttempts = 1;
                             callbackPayload.agentAttempts = 0;
@@ -2349,18 +2387,20 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 {
     QString fixedRemote = fixUpRemote(remote);
-    auto fetchFuture = fetch(remote);
-
     return progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
         {
-            AsyncFuture::observe(fetchFuture)
-            .onProgress([=]() mutable
-                        {
-                            //Passes the progress through
-                            setProgress(&progressInterface, fetchFuture.progressText());
-                        });
-
+            auto fetchFuture = fetchRefsForDirectory(
+                d->mDirectory,
+                fixedRemote,
+                [progressInterface](const ProgressState& progress) mutable {
+                    setProgress(&progressInterface, progress);
+                });
+            AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
+                if(!fetchFuture.progressText().isEmpty()) {
+                    setProgress(&progressInterface, fetchFuture.progressText());
+                }
+            });
             return AsyncFuture::observe(fetchFuture)
                 .context(this,
                          [=]()
@@ -2426,34 +2466,11 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
     return progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
-            auto path = d->mDirectory.absolutePath().toLocal8Bit();
-            auto fetchFuture = QtConcurrent::run(
-                [=]() mutable
-                {
-                    return mtry(
-                        [=]() mutable
-                        {
-                            auto fixedRemote = fixUpRemote(remote);
-
-                            auto repo = makeScopedPtr(git_repository_free);
-                            check(git_repository_open(&repo, path));
-
-                            auto gitRemote = makeScopedPtr(&git_remote_free);
-                            check(git_remote_lookup(&gitRemote, repo, fixedRemote.toLocal8Bit()));
-
-                            git_fetch_options options = GIT_FETCH_OPTIONS_INIT;
-                            options.callbacks.credentials = GitRepositoryData::credentailCallBack;
-                            options.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
-                            SshCallbackPayload callbackPayload;
-                            callbackPayload.progressInterface = &progressInterface;
-                            callbackPayload.allowAgent = true;
-                            callbackPayload.agentMaxAttempts = 1;
-                            callbackPayload.agentAttempts = 0;
-                            options.callbacks.payload = static_cast<void*>(&callbackPayload);
-                            check(git_remote_fetch(gitRemote, nullptr, &options, nullptr));
-
-                            return ResultBase();
-                        });
+            auto fetchFuture = fetchRefsForDirectory(
+                d->mDirectory,
+                fixUpRemote(remote),
+                [progressInterface](const ProgressState& progress) mutable {
+                    setProgress(&progressInterface, progress);
                 });
 
             return AsyncFuture::observe(fetchFuture)

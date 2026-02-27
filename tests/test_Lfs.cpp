@@ -3972,8 +3972,10 @@ TEST_CASE("GitRepository fetch reports LFS hydration progress against GitHub SSH
     REQUIRE(!gitDirPath.isEmpty());
     const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
     REQUIRE(!objectPath.isEmpty());
-    REQUIRE(QFileInfo::exists(objectPath));
-    REQUIRE(QFile::remove(objectPath));
+    if (QFileInfo::exists(objectPath)) {
+        REQUIRE(QFile::remove(objectPath));
+    }
+    CHECK_FALSE(QFileInfo::exists(objectPath));
 
     auto fetchFuture = repository.fetch();
     QStringList progressTexts;
