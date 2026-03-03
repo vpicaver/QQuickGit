@@ -702,6 +702,134 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             auto fileContent = file.readAll();
             CHECK(fileContent.toStdString() == ":( Hello world!\n");
         }
+
+        SECTION("Test merge conflict when ours renames and theirs modifies") {
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            CHECK_NOTHROW(repo.createBranch("renameBranch"));
+            CHECK(repo.headBranchName().toStdString() == "renameBranch");
+
+            REQUIRE(QFile::rename(tempDir.absoluteFilePath("test.txt"),
+                                  tempDir.absoluteFilePath("renamed.txt")));
+            CHECK_NOTHROW(repo.commitAll("rename", "rename test.txt"));
+
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            {
+                QFile file(tempDir.absoluteFilePath("test.txt"));
+                REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+                file.write("remote-style change\n");
+            }
+
+            CHECK_NOTHROW(repo.commitAll("modify", "modify test.txt"));
+
+            waitForGitFuture(repo.checkout("refs/heads/renameBranch"));
+            CHECK(repo.headBranchName().toStdString() == "renameBranch");
+
+            GitRepository::MergeResult result;
+            CHECK_NOTHROW(result = repo.merge({"master"}));
+
+            CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
+            CHECK(QFile::exists(tempDir.absoluteFilePath("renamed.txt")));
+            CHECK(!QFile::exists(tempDir.absoluteFilePath("test.txt")));
+
+            QFile file(tempDir.absoluteFilePath("renamed.txt"));
+            REQUIRE(file.open(QFile::ReadOnly));
+            CHECK(file.readAll().toStdString() == "remote-style change\n");
+        }
+
+        SECTION("Test merge conflict when ours modifies and theirs renames") {
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            CHECK_NOTHROW(repo.createBranch("renameBranch2"));
+            CHECK(repo.headBranchName().toStdString() == "renameBranch2");
+
+            REQUIRE(QFile::rename(tempDir.absoluteFilePath("test.txt"),
+                                  tempDir.absoluteFilePath("renamed2.txt")));
+            CHECK_NOTHROW(repo.commitAll("rename", "rename test.txt to renamed2.txt"));
+
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            {
+                QFile file(tempDir.absoluteFilePath("test.txt"));
+                REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+                file.write("ours modification\n");
+            }
+
+            CHECK_NOTHROW(repo.commitAll("modify", "modify test.txt"));
+
+            GitRepository::MergeResult result;
+            CHECK_NOTHROW(result = repo.merge({"renameBranch2"}));
+
+            CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
+            CHECK(QFile::exists(tempDir.absoluteFilePath("renamed2.txt")));
+            CHECK(!QFile::exists(tempDir.absoluteFilePath("test.txt")));
+
+            QFile file(tempDir.absoluteFilePath("renamed2.txt"));
+            REQUIRE(file.open(QFile::ReadOnly));
+            CHECK(file.readAll().toStdString() == "ours modification\n");
+        }
+
+        SECTION("Test merge conflict when ours renames a directory-like subtree and theirs modifies one file") {
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            REQUIRE(tempDir.mkpath(QStringLiteral("Trip/notes")));
+            {
+                QFile tripFile(tempDir.absoluteFilePath("Trip/Trip.cwtrip"));
+                REQUIRE(tripFile.open(QFile::WriteOnly | QFile::Truncate));
+                tripFile.write("date=2024-01-01\n");
+            }
+            {
+                QFile noteFile(tempDir.absoluteFilePath("Trip/notes/1.cwnote"));
+                REQUIRE(noteFile.open(QFile::WriteOnly | QFile::Truncate));
+                noteFile.write("note\n");
+            }
+            CHECK_NOTHROW(repo.commitAll("seed trip", "seed trip subtree"));
+
+            CHECK_NOTHROW(repo.createBranch("renameTripBranch"));
+            CHECK(repo.headBranchName().toStdString() == "renameTripBranch");
+
+            REQUIRE(QDir(tempDir.absolutePath()).rename(QStringLiteral("Trip"),
+                                                        QStringLiteral("Trip Renamed")));
+            REQUIRE(QFile::rename(tempDir.absoluteFilePath("Trip Renamed/Trip.cwtrip"),
+                                  tempDir.absoluteFilePath("Trip Renamed/Trip Renamed.cwtrip")));
+            {
+                QFile renamedTripFile(tempDir.absoluteFilePath("Trip Renamed/Trip Renamed.cwtrip"));
+                REQUIRE(renamedTripFile.open(QFile::WriteOnly | QFile::Truncate));
+                renamedTripFile.write("date=2024-01-01\nname=Trip Renamed\n");
+            }
+            CHECK_NOTHROW(repo.commitAll("rename trip", "rename trip subtree"));
+
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            {
+                QFile tripFile(tempDir.absoluteFilePath("Trip/Trip.cwtrip"));
+                REQUIRE(tripFile.open(QFile::WriteOnly | QFile::Truncate));
+                tripFile.write("date=2024-08-23\n");
+            }
+            CHECK_NOTHROW(repo.commitAll("modify trip", "modify trip metadata"));
+
+            GitRepository::MergeResult result;
+            CHECK_NOTHROW(result = repo.merge({"renameTripBranch"}));
+
+            CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
+            CHECK(QFile::exists(tempDir.absoluteFilePath("Trip Renamed/Trip Renamed.cwtrip")));
+            CHECK(QFile::exists(tempDir.absoluteFilePath("Trip Renamed/notes/1.cwnote")));
+            CHECK_FALSE(QFile::exists(tempDir.absoluteFilePath("Trip/Trip.cwtrip")));
+            CHECK_FALSE(QFile::exists(tempDir.absoluteFilePath("Trip/notes/1.cwnote")));
+
+            QFile mergedTripFile(tempDir.absoluteFilePath("Trip Renamed/Trip Renamed.cwtrip"));
+            REQUIRE(mergedTripFile.open(QFile::ReadOnly));
+            const auto mergedTripContent = mergedTripFile.readAll();
+            CHECK(mergedTripContent.contains("date=2024-08-23"));
+            CHECK(mergedTripContent.contains("name=Trip Renamed"));
+        }
     }
 }
 

@@ -2715,6 +2715,200 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         git_index *index;
         check(git_repository_index(&index, d->repo));
 
+        auto removeIndexPathIfPresent = [](git_index* index, const QByteArray& path) {
+            const auto err = git_index_remove_bypath(index, path.constData());
+            if (err != 0 && err != GIT_ENOTFOUND) {
+                check(err);
+            }
+        };
+
+        auto writeBuffer = [](const char* gitPath, const QDir& repoDir, const QByteArray& buffer) {
+            auto path = repoDir.absoluteFilePath(QString::fromUtf8(gitPath));
+            QFileInfo fileInfo(path);
+            if (!fileInfo.dir().exists()) {
+                fileInfo.dir().mkpath(QStringLiteral("."));
+            }
+            QFile file(path);
+            if (!file.open(QFile::WriteOnly | QFile::Truncate)) {
+                throw std::runtime_error(("Failed to open " + path).toStdString());
+            }
+            file.write(buffer);
+        };
+
+        auto applyOneSidedRenameResolutions = [this, index, &commitsToMerge, writeBuffer, removeIndexPathIfPresent]() {
+            if (commitsToMerge.size() != 1) {
+                return;
+            }
+
+            git_reference* headRef = nullptr;
+            check(git_repository_head(&headRef, d->repo));
+
+            git_commit* ourCommit = nullptr;
+            check(git_reference_peel(reinterpret_cast<git_object**>(&ourCommit), headRef, GIT_OBJECT_COMMIT));
+            git_reference_free(headRef);
+
+            git_commit* theirCommit = nullptr;
+            check(git_commit_lookup(&theirCommit, d->repo, git_annotated_commit_id(commitsToMerge.at(0))));
+
+            git_oid mergeBaseOid;
+            check(git_merge_base(&mergeBaseOid,
+                                 d->repo,
+                                 git_commit_id(ourCommit),
+                                 git_commit_id(theirCommit)));
+
+            git_commit* baseCommit = nullptr;
+            check(git_commit_lookup(&baseCommit, d->repo, &mergeBaseOid));
+
+            git_tree* baseTree = nullptr;
+            git_tree* ourTree = nullptr;
+            git_tree* theirTree = nullptr;
+            check(git_commit_tree(&baseTree, baseCommit));
+            check(git_commit_tree(&ourTree, ourCommit));
+            check(git_commit_tree(&theirTree, theirCommit));
+
+            auto readTreePath = [this](git_tree* tree, const QByteArray& path) {
+                git_tree_entry* entry = nullptr;
+                const auto pathErr = git_tree_entry_bypath(&entry, tree, path.constData());
+                if (pathErr == GIT_ENOTFOUND) {
+                    return QByteArray();
+                }
+                check(pathErr);
+
+                git_blob* blob = nullptr;
+                check(git_blob_lookup(&blob, d->repo, git_tree_entry_id(entry)));
+                QByteArray out(static_cast<const char*>(git_blob_rawcontent(blob)),
+                               static_cast<qsizetype>(git_blob_rawsize(blob)));
+                git_blob_free(blob);
+                git_tree_entry_free(entry);
+                return out;
+            };
+
+            auto renamedPaths = [this](git_tree* fromTree, git_tree* toTree) {
+                QHash<QByteArray, QByteArray> out;
+                git_diff* diff = nullptr;
+                check(git_diff_tree_to_tree(&diff, d->repo, fromTree, toTree, nullptr));
+
+                git_diff_find_options findOptions = GIT_DIFF_FIND_OPTIONS_INIT;
+                findOptions.flags = GIT_DIFF_FIND_RENAMES;
+                check(git_diff_find_similar(diff, &findOptions));
+
+                const size_t deltaCount = git_diff_num_deltas(diff);
+                for (size_t i = 0; i < deltaCount; ++i) {
+                    const git_diff_delta* delta = git_diff_get_delta(diff, i);
+                    if (delta->status == GIT_DELTA_RENAMED) {
+                        out.insert(QByteArray(delta->old_file.path), QByteArray(delta->new_file.path));
+                    }
+                }
+                git_diff_free(diff);
+                return out;
+            };
+
+            auto mergeBuffers = [](const QByteArray& baseBuffer,
+                                   const QByteArray& renamedBuffer,
+                                   const QByteArray& otherBuffer,
+                                   const QByteArray& basePath,
+                                   const QByteArray& renamedPath,
+                                   const QByteArray& otherPath) {
+                const bool renamedMatchesBase = renamedBuffer == baseBuffer;
+                const bool otherMatchesBase = otherBuffer == baseBuffer;
+
+                if (renamedMatchesBase && !otherMatchesBase) {
+                    return otherBuffer;
+                }
+                if (!renamedMatchesBase && otherMatchesBase) {
+                    return renamedBuffer;
+                }
+                if (renamedMatchesBase && otherMatchesBase) {
+                    return renamedBuffer;
+                }
+
+                git_merge_file_input ancestorInput = GIT_MERGE_FILE_INPUT_INIT;
+                git_merge_file_input oursInput = GIT_MERGE_FILE_INPUT_INIT;
+                git_merge_file_input theirsInput = GIT_MERGE_FILE_INPUT_INIT;
+                git_merge_file_options options = GIT_MERGE_FILE_OPTIONS_INIT;
+                git_merge_file_result result = {};
+
+                ancestorInput.ptr = baseBuffer.constData();
+                ancestorInput.size = static_cast<size_t>(baseBuffer.size());
+                ancestorInput.path = basePath.constData();
+                ancestorInput.mode = GIT_FILEMODE_BLOB;
+
+                oursInput.ptr = renamedBuffer.constData();
+                oursInput.size = static_cast<size_t>(renamedBuffer.size());
+                oursInput.path = renamedPath.constData();
+                oursInput.mode = GIT_FILEMODE_BLOB;
+
+                theirsInput.ptr = otherBuffer.constData();
+                theirsInput.size = static_cast<size_t>(otherBuffer.size());
+                theirsInput.path = otherPath.constData();
+                theirsInput.mode = GIT_FILEMODE_BLOB;
+
+                check(git_merge_file(&result,
+                                     &ancestorInput,
+                                     &oursInput,
+                                     &theirsInput,
+                                     &options));
+
+                QByteArray mergedBuffer = result.ptr != nullptr && result.len > 0
+                    ? QByteArray(result.ptr, static_cast<int>(result.len))
+                    : QByteArray();
+                git_merge_file_result_free(&result);
+                return mergedBuffer;
+            };
+
+            auto repoDir = QDir(git_repository_path(d->repo));
+            repoDir.cdUp();
+
+            const auto ourRenames = renamedPaths(baseTree, ourTree);
+            const auto theirRenames = renamedPaths(baseTree, theirTree);
+
+            auto reconcileRenameMap = [&](const QHash<QByteArray, QByteArray>& renameMap,
+                                          const QHash<QByteArray, QByteArray>& otherRenameMap,
+                                          git_tree* renamedTree,
+                                          git_tree* otherTree) {
+                for (auto it = renameMap.cbegin(); it != renameMap.cend(); ++it) {
+                    const QByteArray oldPath = it.key();
+                    const QByteArray newPath = it.value();
+
+                    if (otherRenameMap.contains(oldPath)) {
+                        continue;
+                    }
+
+                    const QByteArray baseBuffer = readTreePath(baseTree, oldPath);
+                    const QByteArray renamedBuffer = readTreePath(renamedTree, newPath);
+                    const QByteArray otherBuffer = readTreePath(otherTree, oldPath);
+
+                    if (renamedBuffer.isEmpty() && otherBuffer.isEmpty()) {
+                        continue;
+                    }
+
+                    const QByteArray mergedBuffer = mergeBuffers(baseBuffer,
+                                                                 renamedBuffer,
+                                                                 otherBuffer,
+                                                                 oldPath,
+                                                                 newPath,
+                                                                 oldPath);
+
+                    QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(oldPath)));
+                    writeBuffer(newPath.constData(), repoDir, mergedBuffer);
+                    removeIndexPathIfPresent(index, oldPath);
+                    check(git_index_add_bypath(index, newPath.constData()));
+                }
+            };
+
+            reconcileRenameMap(ourRenames, theirRenames, ourTree, theirTree);
+            reconcileRenameMap(theirRenames, ourRenames, theirTree, ourTree);
+
+            git_tree_free(theirTree);
+            git_tree_free(ourTree);
+            git_tree_free(baseTree);
+            git_commit_free(baseCommit);
+            git_commit_free(theirCommit);
+            git_commit_free(ourCommit);
+        };
+
+        applyOneSidedRenameResolutions();
+
         auto createMergeCommit = [&index, &commitsToMerge, create_merge_commit]() {
             create_merge_commit(index, commitsToMerge);
             printf("Merge made\n");
@@ -2729,7 +2923,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
             //https://github.com/libgit2/objective-git/issues/665
             //https://github.com/libgit2/libgit2/issues/3940#issuecomment-250447791
             //https://stackoverflow.com/questions/51977074/objectivegit-resolving-file-conflicts-with-gtindex-enumerateconflictedfilesw
-            auto resolveWithOurs = [](git_index* index, const QDir& repoDir) {
+            auto resolveWithOurs = [writeBuffer](git_repository* repo, git_index* index, const QDir& repoDir) {
 
                 /**
                  * This removes the diff text. For example git_index_entry would be:
@@ -2801,14 +2995,24 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                     return out;
                 };
 
-                auto writeBuffer = [](const char* gitPath, const QDir& repoDir, const QByteArray& buffer) {
-                    auto path = repoDir.absoluteFilePath(gitPath);
-                    QFile file(path);
-                    if (!file.open(QFile::WriteOnly)) {
-                        qDebug() << "Failed to open" << path << "for writing";
-                        return;
+                auto entryMatches = [](const git_index_entry* lhs, const git_index_entry* rhs) {
+                    if (lhs == nullptr || rhs == nullptr) {
+                        return lhs == rhs;
                     }
-                    file.write(buffer);
+                    return lhs->mode == rhs->mode && git_oid_cmp(&lhs->id, &rhs->id) == 0;
+                };
+
+                auto entryContent = [repo](const git_index_entry* entry) {
+                    if (entry == nullptr) {
+                        return QByteArray();
+                    }
+
+                    git_blob* blob = nullptr;
+                    check(git_blob_lookup(&blob, repo, &entry->id));
+                    QByteArray out(static_cast<const char*>(git_blob_rawcontent(blob)),
+                                   static_cast<qsizetype>(git_blob_rawsize(blob)));
+                    git_blob_free(blob);
+                    return out;
                 };
 
                 git_index_conflict_iterator* iterator;
@@ -2820,17 +3024,111 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                 int err = 0;
 
                 while ((err = git_index_conflict_next(&ancestor, &our, &their, iterator)) == 0) {
-                    //After removing the path from our. our->path will be empty
-                    QByteArray path = our->path;
+                    auto pathFor = [](const git_index_entry* entry) -> const char*
+                    {
+                        return entry ? entry->path : nullptr;
+                    };
 
-                    check(git_index_conflict_remove(index, path));
+                    const QByteArray ancestorPath = pathFor(ancestor) ? QByteArray(pathFor(ancestor)) : QByteArray();
+                    const QByteArray ourPath = pathFor(our) ? QByteArray(pathFor(our)) : QByteArray();
+                    const QByteArray theirPath = pathFor(their) ? QByteArray(pathFor(their)) : QByteArray();
+                    const QByteArray conflictPath = !ourPath.isEmpty()
+                        ? ourPath
+                        : (!ancestorPath.isEmpty() ? ancestorPath : theirPath);
 
-                    //Remove the diff tags from the file
-                    auto buffer = useOurs(path, repoDir);
-                    writeBuffer(path, repoDir, std::move(buffer));
+                    if (conflictPath.isEmpty()) {
+                        continue;
+                    }
 
-                    //Add the file back into the index
-                    check(git_index_add_bypath(index, path));
+                    QList<QByteArray> conflictPaths;
+                    if (!ancestorPath.isEmpty()) {
+                        conflictPaths.append(ancestorPath);
+                    }
+                    if (!ourPath.isEmpty() && !conflictPaths.contains(ourPath)) {
+                        conflictPaths.append(ourPath);
+                    }
+                    if (!theirPath.isEmpty() && !conflictPaths.contains(theirPath)) {
+                        conflictPaths.append(theirPath);
+                    }
+
+                    const bool oursRenamed = !ancestorPath.isEmpty() && !ourPath.isEmpty() && ourPath != ancestorPath;
+                    const bool theirsRenamed = !ancestorPath.isEmpty() && !theirPath.isEmpty() && theirPath != ancestorPath;
+                    const bool renameModifyConflict =
+                        !ancestorPath.isEmpty() &&
+                        !ourPath.isEmpty() &&
+                        !theirPath.isEmpty() &&
+                        (oursRenamed != theirsRenamed) &&
+                        ((oursRenamed && theirPath == ancestorPath) ||
+                         (theirsRenamed && ourPath == ancestorPath));
+
+                    if (renameModifyConflict) {
+                        const git_index_entry* renamedEntry = oursRenamed ? our : their;
+                        const git_index_entry* modifiedEntry = oursRenamed ? their : our;
+                        const QByteArray targetPath = oursRenamed ? ourPath : theirPath;
+
+                        QByteArray mergedBuffer;
+                        const bool renamedMatchesAncestor = entryMatches(renamedEntry, ancestor);
+                        const bool modifiedMatchesAncestor = entryMatches(modifiedEntry, ancestor);
+
+                        if (renamedMatchesAncestor && !modifiedMatchesAncestor) {
+                            mergedBuffer = entryContent(modifiedEntry);
+                        } else if (!renamedMatchesAncestor && modifiedMatchesAncestor) {
+                            mergedBuffer = entryContent(renamedEntry);
+                        } else if (renamedMatchesAncestor && modifiedMatchesAncestor) {
+                            mergedBuffer = entryContent(renamedEntry);
+                        } else {
+                            git_merge_file_result mergeResult = {};
+                            check(git_merge_file_from_index(&mergeResult,
+                                                            repo,
+                                                            ancestor,
+                                                            renamedEntry,
+                                                            modifiedEntry,
+                                                            nullptr));
+                            mergedBuffer = mergeResult.ptr != nullptr && mergeResult.len > 0
+                                ? QByteArray(mergeResult.ptr, static_cast<int>(mergeResult.len))
+                                : QByteArray();
+                            git_merge_file_result_free(&mergeResult);
+                        }
+
+                        for (const auto& path : conflictPaths) {
+                            git_index_conflict_remove(index, path.constData());
+                        }
+                        for (const auto& path : conflictPaths) {
+                            if (path != targetPath) {
+                                QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(path)));
+                            }
+                        }
+
+                        writeBuffer(targetPath.constData(), repoDir, mergedBuffer);
+                        check(git_index_add_bypath(index, targetPath.constData()));
+                        continue;
+                    }
+
+                    for (const auto& path : conflictPaths) {
+                        git_index_conflict_remove(index, path.constData());
+                    }
+
+                    // If "ours" deleted or renamed away from the conflicted path, keep that result
+                    // by removing the conflicting worktree entry and not re-adding it to the index.
+                    if (ourPath.isEmpty()) {
+                        for (const auto& path : conflictPaths) {
+                            QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(path)));
+                        }
+                        continue;
+                    }
+
+                    for (const auto& path : conflictPaths) {
+                        if (path != ourPath) {
+                            QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(path)));
+                        }
+                    }
+
+                    // Remove the diff tags from the file
+                    auto buffer = useOurs(ourPath.constData(), repoDir);
+                    writeBuffer(ourPath.constData(), repoDir, std::move(buffer));
+
+                    // Add the file back into the index
+                    check(git_index_add_bypath(index, ourPath.constData()));
                 }
                 git_index_conflict_iterator_free(iterator);
                 check(git_index_write(index));
@@ -2840,7 +3138,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 
             QDir repoDir(git_repository_path(d->repo));
             repoDir.cdUp();
-            resolveWithOurs(index, repoDir);
+            resolveWithOurs(d->repo, index, repoDir);
 
             if(git_index_has_conflicts(index)) {
                 //We should never get here
@@ -3263,6 +3561,53 @@ Monad::ResultString GitRepository::mergeBaseCommitOid(const QString& repositoryP
     char oidBuffer[GIT_OID_HEXSZ + 1];
     git_oid_tostr(oidBuffer, sizeof(oidBuffer), &mergeBaseOid);
     return Monad::ResultString(QString::fromLatin1(oidBuffer));
+}
+
+Monad::Result<QStringList> GitRepository::commitParentOids(const QString& repositoryPath,
+                                                           const QString& commitOid)
+{
+    if (commitOid.isEmpty()) {
+        return Monad::Result<QStringList>(QStringList{});
+    }
+
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::Result<QStringList>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository for commit parents")),
+            openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid oid;
+    if (git_oid_fromstr(&oid, commitOid.toLatin1().constData()) != GIT_OK) {
+        return Monad::Result<QStringList>(QStringLiteral("Invalid oid for commit parents."));
+    }
+
+    git_commit* commit = nullptr;
+    const int lookupResult = git_commit_lookup(&commit, repo, &oid);
+    if (lookupResult != GIT_OK || commit == nullptr) {
+        return Monad::Result<QStringList>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve commit for parents")),
+            lookupResult);
+    }
+    std::unique_ptr<git_commit, decltype(&git_commit_free)> commitHolder(commit, &git_commit_free);
+
+    QStringList parentOids;
+    const unsigned int parentCount = git_commit_parentcount(commit);
+    parentOids.reserve(static_cast<int>(parentCount));
+    for (unsigned int i = 0; i < parentCount; ++i) {
+        const git_oid* parentOid = git_commit_parent_id(commit, i);
+        if (parentOid == nullptr) {
+            continue;
+        }
+
+        char oidBuffer[GIT_OID_HEXSZ + 1];
+        git_oid_tostr(oidBuffer, sizeof(oidBuffer), parentOid);
+        parentOids.append(QString::fromLatin1(oidBuffer));
+    }
+
+    return Monad::Result<QStringList>(parentOids);
 }
 
 Monad::Result<GitRepository::AheadBehindCounts> GitRepository::aheadBehindCommitCounts(

@@ -159,6 +159,8 @@ public:
     static Monad::ResultString mergeBaseCommitOid(const QString& repositoryPath,
                                                   const QString& firstCommitOid,
                                                   const QString& secondCommitOid);
+    static Monad::Result<QStringList> commitParentOids(const QString& repositoryPath,
+                                                       const QString& commitOid);
     static Monad::Result<AheadBehindCounts> aheadBehindCommitCounts(const QString& repositoryPath,
                                                                     const QString& localRefSpec,
                                                                     const QString& upstreamRefSpec);
