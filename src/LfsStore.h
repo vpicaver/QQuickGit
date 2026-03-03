@@ -1,6 +1,8 @@
 #ifndef LFSSTORE_H
 #define LFSSTORE_H
 
+#include "QQuickGitExport.h"
+
 #include <QByteArray>
 #include <QFuture>
 #include <QObject>
@@ -18,7 +20,7 @@ namespace QQuickGit {
 
 class LfsBatchClient;
 
-struct LfsPointer {
+struct QQUICKGIT_EXPORT LfsPointer {
     QString oid;
     qint64 size = 0;
 
@@ -36,7 +38,7 @@ enum class LfsFetchErrorCode {
     Transfer
 };
 
-class LfsStore
+class QQUICKGIT_EXPORT LfsStore
 {
 public:
     explicit LfsStore(QString gitDirPath, LfsPolicy policy = LfsPolicy());
@@ -90,7 +92,7 @@ private:
     mutable std::shared_ptr<LfsBatchClient> mBatchClient;
 };
 
-class LfsStoreRegistry
+class QQUICKGIT_EXPORT LfsStoreRegistry
 {
 public:
     static void registerStore(const std::shared_ptr<LfsStore>& store);

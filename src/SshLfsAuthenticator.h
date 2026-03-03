@@ -1,6 +1,8 @@
 #ifndef SSHLFSAUTHENTICATOR_H
 #define SSHLFSAUTHENTICATOR_H
 
+#include "QQuickGitExport.h"
+
 #include <QMap>
 #include <QFuture>
 #include <QUrl>
@@ -9,7 +11,7 @@
 
 namespace QQuickGit {
 
-class SshLfsAuthenticator
+class QQUICKGIT_EXPORT SshLfsAuthenticator
 {
 public:
     enum class Operation {

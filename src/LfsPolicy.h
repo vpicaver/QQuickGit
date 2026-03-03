@@ -1,6 +1,8 @@
 #ifndef LFSPOLICY_H
 #define LFSPOLICY_H
 
+#include "QQuickGitExport.h"
+
 #include <QByteArray>
 #include <QHash>
 #include <QString>
@@ -9,7 +11,7 @@
 
 namespace QQuickGit {
 
-class LfsPolicy
+class QQUICKGIT_EXPORT LfsPolicy
 {
 public:
     using EligibilityFn = std::function<bool(const QString& path, const QByteArray* data)>;

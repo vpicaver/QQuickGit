@@ -1,9 +1,11 @@
 #ifndef LFSFILTER_H
 #define LFSFILTER_H
 
+#include "QQuickGitExport.h"
+
 namespace QQuickGit {
 
-class LfsFilter
+class QQUICKGIT_EXPORT LfsFilter
 {
 public:
     static int registerFilter();

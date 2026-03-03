@@ -1,6 +1,8 @@
 #ifndef LFSBATCHCLIENT_H
 #define LFSBATCHCLIENT_H
 
+#include "QQuickGitExport.h"
+
 #include <QByteArray>
 #include <QHash>
 #include <QMap>
@@ -24,7 +26,7 @@ namespace QQuickGit {
 
 class LfsAuthFailureNotifier;
 
-class LfsBatchClient : public QObject
+class QQUICKGIT_EXPORT LfsBatchClient : public QObject
 {
     Q_OBJECT
 

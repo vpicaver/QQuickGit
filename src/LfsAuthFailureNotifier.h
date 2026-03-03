@@ -1,13 +1,15 @@
 #ifndef LFSAUTHFAILURENOTIFIER_H
 #define LFSAUTHFAILURENOTIFIER_H
 
+#include "QQuickGitExport.h"
+
 #include <QObject>
 #include <QUrl>
 #include <QString>
 
 namespace QQuickGit {
 
-class LfsAuthFailureNotifier : public QObject
+class QQUICKGIT_EXPORT LfsAuthFailureNotifier : public QObject
 {
     Q_OBJECT
 
