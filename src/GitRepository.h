@@ -170,11 +170,13 @@ public:
     static Monad::Result<QByteArray> fileContentAtCommit(const QString& repositoryPath,
                                                           const QString& commitOid,
                                                           const QString& relativePath);
+    static GitFuture hydrateLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
 
     static void initGitEngine();
     static void shutdownGitEngine();
 
     Q_INVOKABLE GitFuture clone(const QUrl& url);
+    Q_INVOKABLE GitFuture hydrateLfsFiles();
 
     static bool isRepository(const QDir &dir);
     static bool isPushRejectedByRemoteAdvanceError(int errorCode);

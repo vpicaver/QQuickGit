@@ -2347,6 +2347,16 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
     });
 }
 
+GitRepository::GitFuture GitRepository::hydrateLfsFiles()
+{
+    return GitRepository::hydrateLfsFiles(d->mDirectory, this);
+}
+
+GitRepository::GitFuture GitRepository::hydrateLfsFiles(const QDir& repositoryDir, QObject* context)
+{
+    return runLfsHydrationForDirectory(repositoryDir, context);
+}
+
 /**
 * @brief GitRepository::modifiedFileCount
 * @return
@@ -2978,7 +2988,31 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
             file.write(buffer);
         };
 
-        auto applyOneSidedRenameResolutions = [this, index, &commitsToMerge, writeBuffer, removeIndexPathIfPresent]() {
+        auto stageBufferAtPath = [this](git_index* index,
+                                        const QByteArray& path,
+                                        const QByteArray& buffer,
+                                        unsigned int defaultMode = GIT_FILEMODE_BLOB) {
+            git_oid blobOid;
+            check(git_blob_create_frombuffer(&blobOid,
+                                             d->repo,
+                                             buffer.constData(),
+                                             static_cast<size_t>(buffer.size())));
+
+            const git_index_entry* existing = git_index_get_bypath(index, path.constData(), 0);
+            git_index_entry updated = {};
+            if (existing != nullptr) {
+                updated = *existing;
+            }
+
+            updated.id = blobOid;
+            updated.mode = existing != nullptr ? existing->mode : defaultMode;
+            updated.path = path.constData();
+            updated.file_size = static_cast<git_off_t>(buffer.size());
+
+            check(git_index_add(index, &updated));
+        };
+
+        auto applyOneSidedRenameResolutions = [this, index, &commitsToMerge, writeBuffer, stageBufferAtPath, removeIndexPathIfPresent]() {
             if (commitsToMerge.size() != 1) {
                 return;
             }
@@ -3135,7 +3169,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                     QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(oldPath)));
                     writeBuffer(newPath.constData(), repoDir, mergedBuffer);
                     removeIndexPathIfPresent(index, oldPath);
-                    check(git_index_add_bypath(index, newPath.constData()));
+                    stageBufferAtPath(index, newPath, mergedBuffer);
                 }
             };
 
@@ -3166,7 +3200,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
             //https://github.com/libgit2/objective-git/issues/665
             //https://github.com/libgit2/libgit2/issues/3940#issuecomment-250447791
             //https://stackoverflow.com/questions/51977074/objectivegit-resolving-file-conflicts-with-gtindex-enumerateconflictedfilesw
-            auto resolveWithOurs = [writeBuffer](git_repository* repo, git_index* index, const QDir& repoDir) {
+            auto resolveWithOurs = [writeBuffer, stageBufferAtPath](git_repository* repo, git_index* index, const QDir& repoDir) {
 
                 /**
                  * This removes the diff text. For example git_index_entry would be:
@@ -3343,7 +3377,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                         }
 
                         writeBuffer(targetPath.constData(), repoDir, mergedBuffer);
-                        check(git_index_add_bypath(index, targetPath.constData()));
+                        stageBufferAtPath(index, targetPath, mergedBuffer);
                         continue;
                     }
 
@@ -3368,10 +3402,10 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 
                     // Remove the diff tags from the file
                     auto buffer = useOurs(ourPath.constData(), repoDir);
-                    writeBuffer(ourPath.constData(), repoDir, std::move(buffer));
+                    writeBuffer(ourPath.constData(), repoDir, buffer);
 
                     // Add the file back into the index
-                    check(git_index_add_bypath(index, ourPath.constData()));
+                    stageBufferAtPath(index, ourPath, buffer);
                 }
                 git_index_conflict_iterator_free(iterator);
                 check(git_index_write(index));
