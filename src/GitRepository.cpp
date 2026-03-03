@@ -78,6 +78,29 @@ QString gitErrorMessageWithPrefix(const QString& prefix)
     return prefix;
 }
 
+void ensureStandardLfsFilterConfig(git_repository* repo)
+{
+    if (!repo) {
+        return;
+    }
+
+    git_config* config = nullptr;
+    if (git_repository_config(&config, repo) != GIT_OK || config == nullptr) {
+        return;
+    }
+
+    auto configGuard = qScopeGuard([&config]() {
+        if (config) {
+            git_config_free(config);
+        }
+    });
+
+    git_config_set_string(config, "filter.lfs.clean", "git-lfs clean -- %f");
+    git_config_set_string(config, "filter.lfs.smudge", "git-lfs smudge -- %f");
+    git_config_set_string(config, "filter.lfs.process", "git-lfs filter-process");
+    git_config_set_bool(config, "filter.lfs.required", 1);
+}
+
 int parseHttpStatusFromMessage(const QString& message)
 {
     static const QRegularExpression expression(QStringLiteral("httpStatus=(\\d{3})"));
@@ -219,6 +242,42 @@ bool hydratedLfsFileMatchesIndexPointer(git_repository* repo,
     return QString::fromLatin1(hash.result().toHex()) == pointer.oid;
 }
 
+QString findWorktreeFileForLfsOid(const QString& workTreeRoot, const QString& oid)
+{
+    if (workTreeRoot.isEmpty() || oid.isEmpty()) {
+        return QString();
+    }
+
+    QDirIterator it(workTreeRoot,
+                    QDir::Files | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString path = it.next();
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        while (!file.atEnd()) {
+            const QByteArray chunk = file.read(256 * 1024);
+            if (chunk.isEmpty() && file.error() != QFile::NoError) {
+                hash.reset();
+                break;
+            }
+            if (!chunk.isEmpty()) {
+                hash.addData(chunk);
+            }
+        }
+
+        if (QString::fromLatin1(hash.result().toHex()) == oid) {
+            return path;
+        }
+    }
+
+    return QString();
+}
+
 int filteredStatusEntryCount(git_repository* repo,
                              const QString& workTreeRoot,
                              git_status_list* list)
@@ -237,6 +296,104 @@ int filteredStatusEntryCount(git_repository* repo,
         ++count;
     }
     return count;
+}
+
+int stageFilteredStatusEntries(git_repository* repo,
+                               const QString& workTreeRoot,
+                               git_index* index,
+                               git_status_list* list,
+                               QSet<QString>* stagedPaths)
+{
+    if (repo == nullptr || index == nullptr || list == nullptr) {
+        return 0;
+    }
+
+    auto addPath = [index](const char* rawPath) {
+        if (rawPath == nullptr || *rawPath == '\0') {
+            return;
+        }
+        const int err = git_index_add_bypath(index, rawPath);
+        if (err != GIT_OK) {
+            throw std::runtime_error(gitErrorMessageWithPrefix(QStringLiteral("Failed to add path to index")).toStdString());
+        }
+    };
+
+    auto removePath = [index](const char* rawPath) {
+        if (rawPath == nullptr || *rawPath == '\0') {
+            return;
+        }
+
+        const int err = git_index_remove_bypath(index, rawPath);
+        if (err != 0 && err != GIT_ENOTFOUND) {
+            throw std::runtime_error(gitErrorMessageWithPrefix(QStringLiteral("Failed to remove path from index")).toStdString());
+        }
+    };
+
+    auto oldPath = [](const git_status_entry* entry) -> const char* {
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        if (entry->index_to_workdir != nullptr && entry->index_to_workdir->old_file.path != nullptr) {
+            return entry->index_to_workdir->old_file.path;
+        }
+        if (entry->head_to_index != nullptr && entry->head_to_index->old_file.path != nullptr) {
+            return entry->head_to_index->old_file.path;
+        }
+        return nullptr;
+    };
+
+    auto newPath = [](const git_status_entry* entry) -> const char* {
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        if (entry->index_to_workdir != nullptr && entry->index_to_workdir->new_file.path != nullptr) {
+            return entry->index_to_workdir->new_file.path;
+        }
+        if (entry->head_to_index != nullptr && entry->head_to_index->new_file.path != nullptr) {
+            return entry->head_to_index->new_file.path;
+        }
+        return nullptr;
+    };
+
+    int stagedCount = 0;
+    const size_t entryCount = git_status_list_entrycount(list);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (hydratedLfsFileMatchesIndexPointer(repo, workTreeRoot, entry)) {
+            continue;
+        }
+
+        const unsigned int status = entry != nullptr ? entry->status : 0;
+        if (status == GIT_STATUS_CURRENT) {
+            continue;
+        }
+
+        if (status & (GIT_STATUS_INDEX_RENAMED | GIT_STATUS_WT_RENAMED)) {
+            removePath(oldPath(entry));
+            const char* rawNewPath = newPath(entry);
+            addPath(rawNewPath);
+            if (stagedPaths != nullptr && rawNewPath != nullptr) {
+                stagedPaths->insert(QString::fromUtf8(rawNewPath));
+            }
+            ++stagedCount;
+            continue;
+        }
+
+        if (status & (GIT_STATUS_INDEX_DELETED | GIT_STATUS_WT_DELETED)) {
+            removePath(oldPath(entry));
+            ++stagedCount;
+            continue;
+        }
+
+        const char* rawNewPath = newPath(entry);
+        addPath(rawNewPath);
+        if (stagedPaths != nullptr && rawNewPath != nullptr) {
+            stagedPaths->insert(QString::fromUtf8(rawNewPath));
+        }
+        ++stagedCount;
+    }
+
+    return stagedCount;
 }
 
 bool onlyBenignHydratedLfsStatusEntries(git_repository* repo,
@@ -823,6 +980,7 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
              << "batchObjects=" << objects.size();
     struct UploadTask {
         QString oid;
+        qint64 size = -1;
         LfsBatchClient::Action uploadAction;
         LfsBatchClient::Action verifyAction;
         bool hasUpload = false;
@@ -845,6 +1003,7 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
 
         UploadTask task;
         task.oid = object.oid;
+        task.size = object.size;
         if (object.actions.contains(QStringLiteral("upload"))) {
             task.hasUpload = true;
             task.uploadAction = object.actions.value(QStringLiteral("upload"));
@@ -883,13 +1042,29 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                  << "upload=" << task.hasUpload
                  << "verify=" << task.hasVerify;
 
-        if (!pointersByOid.contains(task.oid)) {
+        LfsPointer pointer = pointersByOid.value(task.oid);
+        if (!pointer.isValid()) {
+            pointer.oid = task.oid;
+            if (task.size >= 0) {
+                pointer.size = task.size;
+            } else {
+                const QString fallbackObjectPath = LfsStore::objectPath(gitDirPath, task.oid);
+                pointer.size = QFileInfo(fallbackObjectPath).size();
+            }
+        }
+        if (!pointer.isValid()) {
             deferred.complete(Monad::ResultBase(QStringLiteral("Missing LFS pointer details for oid %1").arg(task.oid),
                                                 static_cast<int>(LfsFetchErrorCode::Protocol)));
             return;
         }
-        const LfsPointer pointer = pointersByOid.value(task.oid);
-        const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+        QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+        if (!QFileInfo::exists(objectPath)) {
+            const QString workTreeRoot = QFileInfo(gitDirPath).dir().absolutePath();
+            const QString hydratedPath = findWorktreeFileForLfsOid(workTreeRoot, pointer.oid);
+            if (!hydratedPath.isEmpty()) {
+                objectPath = hydratedPath;
+            }
+        }
 
         auto runVerify = [deferred, context, client, pointer, task, step]() mutable {
             if (!task.hasVerify) {
@@ -1108,6 +1283,7 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
 
 Monad::ResultBase hydratePointerFiles(const LfsHydrationPlan& plan)
 {
+    QStringList hydratedPaths;
     for (const auto& item : plan.pointerFiles) {
         if (item.objectPath.isEmpty() || !QFileInfo::exists(item.objectPath)) {
             continue;
@@ -1139,6 +1315,50 @@ Monad::ResultBase hydratePointerFiles(const LfsHydrationPlan& plan)
         if (!QFile::setPermissions(targetPath, existingPermissions)) {
             return Monad::ResultBase(QStringLiteral("Failed to restore LFS file permissions: %1").arg(item.relativePath));
         }
+
+        hydratedPaths.append(item.relativePath);
+    }
+
+    if (hydratedPaths.isEmpty()) {
+        return Monad::ResultBase();
+    }
+
+    git_repository* repo = nullptr;
+    if (git_repository_open(&repo, plan.workDir.toLocal8Bit().constData()) != GIT_OK || repo == nullptr) {
+        return Monad::ResultBase();
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_index* index = nullptr;
+    if (git_repository_index(&index, repo) != GIT_OK || index == nullptr) {
+        return Monad::ResultBase();
+    }
+    std::unique_ptr<git_index, decltype(&git_index_free)> indexHolder(index, &git_index_free);
+
+    for (const QString& relativePath : hydratedPaths) {
+        const QByteArray pathUtf8 = relativePath.toUtf8();
+        const git_index_entry* existing = git_index_get_bypath(index, pathUtf8.constData(), 0);
+        if (existing == nullptr) {
+            continue;
+        }
+
+        const git_oid originalId = existing->id;
+        if (git_index_add_bypath(index, pathUtf8.constData()) != GIT_OK) {
+            continue;
+        }
+
+        const git_index_entry* refreshed = git_index_get_bypath(index, pathUtf8.constData(), 0);
+        if (refreshed == nullptr) {
+            continue;
+        }
+
+        git_index_entry updated = *refreshed;
+        updated.id = originalId;
+        git_index_add(index, &updated);
+    }
+
+    if (git_index_write(index) != GIT_OK) {
+        return Monad::ResultBase(QStringLiteral("Failed to write hydrated LFS index state"));
     }
 
     return Monad::ResultBase();
@@ -1634,6 +1854,7 @@ void GitRepository::initRepository()
     }
 
     ensureLfsAttributes();
+    ensureStandardLfsFilterConfig(d->repo);
 }
 
 void GitRepository::setLfsPolicy(const LfsPolicy& policy)
@@ -2112,6 +2333,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     LfsStoreRegistry::registerStore(d->mLfsStore);
                 }
                 ensureLfsAttributes();
+                ensureStandardLfsFilterConfig(d->repo);
                 auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
                     const int safeTotal = std::max(1, total);
                     const int safeCurrent = std::clamp(current, 0, safeTotal);
@@ -2154,6 +2376,7 @@ bool GitRepository::hasCommits() const
 void GitRepository::checkStatus()
 {
     if(d->repo) {
+        ensureStandardLfsFilterConfig(d->repo);
         git_status_list* list;
 
         //Shouldn't include ignored files
@@ -2183,18 +2406,10 @@ void GitRepository::commitAll(const QString &subject,
                               const QString &description)
 {
     Q_ASSERT(account());
+    ensureStandardLfsFilterConfig(d->repo);
 
-    git_index_matched_path_cb matched_cb = NULL;
     git_index *index;
     git_tree* parentTree = nullptr;
-
-    auto match_cb = [](const char *path, const char *spec, void *payload)->int
-    {
-        return 0;
-    };
-
-    std::array<const char*, 1> paths = {"*"};
-    git_strarray array = {const_cast<char**>(paths.data()), 1};
 
     git_status_list* statusList = nullptr;
     git_status_options statusOptions = GIT_STATUS_OPTIONS_INIT;
@@ -2202,15 +2417,25 @@ void GitRepository::commitAll(const QString &subject,
     statusOptions.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
     check(git_status_list_new(&statusList, d->repo, &statusOptions));
     const int pendingEntryCount = filteredStatusEntryCount(d->repo, d->mDirectory.absolutePath(), statusList);
-    git_status_list_free(statusList);
     if (pendingEntryCount <= 0) {
+        git_status_list_free(statusList);
         return;
     }
 
     check(git_repository_index(&index, d->repo));
-    //    check(git_index_update_all(index, &array, match_cb, nullptr));
-    check(git_index_add_all(index, &array, GIT_INDEX_ADD_DEFAULT, match_cb, nullptr));
-    //    git_index_write(index);
+    QSet<QString> stagedPaths;
+    const int stagedEntryCount =
+        stageFilteredStatusEntries(d->repo,
+                                   d->mDirectory.absolutePath(),
+                                   index,
+                                   statusList,
+                                   &stagedPaths);
+    git_status_list_free(statusList);
+    statusList = nullptr;
+    if (stagedEntryCount <= 0) {
+        git_index_free(index);
+        return;
+    }
 
     git_oid commit_oid,tree_oid;
     git_tree *tree;
@@ -2234,20 +2459,28 @@ void GitRepository::commitAll(const QString &subject,
     // libgit2 filter driver is bypassed by index-wide staging paths.
     if (d->mLfsStore) {
         const QDir workDir = d->mDirectory;
-        const size_t entryCount = git_index_entrycount(index);
-        for (size_t i = 0; i < entryCount; ++i) {
-            const git_index_entry* existing = git_index_get_byindex(index, i);
+        for (const QString& relativePath : stagedPaths) {
+            const QByteArray pathUtf8 = relativePath.toUtf8();
+            const git_index_entry* existing = git_index_get_bypath(index, pathUtf8.constData(), 0);
             if (!existing || !existing->path) {
                 continue;
             }
 
-            const QString relativePath = QString::fromUtf8(existing->path);
             const QString absolutePath = workDir.filePath(relativePath);
             if (!QFileInfo::exists(absolutePath) || QFileInfo(absolutePath).isDir()) {
                 continue;
             }
             if (!d->mLfsStore->isLfsEligible(absolutePath)) {
                 continue;
+            }
+
+            QFile candidateFile(absolutePath);
+            if (candidateFile.open(QIODevice::ReadOnly)) {
+                const QByteArray prefix = candidateFile.read(1024);
+                LfsPointer existingPointer;
+                if (LfsPointer::parse(prefix, &existingPointer) && existingPointer.isValid()) {
+                    continue;
+                }
             }
 
             const auto pointerResult = d->mLfsStore->storeFile(absolutePath);
@@ -2313,6 +2546,7 @@ void GitRepository::commitAll(const QString &subject,
 
 GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 {
+    ensureStandardLfsFilterConfig(d->repo);
     return progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
@@ -2397,6 +2631,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
 GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 {
+    ensureStandardLfsFilterConfig(d->repo);
     QString fixedRemote = fixUpRemote(remote);
     return progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
@@ -2474,6 +2709,7 @@ GitRepository::GitFuture GitRepository::pullPush(const QString &refSpec, const Q
 
 GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 {
+    ensureStandardLfsFilterConfig(d->repo);
     return progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
@@ -2506,6 +2742,7 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 
 GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 {
+    ensureStandardLfsFilterConfig(d->repo);
 
     auto state = git_repository_state(d->repo);
     if (state != GIT_REPOSITORY_STATE_NONE) {
@@ -2650,6 +2887,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         }
 
         /* Prepare our commit tree */
+        check(git_index_write(index));
         check(git_index_write_tree(&tree_oid, index));
         check(git_tree_lookup(&tree, repo, &tree_oid));
 
@@ -2716,6 +2954,11 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         check(git_repository_index(&index, d->repo));
 
         auto removeIndexPathIfPresent = [](git_index* index, const QByteArray& path) {
+            const auto conflictErr = git_index_conflict_remove(index, path.constData());
+            if (conflictErr != 0 && conflictErr != GIT_ENOTFOUND) {
+                check(conflictErr);
+            }
+
             const auto err = git_index_remove_bypath(index, path.constData());
             if (err != 0 && err != GIT_ENOTFOUND) {
                 check(err);

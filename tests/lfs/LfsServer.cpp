@@ -47,6 +47,16 @@ QString firstRequestedOidFromBatchBody(const QByteArray& body)
     }
     return QString();
 }
+
+QJsonArray requestedObjectsFromBatchBody(const QByteArray& body)
+{
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
+    if (doc.isNull() || !doc.isObject()) {
+        return {};
+    }
+    return doc.object().value(QStringLiteral("objects")).toArray();
+}
 } // namespace
 
 LfsServer::LfsServer(QObject* parent)
@@ -78,8 +88,10 @@ void LfsServer::setDownloadObject(const QString& oid, const QByteArray& bytes)
 
 void LfsServer::setExpectedUploadObject(const QString& oid, qint64 size)
 {
-    mUploadOid = oid;
-    mUploadSize = size;
+    if (oid.isEmpty() || size <= 0) {
+        return;
+    }
+    mExpectedUploads.insert(oid, size);
 }
 
 int LfsServer::downloadBatchRequestCount() const
@@ -158,23 +170,43 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         if (isUpload) {
             mUploadBatchRequestCount++;
             qDebug() << "[LfsServer] upload batch request count =" << mUploadBatchRequestCount
-                     << "expectedOid=" << mUploadOid
-                     << "expectedSize=" << mUploadSize;
-            if (mUploadOid.isEmpty() || mUploadSize <= 0) {
-                respond(socket,
-                        200,
-                        QByteArray("application/vnd.git-lfs+json"),
-                        QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-                return true;
-            }
+                     << "expectedUploads=" << mExpectedUploads.keys();
             const QString baseUrl = QStringLiteral("http://127.0.0.1:%1").arg(mServer.serverPort());
-            const QByteArray responseBody = QStringLiteral(
-                "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
-                "\"actions\":{\"upload\":{\"href\":\"%3/upload/%1\"}}}]}")
-                .arg(mUploadOid)
-                .arg(mUploadSize)
-                .arg(baseUrl)
-                .toUtf8();
+            QJsonArray responseObjects;
+            const QJsonArray requestObjects = requestedObjectsFromBatchBody(body);
+            for (const QJsonValue& value : requestObjects) {
+                if (!value.isObject()) {
+                    continue;
+                }
+
+                const QJsonObject requestObject = value.toObject();
+                const QString oid = requestObject.value(QStringLiteral("oid")).toString();
+                const qint64 size = static_cast<qint64>(requestObject.value(QStringLiteral("size")).toDouble(-1));
+                if (oid.isEmpty()) {
+                    continue;
+                }
+
+                QJsonObject responseObject;
+                responseObject.insert(QStringLiteral("oid"), oid);
+                responseObject.insert(QStringLiteral("size"),
+                                      size >= 0 ? size : mExpectedUploads.value(oid, 0));
+
+                if (!mUploadedOids.contains(oid) && mExpectedUploads.contains(oid)) {
+                    QJsonObject uploadAction;
+                    uploadAction.insert(QStringLiteral("href"),
+                                        QStringLiteral("%1/upload/%2").arg(baseUrl, oid));
+                    QJsonObject actions;
+                    actions.insert(QStringLiteral("upload"), uploadAction);
+                    responseObject.insert(QStringLiteral("actions"), actions);
+                }
+
+                responseObjects.append(responseObject);
+            }
+
+            const QByteArray responseBody = QJsonDocument(QJsonObject{
+                {QStringLiteral("transfer"), QStringLiteral("basic")},
+                {QStringLiteral("objects"), responseObjects}
+            }).toJson(QJsonDocument::Compact);
             respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
             return true;
         }
@@ -215,6 +247,14 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
 
     if (method == "PUT" && path.contains("/upload/")) {
         mUploadRequestCount++;
+        const QByteArray uploadPrefix("/upload/");
+        const int uploadPrefixIndex = path.indexOf(uploadPrefix);
+        if (uploadPrefixIndex >= 0) {
+            const QString oid = QString::fromUtf8(path.mid(uploadPrefixIndex + uploadPrefix.size()));
+            if (!oid.isEmpty()) {
+                mUploadedOids.insert(oid);
+            }
+        }
         qDebug() << "[LfsServer] upload object request count =" << mUploadRequestCount
                  << "receivedBytes=" << body.size();
         respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));

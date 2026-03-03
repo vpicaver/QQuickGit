@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QString>
 #include <QTcpServer>
@@ -35,8 +36,8 @@ private:
     QTcpServer mServer;
     QHash<QTcpSocket*, QByteArray> mPendingRequests;
     QHash<QString, QByteArray> mDownloadObjects;
-    QString mUploadOid;
-    qint64 mUploadSize = 0;
+    QHash<QString, qint64> mExpectedUploads;
+    QSet<QString> mUploadedOids;
     int mDownloadBatchRequestCount = 0;
     int mDownloadObjectRequestCount = 0;
     int mUploadBatchRequestCount = 0;
