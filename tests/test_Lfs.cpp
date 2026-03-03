@@ -246,7 +246,7 @@ QList<GitStatusEntryInfo> statusEntries(git_repository* repo)
             path = QString::fromUtf8(entry->head_to_index->new_file.path);
         }
 
-        entries.append({entry->status, path});
+        entries.append({static_cast<unsigned int>(entry->status), path});
     }
 
     git_status_list_free(list);
