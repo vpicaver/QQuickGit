@@ -2,6 +2,7 @@
 #define GITREPOSITORY_H
 
 //Our includes
+#include "QQuickGitExport.h"
 #include "GitRemoteInfo.h"
 #include "Monad/Result.h"
 #include "Account.h"
@@ -23,7 +24,8 @@ class GitRepositoryData;
 namespace QQuickGit {
 class LfsStore;
 class LfsPolicy;
-class GitRepository : public QObject
+
+class QQUICKGIT_EXPORT GitRepository : public QObject
 {
     Q_OBJECT
     QML_ELEMENT
@@ -125,6 +127,7 @@ public:
     bool hasCommits() const;
 
     Q_INVOKABLE void checkStatus();
+    Q_INVOKABLE void resetHard(const QString& refSpec);
 
     Q_INVOKABLE void commitAll(const QString& subject,
                                const QString& description);

@@ -1,6 +1,7 @@
 #ifndef AUTHORIZEDKEYSMODEL_H
 #define AUTHORIZEDKEYSMODEL_H
 
+#include "QQuickGitExport.h"
 #include <QAbstractListModel>
 #include <QObject>
 #include <QDebug>
@@ -13,7 +14,7 @@ namespace QQuickGit {
 
 class Account;
 
-class AuthorizedKeysModel : public QAbstractListModel
+class QQUICKGIT_EXPORT AuthorizedKeysModel : public QAbstractListModel
 {
     Q_OBJECT
 

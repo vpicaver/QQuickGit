@@ -2,12 +2,13 @@
 #define GITUTILITIES_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QString>
 #include <QUrl>
 
 namespace QQuickGit {
-class GitUtilities : public QObject
+class QQUICKGIT_EXPORT GitUtilities : public QObject
 {
     Q_OBJECT
 

@@ -2,11 +2,12 @@
 #define SSHUSER_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QString>
 #include <QObject>
 
 namespace QQuickGit {
-class SshUser {
+class QQUICKGIT_EXPORT SshUser {
     Q_GADGET
 
     Q_PROPERTY(QString name READ name WRITE setName)

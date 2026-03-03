@@ -77,10 +77,16 @@ foreach(file ${qquickgit_QML_FILES})
     list(APPEND qquickgit_RELATIVE_QML_FILES "${relFile}")
 endforeach()
 
+if(MOBILE_BUILD)
+    set(qquickgit_library_type STATIC)
+else()
+    set(qquickgit_library_type SHARED)
+endif()
+
 qt_add_qml_module(qquickgit
     URI QQuickGit
     VERSION 1.0
-    STATIC
+    ${qquickgit_library_type}
     OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/QQuickGit
     DEPENDENCIES
         QtQuick
@@ -94,7 +100,11 @@ qt_add_qml_module(qquickgit
 
 set_target_properties(qquickgit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-target_sources(qquickgit PRIVATE ${cavewherelib_CPP_FILES} ${cavewherelib_H_FILES})
+generate_export_header(qquickgit
+    BASE_NAME QQUICKGIT
+    EXPORT_MACRO_NAME QQUICKGIT_EXPORT
+    EXPORT_FILE_NAME QQuickGitExport.h
+)
 
 target_link_libraries(qquickgit
     PUBLIC
@@ -104,6 +114,7 @@ target_link_libraries(qquickgit
     Qt6::Network
     monad
     asyncfuture
+    PRIVATE
     qlibssh2
     libgit2::libgit2
     openssl::openssl
@@ -112,6 +123,7 @@ target_link_libraries(qquickgit
 target_include_directories(qquickgit
     PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # Collect source files qquickgitLib
@@ -147,3 +159,10 @@ target_link_libraries(qquickgit-test
     Qt6::Test
     SignalSpyChecker
 )
+
+target_include_directories(qquickgit-test
+    PRIVATE
+    $<TARGET_PROPERTY:libgit2::libgit2,INTERFACE_INCLUDE_DIRECTORIES>
+)
+
+

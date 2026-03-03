@@ -4,6 +4,7 @@
 //Our inculdes
 #include "AbstractResultFutureWatcher.h"
 #include "ProgressState.h"
+#include "QQuickGitExport.h"
 #include "Monad/Result.h"
 
 //Qt includes
@@ -12,7 +13,7 @@
 
 namespace QQuickGit {
 
-class AbstractGitFutureWatcher : public AbstractResultFutureWatcher
+class QQUICKGIT_EXPORT AbstractGitFutureWatcher : public AbstractResultFutureWatcher
 {
     Q_OBJECT
 

@@ -2,6 +2,7 @@
 #define GITFUTUREWATCHER_H
 
 //Our inculdes
+#include "QQuickGitExport.h"
 #include "Monad/Result.h"
 #include "GitRepository.h"
 #include "AbstractGitFutureWatcher.h"
@@ -12,7 +13,7 @@
 
 namespace QQuickGit {
 
-class GitFutureWatcher : public AbstractGitFutureWatcher
+class QQUICKGIT_EXPORT GitFutureWatcher : public AbstractGitFutureWatcher
 {
     Q_OBJECT
     QML_ELEMENT

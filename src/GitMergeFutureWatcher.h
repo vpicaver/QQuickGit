@@ -2,12 +2,13 @@
 #define GITMERGEFUTUREWATCHER_H
 
 //Our includes
+#include "QQuickGitExport.h"
 #include "GitFutureWatcher.h"
 
 //Qt includes
 #include <QObject>
 namespace QQuickGit {
-class GitMergeFutureWatcher : public AbstractGitFutureWatcher
+class QQUICKGIT_EXPORT GitMergeFutureWatcher : public AbstractGitFutureWatcher
 {
     Q_OBJECT
 

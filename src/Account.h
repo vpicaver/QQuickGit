@@ -1,6 +1,7 @@
 #ifndef ACCOUNT_H
 #define ACCOUNT_H
 
+#include "QQuickGitExport.h"
 #include "Person.h"
 #include "RSAKeyGenerator.h"
 #include "AuthorizedKeysModel.h"
@@ -10,7 +11,7 @@
 
 namespace QQuickGit {
 
-class Account : public Person
+class QQUICKGIT_EXPORT Account : public Person
 {
     Q_OBJECT
     QML_ELEMENT

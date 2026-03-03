@@ -2,12 +2,13 @@
 #define RSAKEYGENERATOR_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QString>
 #include <QList>
 #include <QDir>
 
 namespace QQuickGit {
-class RSAKeyGenerator
+class QQUICKGIT_EXPORT RSAKeyGenerator
 {
 public:
     RSAKeyGenerator();

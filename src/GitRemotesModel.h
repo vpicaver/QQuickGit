@@ -2,6 +2,7 @@
 #define GITREMOTESMODEL_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QAbstractListModel>
 #include <QVector>
 
@@ -9,7 +10,7 @@
 #include "GitRemoteInfo.h"
 
 namespace QQuickGit {
-class GitRemotesModel : public QAbstractListModel
+class QQUICKGIT_EXPORT GitRemotesModel : public QAbstractListModel
 {
     Q_OBJECT
 

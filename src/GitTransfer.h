@@ -2,12 +2,13 @@
 #define GITTRANSFER_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QDir>
 
 namespace QQuickGit {
 
-class GitTransfer : public QObject
+class QQUICKGIT_EXPORT GitTransfer : public QObject
 {
     Q_OBJECT
 

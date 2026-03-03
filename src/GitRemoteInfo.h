@@ -1,11 +1,12 @@
 #ifndef GITREMOTEINFO_H
 #define GITREMOTEINFO_H
 
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QUrl>
 
 namespace QQuickGit {
-class GitRemoteInfo
+class QQUICKGIT_EXPORT GitRemoteInfo
 {
     Q_GADGET
 

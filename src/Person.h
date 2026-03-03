@@ -2,13 +2,14 @@
 #define PERSON_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QUrl>
 #include <QQmlEngine>
 
 namespace QQuickGit {
 
-class Person : public QObject
+class QQUICKGIT_EXPORT Person : public QObject
 {
     Q_OBJECT
     QML_ELEMENT

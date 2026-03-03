@@ -2,6 +2,7 @@
 #define ABSTRACTRESULTFUTUREWATCHER_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QFuture>
 
@@ -13,7 +14,7 @@
 
 namespace QQuickGit {
 
-class AbstractResultFutureWatcher : public QObject
+class QQUICKGIT_EXPORT AbstractResultFutureWatcher : public QObject
 {
     Q_OBJECT
 

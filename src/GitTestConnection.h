@@ -1,13 +1,14 @@
 #ifndef GITTESTCONNECTION_H
 #define GITTESTCONNECTION_H
 
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QUrl>
 #include <QFuture>
 
 namespace QQuickGit {
 
-class GitTestConnection : public QObject
+class QQUICKGIT_EXPORT GitTestConnection : public QObject
 {
     Q_OBJECT
 

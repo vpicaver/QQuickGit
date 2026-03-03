@@ -2,6 +2,7 @@
 #define ACCOUNTSETTINGWATCHER_H
 
 //Qt includes
+#include "QQuickGitExport.h"
 #include <QObject>
 #include <QPointer>
 
@@ -10,7 +11,7 @@
 
 namespace QQuickGit {
 
-class AccountSettingWatcher : public QObject
+class QQUICKGIT_EXPORT AccountSettingWatcher : public QObject
 {
     Q_OBJECT
 

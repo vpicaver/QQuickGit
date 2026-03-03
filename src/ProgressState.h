@@ -2,11 +2,12 @@
 #define PROGRESSSTATE_H
 
 //QString includes
+#include "QQuickGitExport.h"
 #include <QString>
 #include <QVariantMap>
 
 namespace QQuickGit {
-class ProgressState
+class QQUICKGIT_EXPORT ProgressState
 {
 public:
     ProgressState() = default;

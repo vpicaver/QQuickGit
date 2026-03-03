@@ -2168,6 +2168,17 @@ void GitRepository::checkStatus()
     }
 }
 
+void GitRepository::resetHard(const QString& refSpec)
+{
+    git_object* object;
+    check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
+
+    git_checkout_options checkoutOptions = GIT_CHECKOUT_OPTIONS_INIT;
+    check(git_reset(d->repo, object, GIT_RESET_HARD, &checkoutOptions));
+
+    git_object_free(object);
+}
+
 void GitRepository::commitAll(const QString &subject,
                               const QString &description)
 {
