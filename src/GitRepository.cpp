@@ -3133,11 +3133,98 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                 return mergedBuffer;
             };
 
+            auto composeSegmentWisePath = [](const QByteArray& oldPath,
+                                             const QByteArray& ourNewPath,
+                                             const QByteArray& theirNewPath) -> QByteArray {
+                if (oldPath.isEmpty() || ourNewPath.isEmpty() || theirNewPath.isEmpty()) {
+                    return QByteArray();
+                }
+
+                if (ourNewPath == theirNewPath) {
+                    return ourNewPath;
+                }
+
+                const QList<QByteArray> oldSegments = oldPath.split('/');
+                const QList<QByteArray> ourSegments = ourNewPath.split('/');
+                const QList<QByteArray> theirSegments = theirNewPath.split('/');
+                if (oldSegments.size() != ourSegments.size()
+                    || oldSegments.size() != theirSegments.size()) {
+                    return QByteArray();
+                }
+
+                QList<QByteArray> mergedSegments = oldSegments;
+                for (int i = 0; i < oldSegments.size(); ++i) {
+                    const bool oursChanged = ourSegments.at(i) != oldSegments.at(i);
+                    if (!oursChanged) {
+                        continue;
+                    }
+                    mergedSegments[i] = ourSegments.at(i);
+                }
+
+                for (int i = 0; i < oldSegments.size(); ++i) {
+                    const bool theirsChanged = theirSegments.at(i) != oldSegments.at(i);
+                    if (!theirsChanged) {
+                        continue;
+                    }
+
+                    if (mergedSegments.at(i) != oldSegments.at(i)
+                        && mergedSegments.at(i) != theirSegments.at(i)) {
+                        return QByteArray();
+                    }
+                    mergedSegments[i] = theirSegments.at(i);
+                }
+
+                return mergedSegments.join('/');
+            };
+
             auto repoDir = QDir(git_repository_path(d->repo));
             repoDir.cdUp();
 
             const auto ourRenames = renamedPaths(baseTree, ourTree);
             const auto theirRenames = renamedPaths(baseTree, theirTree);
+
+            for (auto it = ourRenames.cbegin(); it != ourRenames.cend(); ++it) {
+                const QByteArray oldPath = it.key();
+                const QByteArray ourNewPath = it.value();
+                const QByteArray theirNewPath = theirRenames.value(oldPath);
+
+                if (theirNewPath.isEmpty() || ourNewPath == theirNewPath) {
+                    continue;
+                }
+
+                const QByteArray composedPath = composeSegmentWisePath(oldPath, ourNewPath, theirNewPath);
+                if (composedPath.isEmpty()) {
+                    continue;
+                }
+
+                const QByteArray baseBuffer = readTreePath(baseTree, oldPath);
+                const QByteArray ourBuffer = readTreePath(ourTree, ourNewPath);
+                const QByteArray theirBuffer = readTreePath(theirTree, theirNewPath);
+                if (baseBuffer.isEmpty() && ourBuffer.isEmpty() && theirBuffer.isEmpty()) {
+                    continue;
+                }
+
+                const QByteArray mergedBuffer = mergeBuffers(baseBuffer,
+                                                             ourBuffer,
+                                                             theirBuffer,
+                                                             oldPath,
+                                                             ourNewPath,
+                                                             theirNewPath);
+
+                QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(oldPath)));
+                if (ourNewPath != composedPath) {
+                    QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(ourNewPath)));
+                }
+                if (theirNewPath != composedPath) {
+                    QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(theirNewPath)));
+                }
+
+                writeBuffer(composedPath.constData(), repoDir, mergedBuffer);
+                removeIndexPathIfPresent(index, oldPath);
+                removeIndexPathIfPresent(index, ourNewPath);
+                removeIndexPathIfPresent(index, theirNewPath);
+                stageBufferAtPath(index, composedPath, mergedBuffer);
+            }
 
             auto reconcileRenameMap = [&](const QHash<QByteArray, QByteArray>& renameMap,
                                           const QHash<QByteArray, QByteArray>& otherRenameMap,
