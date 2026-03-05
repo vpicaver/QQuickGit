@@ -1541,7 +1541,8 @@ GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<Git
 
     const auto state = mergeResult.value().state();
     const bool shouldHydrate = state == GitRepository::MergeResult::FastForward
-                               || state == GitRepository::MergeResult::MergeCommitCreated;
+                               || state == GitRepository::MergeResult::MergeCommitCreated
+                               || state == GitRepository::MergeResult::Rebased;
     if (!shouldHydrate) {
         return AsyncFuture::completed(mergeResult);
     }
@@ -1556,6 +1557,183 @@ GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<Git
             }
             return mergeResult;
         }).future();
+}
+
+bool isRebaseConflictError(int error)
+{
+    return error == GIT_ECONFLICT || error == GIT_EUNMERGED;
+}
+
+Monad::Result<GitRepository::MergeResult::State> runRebaseOntoRemoteBranch(git_repository* repo,
+                                                                           const QString& remoteBranch,
+                                                                           Account* account)
+{
+    if (repo == nullptr) {
+        return Monad::Result<GitRepository::MergeResult::State>(QStringLiteral("Failed to open repository for rebase."));
+    }
+
+    auto resolveAnnotatedCommit = [repo](const QString& refSpec) -> git_annotated_commit* {
+        git_reference* ref = nullptr;
+        if (git_reference_dwim(&ref, repo, refSpec.toLocal8Bit().constData()) == GIT_OK && ref != nullptr) {
+            git_annotated_commit* commit = nullptr;
+            const int fromRefResult = git_annotated_commit_from_ref(&commit, repo, ref);
+            git_reference_free(ref);
+            if (fromRefResult == GIT_OK) {
+                return commit;
+            }
+            return nullptr;
+        }
+
+        git_object* object = nullptr;
+        if (git_revparse_single(&object, repo, refSpec.toLocal8Bit().constData()) != GIT_OK || object == nullptr) {
+            return nullptr;
+        }
+
+        git_annotated_commit* commit = nullptr;
+        const int lookupResult = git_annotated_commit_lookup(&commit, repo, git_object_id(object));
+        git_object_free(object);
+        if (lookupResult != GIT_OK) {
+            return nullptr;
+        }
+        return commit;
+    };
+
+    git_annotated_commit* upstreamCommit = resolveAnnotatedCommit(remoteBranch);
+    if (upstreamCommit == nullptr) {
+        return Monad::Result<GitRepository::MergeResult::State>(QStringLiteral("Failed to resolve upstream for rebase."));
+    }
+    auto upstreamCommitGuard = qScopeGuard([&upstreamCommit]() {
+        if (upstreamCommit != nullptr) {
+            git_annotated_commit_free(upstreamCommit);
+        }
+    });
+
+    git_rebase_options options = GIT_REBASE_OPTIONS_INIT;
+    git_rebase* rebase = nullptr;
+    const int initResult = git_rebase_init(&rebase,
+                                           repo,
+                                           nullptr,
+                                           upstreamCommit,
+                                           nullptr,
+                                           &options);
+    if (initResult != GIT_OK || rebase == nullptr) {
+        return Monad::Result<GitRepository::MergeResult::State>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to initialize rebase")),
+            initResult);
+    }
+
+    auto abortRebase = [rebase]() {
+        if (rebase != nullptr) {
+            git_rebase_abort(rebase);
+        }
+    };
+    auto rebaseGuard = qScopeGuard([&rebase]() {
+        if (rebase != nullptr) {
+            git_rebase_free(rebase);
+        }
+    });
+
+    auto createCommitterSignature = [repo, account](git_signature** outSignature) -> int {
+        if (outSignature == nullptr) {
+            return GIT_ERROR;
+        }
+
+        if (account != nullptr && account->isValid()) {
+            return git_signature_now(outSignature,
+                                     account->name().toLocal8Bit().constData(),
+                                     account->email().toLocal8Bit().constData());
+        }
+
+        return git_signature_default(outSignature, repo);
+    };
+
+    int rebaseNextResult = GIT_OK;
+    while (true) {
+        git_rebase_operation* operation = nullptr;
+        rebaseNextResult = git_rebase_next(&operation, rebase);
+        Q_UNUSED(operation);
+        if (rebaseNextResult != GIT_OK) {
+            break;
+        }
+
+        git_index* index = nullptr;
+        const int indexResult = git_repository_index(&index, repo);
+        if (indexResult != GIT_OK || index == nullptr) {
+            abortRebase();
+            return Monad::Result<GitRepository::MergeResult::State>(
+                gitErrorMessageWithPrefix(QStringLiteral("Failed to open index during rebase")),
+                indexResult);
+        }
+
+        const bool hasConflicts = git_index_has_conflicts(index);
+        git_index_free(index);
+        if (hasConflicts) {
+            abortRebase();
+            return Monad::Result<GitRepository::MergeResult::State>(GitRepository::MergeResult::MergeConflicts);
+        }
+
+        git_signature* committerSignature = nullptr;
+        const int signatureResult = createCommitterSignature(&committerSignature);
+        if (signatureResult != GIT_OK || committerSignature == nullptr) {
+            abortRebase();
+            return Monad::Result<GitRepository::MergeResult::State>(
+                gitErrorMessageWithPrefix(QStringLiteral("Failed to create rebase committer signature")),
+                signatureResult);
+        }
+
+        git_oid commitOid = {};
+        const int commitResult = git_rebase_commit(&commitOid,
+                                                   rebase,
+                                                   nullptr,
+                                                   committerSignature,
+                                                   nullptr,
+                                                   nullptr);
+        git_signature_free(committerSignature);
+
+        if (commitResult == GIT_EAPPLIED) {
+            continue;
+        }
+
+        if (commitResult != GIT_OK) {
+            abortRebase();
+            if (isRebaseConflictError(commitResult)) {
+                return Monad::Result<GitRepository::MergeResult::State>(GitRepository::MergeResult::MergeConflicts);
+            }
+            return Monad::Result<GitRepository::MergeResult::State>(
+                gitErrorMessageWithPrefix(QStringLiteral("Failed to apply rebase commit")),
+                commitResult);
+        }
+    }
+
+    if (rebaseNextResult != GIT_ITEROVER) {
+        abortRebase();
+        if (isRebaseConflictError(rebaseNextResult)) {
+            return Monad::Result<GitRepository::MergeResult::State>(GitRepository::MergeResult::MergeConflicts);
+        }
+        return Monad::Result<GitRepository::MergeResult::State>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to advance rebase")),
+            rebaseNextResult);
+    }
+
+    git_signature* finishSignature = nullptr;
+    const int finishSignatureResult = createCommitterSignature(&finishSignature);
+    if (finishSignatureResult != GIT_OK || finishSignature == nullptr) {
+        abortRebase();
+        return Monad::Result<GitRepository::MergeResult::State>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to create rebase finish signature")),
+            finishSignatureResult);
+    }
+
+    const int finishResult = git_rebase_finish(rebase, finishSignature);
+    git_signature_free(finishSignature);
+    if (finishResult != GIT_OK) {
+        abortRebase();
+        return Monad::Result<GitRepository::MergeResult::State>(
+            gitErrorMessageWithPrefix(QStringLiteral("Failed to finalize rebase")),
+            finishResult);
+    }
+
+    return Monad::Result<GitRepository::MergeResult::State>(GitRepository::MergeResult::Rebased);
 }
 
 }
@@ -2686,6 +2864,78 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 
                              return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this);
                          }).future(); //This strips the progress from fetchFuture
+        });
+}
+
+GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remote)
+{
+    ensureStandardLfsFilterConfig(d->repo);
+    QString fixedRemote = fixUpRemote(remote);
+    return progressFuture<Result<MergeResult>>(
+        [=](QFutureInterface<Result<MergeResult>> progressInterface)
+        {
+            auto fetchFuture = fetchRefsForDirectory(
+                d->mDirectory,
+                fixedRemote,
+                [progressInterface](const ProgressState& progress) mutable {
+                    setProgress(&progressInterface, progress);
+                });
+            AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
+                if(!fetchFuture.progressText().isEmpty()) {
+                    setProgress(&progressInterface, fetchFuture.progressText());
+                }
+            });
+
+            return AsyncFuture::observe(fetchFuture)
+                .context(this, [=]() mutable {
+                    const auto fetchResult = fetchFuture.result();
+                    if (fetchResult.hasError()) {
+                        return AsyncFuture::completed(Result<MergeResult>(fetchResult.errorMessage(),
+                                                                          fetchResult.errorCode()));
+                    }
+
+                    auto pullResult = mtry([=]() mutable -> Result<MergeResult> {
+                        const auto currentBranch = headBranchName();
+                        if (currentBranch.isEmpty()) {
+                            return Result<MergeResult>();
+                        }
+
+                        const auto remoteBranch = fixedRemote + QStringLiteral("/") + currentBranch;
+                        if (!remoteBranchExists(remoteBranch)) {
+                            return Result<MergeResult>();
+                        }
+
+                        const auto aheadBehindResult = aheadBehindCommitCounts(d->mDirectory.absolutePath(),
+                                                                               QStringLiteral("HEAD"),
+                                                                               remoteBranch);
+                        if (aheadBehindResult.hasError()) {
+                            return Result<MergeResult>(aheadBehindResult.errorMessage(),
+                                                       aheadBehindResult.errorCode());
+                        }
+
+                        const auto counts = aheadBehindResult.value();
+                        if (counts.ahead == 0 || counts.behind == 0) {
+                            setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                            return merge({remoteBranch});
+                        }
+
+                        setProgress(&progressInterface, ProgressState(QStringLiteral("Rebasing"), 0, 1));
+                        const auto rebaseResult = runRebaseOntoRemoteBranch(d->repo, remoteBranch, account());
+                        if (rebaseResult.hasError()) {
+                            return Result<MergeResult>(rebaseResult.errorMessage(),
+                                                       rebaseResult.errorCode());
+                        }
+
+                        if (rebaseResult.value() == MergeResult::MergeConflicts) {
+                            setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                            return merge({remoteBranch});
+                        }
+
+                        return Result<MergeResult>(MergeResult(rebaseResult.value()));
+                    });
+
+                    return runMergeHydrationForDirectory(pullResult, d->mDirectory, this);
+                }).future();
         });
 }
 

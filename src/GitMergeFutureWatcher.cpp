@@ -25,6 +25,8 @@ void GitMergeFutureWatcher::setFuture(const GitRepository::MergeFuture& mergeFut
                     return QStringLiteral("Success!");
                 case GitRepository::MergeResult::MergeConflicts:
                     return QStringLiteral("Merge Conflicts");
+                case GitRepository::MergeResult::Rebased:
+                    return QStringLiteral("Success!");
                 }
             };
             setProgress(ProgressState(stateToString(result.value().state()), 1, 1));

@@ -81,7 +81,8 @@ public:
             AlreadyUpToDate, //1
             FastForward, //2
             MergeCommitCreated, //3
-            MergeConflicts //4
+            MergeConflicts, //4
+            Rebased //5
         };
 
         MergeResult() = default;
@@ -134,6 +135,7 @@ public:
 
     Q_INVOKABLE GitRepository::GitFuture push(QString refSpec = QString(), QString remote = QString());
     Q_INVOKABLE GitRepository::MergeFuture pull(const QString& remote = QString());
+    Q_INVOKABLE GitRepository::MergeFuture pullRebaseOrMerge(const QString& remote = QString());
     Q_INVOKABLE GitRepository::GitFuture pullPush(const QString& refSpec = QString(), const QString& remote = QString());
 
     Q_INVOKABLE GitRepository::GitFuture fetch(const QString& remote = QString());

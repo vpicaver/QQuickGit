@@ -1135,6 +1135,178 @@ TEST_CASE("GitRepository remoteAheadBehindCommitCounts should read advertised re
     }
 }
 
+TEST_CASE("GitRepository pullRebaseOrMerge should prefer rebase and fallback to merge on conflicts", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-pull-rebase-or-merge.git"));
+    const QString authorPath = tempDir.absoluteFilePath(QStringLiteral("author"));
+    const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
+
+    git_repository* remoteRepo = nullptr;
+    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+    REQUIRE(remoteRepo != nullptr);
+    git_repository_free(remoteRepo);
+
+    REQUIRE(QDir().mkpath(authorPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    auto writeFile = [](const QString& directoryPath, const QString& relativePath, const QByteArray& contents) {
+        const QString absolutePath = QDir(directoryPath).absoluteFilePath(relativePath);
+        QFileInfo info(absolutePath);
+        if (!info.dir().exists()) {
+            REQUIRE(info.dir().mkpath(QStringLiteral(".")));
+        }
+
+        QFile file(absolutePath);
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        REQUIRE(file.write(contents) == contents.size());
+        file.close();
+    };
+
+    auto readFile = [](const QString& directoryPath, const QString& relativePath) {
+        QFile file(QDir(directoryPath).absoluteFilePath(relativePath));
+        REQUIRE(file.open(QFile::ReadOnly | QFile::Text));
+        return file.readAll();
+    };
+
+    auto headOid = [](const QString& directoryPath) {
+        git_repository* repo = nullptr;
+        REQUIRE(git_repository_open(&repo, directoryPath.toLocal8Bit().constData()) == GIT_OK);
+        auto repoGuard = qScopeGuard([&repo]() {
+            if (repo) {
+                git_repository_free(repo);
+            }
+        });
+
+        git_reference* headRef = nullptr;
+        REQUIRE(git_repository_head(&headRef, repo) == GIT_OK);
+        auto headGuard = qScopeGuard([&headRef]() {
+            if (headRef) {
+                git_reference_free(headRef);
+            }
+        });
+
+        const git_oid* oid = git_reference_target(headRef);
+        REQUIRE(oid != nullptr);
+        return *oid;
+    };
+
+    auto headParentCount = [](const QString& directoryPath) {
+        git_repository* repo = nullptr;
+        REQUIRE(git_repository_open(&repo, directoryPath.toLocal8Bit().constData()) == GIT_OK);
+        auto repoGuard = qScopeGuard([&repo]() {
+            if (repo) {
+                git_repository_free(repo);
+            }
+        });
+
+        git_reference* headRef = nullptr;
+        REQUIRE(git_repository_head(&headRef, repo) == GIT_OK);
+        auto headGuard = qScopeGuard([&headRef]() {
+            if (headRef) {
+                git_reference_free(headRef);
+            }
+        });
+
+        const git_oid* oid = git_reference_target(headRef);
+        REQUIRE(oid != nullptr);
+
+        git_commit* commit = nullptr;
+        REQUIRE(git_commit_lookup(&commit, repo, oid) == GIT_OK);
+        auto commitGuard = qScopeGuard([&commit]() {
+            if (commit) {
+                git_commit_free(commit);
+            }
+        });
+
+        return git_commit_parentcount(commit);
+    };
+
+    SECTION("clean diverged history rebases without merge commit")
+    {
+        GitRepository author;
+        author.setDirectory(QDir(authorPath));
+        author.initRepository();
+        author.setAccount(&account);
+        author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+        writeFile(authorPath, QStringLiteral("state.txt"), QByteArray("base\n"));
+        CHECK_NOTHROW(author.commitAll(QStringLiteral("Initial"), QStringLiteral("baseline")));
+        auto initialPushFuture = author.push();
+        REQUIRE(AsyncFuture::waitForFinished(initialPushFuture, defaultTimeout));
+        REQUIRE(!initialPushFuture.result().hasError());
+
+        GitRepository peer;
+        peer.setDirectory(QDir(peerPath));
+        peer.setAccount(&account);
+        waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+
+        writeFile(authorPath, QStringLiteral("author-only.txt"), QByteArray("author change\n"));
+        CHECK_NOTHROW(author.commitAll(QStringLiteral("Author Local"), QStringLiteral("local change")));
+        const git_oid authorHeadBeforePull = headOid(authorPath);
+
+        writeFile(peerPath, QStringLiteral("peer-only.txt"), QByteArray("peer change\n"));
+        CHECK_NOTHROW(peer.commitAll(QStringLiteral("Peer Remote"), QStringLiteral("remote change")));
+        auto peerPushFuture = peer.push();
+        REQUIRE(AsyncFuture::waitForFinished(peerPushFuture, defaultTimeout));
+        REQUIRE(!peerPushFuture.result().hasError());
+        const git_oid remoteHeadBeforePull = headOid(peerPath);
+
+        auto pullFuture = author.pullRebaseOrMerge();
+        REQUIRE(AsyncFuture::waitForFinished(pullFuture, defaultTimeout));
+        INFO("pullRebaseOrMerge error:" << pullFuture.result().errorMessage().toStdString());
+        REQUIRE(!pullFuture.result().hasError());
+        CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::Rebased);
+
+        const git_oid authorHeadAfterPull = headOid(authorPath);
+        CHECK(git_oid_cmp(&authorHeadAfterPull, &authorHeadBeforePull) != 0);
+        CHECK(git_oid_cmp(&authorHeadAfterPull, &remoteHeadBeforePull) != 0);
+        CHECK(headParentCount(authorPath) == 1);
+        CHECK(readFile(authorPath, QStringLiteral("author-only.txt")) == QByteArray("author change\n"));
+        CHECK(readFile(authorPath, QStringLiteral("peer-only.txt")) == QByteArray("peer change\n"));
+    }
+
+    SECTION("rebase conflict falls back to merge and keeps ours")
+    {
+        GitRepository author;
+        author.setDirectory(QDir(authorPath));
+        author.initRepository();
+        author.setAccount(&account);
+        author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+        writeFile(authorPath, QStringLiteral("shared.txt"), QByteArray("base\n"));
+        CHECK_NOTHROW(author.commitAll(QStringLiteral("Initial"), QStringLiteral("baseline")));
+        auto initialPushFuture = author.push();
+        REQUIRE(AsyncFuture::waitForFinished(initialPushFuture, defaultTimeout));
+        REQUIRE(!initialPushFuture.result().hasError());
+
+        GitRepository peer;
+        peer.setDirectory(QDir(peerPath));
+        peer.setAccount(&account);
+        waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+
+        writeFile(authorPath, QStringLiteral("shared.txt"), QByteArray("ours\n"));
+        CHECK_NOTHROW(author.commitAll(QStringLiteral("Author Ours"), QStringLiteral("local conflicting change")));
+
+        writeFile(peerPath, QStringLiteral("shared.txt"), QByteArray("theirs\n"));
+        CHECK_NOTHROW(peer.commitAll(QStringLiteral("Peer Theirs"), QStringLiteral("remote conflicting change")));
+        auto peerPushFuture = peer.push();
+        REQUIRE(AsyncFuture::waitForFinished(peerPushFuture, defaultTimeout));
+        REQUIRE(!peerPushFuture.result().hasError());
+
+        auto pullFuture = author.pullRebaseOrMerge();
+        REQUIRE(AsyncFuture::waitForFinished(pullFuture, defaultTimeout));
+        INFO("pullRebaseOrMerge error:" << pullFuture.result().errorMessage().toStdString());
+        REQUIRE(!pullFuture.result().hasError());
+        CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::MergeCommitCreated);
+        CHECK(headParentCount(authorPath) == 2);
+        CHECK(readFile(authorPath, QStringLiteral("shared.txt")) == QByteArray("ours\n"));
+    }
+}
+
 
 TEST_CASE("GitRepository testRemoteConnection should work", "[GitRepository]") {
 
