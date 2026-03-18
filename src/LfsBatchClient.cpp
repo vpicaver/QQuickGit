@@ -908,7 +908,6 @@ void LfsBatchClient::applyHeaders(QNetworkRequest* request, const QMap<QByteArra
 
 Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, const QString& remoteName)
 {
-    qDebug() << "[LFS endpoint] resolve begin" << "remote=" << remoteName;
     if (!repo) {
         return Monad::Result<QUrl>(QStringLiteral("Missing git repository"),
                                    static_cast<int>(LfsFetchErrorCode::NoRemote));
@@ -930,7 +929,6 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
         : QString();
     if (lfsUrlResult == GIT_OK && !lfsUrlValue.isEmpty()) {
         const QUrl configured = QUrl(lfsUrlValue);
-        qDebug() << "[LFS endpoint] using lfs.url =" << configured;
         git_buf_dispose(&lfsUrlBuf);
         return Monad::Result<QUrl>(configured);
     }
@@ -954,7 +952,6 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
         : QString();
     if (remoteLfsResult == GIT_OK && !remoteLfsValue.isEmpty()) {
         const QUrl configuredRemote = QUrl(remoteLfsValue);
-        qDebug() << "[LFS endpoint] using" << lfsUrlKey << "=" << configuredRemote;
         git_buf_dispose(&remoteLfsUrlBuf);
         return Monad::Result<QUrl>(configuredRemote);
     }
@@ -977,12 +974,10 @@ Monad::Result<QUrl> LfsBatchClient::resolveLfsEndpoint(git_repository* repo, con
     const QString remoteUrlValue = QString::fromUtf8(remoteUrl);
     QUrl url = GitUtilities::lfsEndpointFromRemoteUrl(remoteUrlValue);
     if (!isHttpUrl(url)) {
-        qDebug() << "[LFS endpoint] non-http remote url:" << remoteUrlValue;
         return Monad::Result<QUrl>(QStringLiteral("Unsupported LFS remote URL"),
                                    static_cast<int>(LfsFetchErrorCode::NoRemote));
     }
 
-    qDebug() << "[LFS endpoint] derived from remote url:" << url << "from" << remoteUrlValue;
     return Monad::Result<QUrl>(url);
 }
 

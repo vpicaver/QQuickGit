@@ -852,7 +852,6 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
                                                         const QString& refSpec,
                                                         const QString& remoteName)
 {
-    qDebug() << "[LFS push-plan] begin" << "refSpec=" << refSpec << "remote=" << remoteName;
     if (!repo) {
         return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to open repository for LFS push upload"));
     }
@@ -870,8 +869,6 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     }
 
     const QVector<git_oid> sourceCommitOids = resolvePushSourceCommits(repo, parsed.sourceRef);
-    qDebug() << "[LFS push-plan] source commits:" << sourceCommitOids.size()
-             << "sourceRef=" << parsed.sourceRef;
     if (sourceCommitOids.isEmpty()) {
         if (hasRefGlobPattern(parsed.sourceRef)) {
             // Wildcard refspecs may legitimately match no local refs.
@@ -894,7 +891,6 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     }
 
     const bool listedAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName);
-    qDebug() << "[LFS push-plan] listed advertised tips:" << listedAdvertisedTips;
     if (!listedAdvertisedTips) {
         // Fall back to local tracking refs only when advertised refs are unavailable.
         // Advertised refs are authoritative for push reachability and avoid stale local
@@ -961,10 +957,6 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         plan.objects.push_back(LfsBatchClient::ObjectSpec{pointer.oid, pointer.size});
     }
 
-    qDebug() << "[LFS push-plan] walked commits:" << walkedCommitCount
-             << "pointer oids:" << pointersByOid.size()
-             << "batch objects:" << plan.objects.size();
-
     return Monad::Result<LfsPushUploadPlan>(plan);
 }
 
@@ -974,10 +966,6 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                                              std::shared_ptr<LfsBatchClient> client,
                                              QObject* context)
 {
-    qDebug() << "[LFS upload-actions] start"
-             << "gitDirPath=" << gitDirPath
-             << "pointerDetails=" << pointersByOid.size()
-             << "batchObjects=" << objects.size();
     struct UploadTask {
         QString oid;
         qint64 size = -1;
@@ -989,11 +977,6 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
 
     QVector<UploadTask> tasks;
     for (const auto& object : objects) {
-        qDebug() << "[LFS upload-actions] object"
-                 << "oid=" << object.oid
-                 << "errCode=" << object.errorCode
-                 << "hasUpload=" << object.actions.contains(QStringLiteral("upload"))
-                 << "hasVerify=" << object.actions.contains(QStringLiteral("verify"));
         if (object.errorCode != 0) {
             return AsyncFuture::completed(Monad::ResultBase(
                 QStringLiteral("LFS batch upload failed for oid %1: %2")
@@ -1018,7 +1001,6 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
     }
 
     if (tasks.isEmpty()) {
-        qDebug() << "[LFS upload-actions] no upload/verify tasks returned by server";
         return AsyncFuture::completed(Monad::ResultBase());
     }
 
@@ -1037,10 +1019,6 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
 
         const UploadTask task = taskList->at(*nextIndex);
         (*nextIndex)++;
-        qDebug() << "[LFS upload-actions] running task"
-                 << "oid=" << task.oid
-                 << "upload=" << task.hasUpload
-                 << "verify=" << task.hasVerify;
 
         LfsPointer pointer = pointersByOid.value(task.oid);
         if (!pointer.isValid()) {
@@ -1097,7 +1075,6 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                     deferred.complete(uploadResult);
                     return;
                 }
-                qDebug() << "[LFS upload-actions] upload succeeded";
                 runVerify();
             });
     };
@@ -1146,7 +1123,6 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                 .context(context, [batchFuture, plan, client, context]() -> GitRepository::GitFuture {
                     const auto batchResult = batchFuture.result();
                     if (batchResult.hasError()) {
-                        qDebug() << "[LFS pre-push] batch error:" << batchResult.errorMessage();
                         return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
                     }
 
@@ -1857,7 +1833,6 @@ public:
                                           total);
             reportProgress(progress);
         }
-        qDebug() << "Current progress:" << bytes << current << total << current / static_cast<double>(total) * 100;
         return GIT_OK;
     }
 
@@ -2464,8 +2439,6 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         throw std::runtime_error(errorMessage.toStdString());
                     }
 
-                    qDebug() << "Finished checking out!";
-
                     return Result<Repo>(Repo({repo}));
                 } else {
                     if(dir.isEmpty()) {
@@ -2623,7 +2596,7 @@ void GitRepository::commitAll(const QString &subject,
 
     int error = git_revparse_ext(&parent, &ref, d->repo, "HEAD");
     if (error == GIT_ENOTFOUND) {
-        printf("HEAD not found. Creating first commit\n");
+        // printf("HEAD not found. Creating first commit\n");
     } else if (error != 0) {
         check(error);
     } else if (parent != nullptr) {
@@ -2637,7 +2610,7 @@ void GitRepository::commitAll(const QString &subject,
     // libgit2 filter driver is bypassed by index-wide staging paths.
     if (d->mLfsStore) {
         const QDir workDir = d->mDirectory;
-        for (const QString& relativePath : stagedPaths) {
+        for (const QString& relativePath : std::as_const(stagedPaths)) {
             const QByteArray pathUtf8 = relativePath.toUtf8();
             const git_index_entry* existing = git_index_get_bypath(index, pathUtf8.constData(), 0);
             if (!existing || !existing->path) {
@@ -2752,13 +2725,10 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                         const bool unsupportedLfsRemote =
                             prePushResult.errorMessage() == QStringLiteral("Unsupported LFS remote URL");
                         if (unsupportedLfsRemote) {
-                            qWarning() << "[LFS push] skipping LFS upload for unsupported remote URL; continuing with git push";
+                            qDebug() << "[LFS push] skipping LFS upload for unsupported remote URL; continuing with git push";
                         } else {
-                            qDebug() << "[LFS push] pre-push upload failed:" << prePushResult.errorMessage();
                             return AsyncFuture::completed(prePushResult);
                         }
-                    } else {
-                        qDebug() << "[LFS push] pre-push upload complete";
                     }
 
                     return QtConcurrent::run([=]() {
@@ -3165,11 +3135,12 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                (analysis & GIT_MERGE_ANALYSIS_FASTFORWARD &&
                 !(preference & GIT_MERGE_PREFERENCE_NO_FASTFORWARD))) {
         const git_oid *target_oid;
-        if (analysis & GIT_MERGE_ANALYSIS_UNBORN) {
-            printf("Unborn\n");
-        } else {
-            printf("Fast-forward\n");
-        }
+
+        // if (analysis & GIT_MERGE_ANALYSIS_UNBORN) {
+        //     printf("Unborn\n");
+        // } else {
+        //     printf("Fast-forward\n");
+        // }
 
         // Since this is a fast-forward, there can be only one merge head
         target_oid = git_annotated_commit_id(commitsToMerge.at(0));

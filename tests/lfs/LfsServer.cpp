@@ -151,7 +151,6 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
     const int bodyStart = headerEnd + 4;
     const int receivedBodyBytes = request.size() - bodyStart;
     if (contentLength >= 0 && receivedBodyBytes < contentLength) {
-        qDebug() << "[LfsServer] waiting for full body" << receivedBodyBytes << "/" << contentLength;
         return false;
     }
 
@@ -160,17 +159,10 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
     const QByteArray path = firstLine.split(' ').value(1).trimmed();
     const QByteArray body = request.mid(bodyStart, contentLength >= 0 ? contentLength : receivedBodyBytes);
 
-    qDebug() << "[LfsServer] request"
-             << method
-             << path
-             << "bodyBytes=" << body.size();
-
     if (path.contains("/objects/batch")) {
         const bool isUpload = body.contains("\"operation\":\"upload\"");
         if (isUpload) {
             mUploadBatchRequestCount++;
-            qDebug() << "[LfsServer] upload batch request count =" << mUploadBatchRequestCount
-                     << "expectedUploads=" << mExpectedUploads.keys();
             const QString baseUrl = QStringLiteral("http://127.0.0.1:%1").arg(mServer.serverPort());
             QJsonArray responseObjects;
             const QJsonArray requestObjects = requestedObjectsFromBatchBody(body);
@@ -212,16 +204,11 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         }
 
         mDownloadBatchRequestCount++;
-        qDebug() << "[LfsServer] download batch request count =" << mDownloadBatchRequestCount;
         const QString requestedOid = firstRequestedOidFromBatchBody(body);
         const QString oid = (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid))
             ? requestedOid
             : (mDownloadObjects.isEmpty() ? QString() : mDownloadObjects.constBegin().key());
         const QByteArray objectBytes = oid.isEmpty() ? QByteArray() : mDownloadObjects.value(oid);
-
-        qDebug() << "[LfsServer] download batch requested oid =" << requestedOid
-                 << "served oid =" << oid
-                 << "bytes =" << objectBytes.size();
 
         if (oid.isEmpty() || objectBytes.isEmpty()) {
             respond(socket,
@@ -255,8 +242,6 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
                 mUploadedOids.insert(oid);
             }
         }
-        qDebug() << "[LfsServer] upload object request count =" << mUploadRequestCount
-                 << "receivedBytes=" << body.size();
         respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));
         return true;
     }
@@ -265,7 +250,6 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
     const int objectPrefixIndex = path.indexOf(objectPathPrefix);
     if (objectPrefixIndex >= 0) {
         mDownloadObjectRequestCount++;
-        qDebug() << "[LfsServer] download object request count =" << mDownloadObjectRequestCount;
         const QByteArray oidBytes = path.mid(objectPrefixIndex + objectPathPrefix.size());
         const QString requestedOid = QString::fromUtf8(oidBytes);
         if (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid)) {
