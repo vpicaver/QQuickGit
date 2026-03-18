@@ -1111,10 +1111,6 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                                              const QString& remoteName,
                                              QObject* context)
 {
-    qDebug() << "[LFS pre-push] begin"
-             << "repoPath=" << repoPath
-             << "refSpec=" << refSpec
-             << "remote=" << remoteName;
     auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName]() {
         return mtry([repoPath, refSpec, remoteName]() -> Monad::Result<LfsPushUploadPlan> {
             git_repository* repo = nullptr;
@@ -1140,9 +1136,6 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
             }
 
             const auto plan = planResult.value();
-            qDebug() << "[LFS pre-push] plan ready"
-                     << "gitDirPath=" << plan.gitDirPath
-                     << "objects=" << plan.objects.size();
             if (plan.objects.isEmpty()) {
                 return AsyncFuture::completed(Monad::ResultBase());
             }
@@ -1156,9 +1149,6 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                         qDebug() << "[LFS pre-push] batch error:" << batchResult.errorMessage();
                         return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
                     }
-
-                    qDebug() << "[LFS pre-push] batch success"
-                             << "response objects=" << batchResult.value().objects.size();
 
                     return runLfsUploadActions(plan.gitDirPath,
                                                plan.pointersByOid,
@@ -2753,10 +2743,6 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto fixRemote = fixUpRemote(remote);
-            qDebug() << "[LFS push] begin"
-                     << "repoDir=" << d->mDirectory.absolutePath()
-                     << "refSpec=" << fixRefSpec
-                     << "remote=" << fixRemote;
             auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this);
 
             return AsyncFuture::observe(prePushUploadFuture)
