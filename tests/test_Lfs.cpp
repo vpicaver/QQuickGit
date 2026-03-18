@@ -594,7 +594,6 @@ private:
 
                 if (method == "GET" && path.startsWith("/test.git/info/refs?service=git-receive-pack")) {
                     mAdvertiseRequestCount++;
-                    qDebug() << "[Test GitAdvertiseAuthServer] request" << firstLine;
 
                     QByteArray authHeaderValue;
                     for (const QByteArray& rawLine : lines) {
@@ -617,7 +616,6 @@ private:
                     if (mRequireInitialChallenge && !mIssuedChallenge) {
                         mIssuedChallenge = true;
                         mUnauthorizedAdvertiseRequestCount++;
-                        qDebug() << "[Test GitAdvertiseAuthServer] issuing initial 401 challenge";
                         respond(socket,
                                 401,
                                 QByteArray("Unauthorized"),
@@ -629,7 +627,6 @@ private:
 
                     if (authHeaderValue == mRequiredAuthHeader) {
                         mAuthorizedAdvertiseRequestCount++;
-                        qDebug() << "[Test GitAdvertiseAuthServer] authorized advertise request";
                         respond(socket,
                                 200,
                                 QByteArray("OK"),
@@ -637,8 +634,6 @@ private:
                                 advertiseBody(mAdvertisedOid));
                     } else {
                         mUnauthorizedAdvertiseRequestCount++;
-                        qDebug() << "[Test GitAdvertiseAuthServer] unauthorized advertise request authHeader="
-                                 << QString::fromUtf8(authHeaderValue);
                         respond(socket,
                                 401,
                                 QByteArray("Unauthorized"),

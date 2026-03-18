@@ -212,7 +212,6 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                 QFile file(cloneDir.absoluteFilePath(".gitignore"));
                 file.open(QFile::WriteOnly);
                 file.write("*.ignore\n");
-                qDebug() << "Ignore file:" << file.fileName();
             }
 
             // Create an .ignore file
