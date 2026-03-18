@@ -2721,14 +2721,10 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             return AsyncFuture::observe(prePushUploadFuture)
                 .context(this, [=]() -> GitFuture {
                     const auto prePushResult = prePushUploadFuture.result();
-                    if (prePushResult.hasError()) {
-                        const bool unsupportedLfsRemote =
-                            prePushResult.errorMessage() == QStringLiteral("Unsupported LFS remote URL");
-                        if (unsupportedLfsRemote) {
-                            qDebug() << "[LFS push] skipping LFS upload for unsupported remote URL; continuing with git push";
-                        } else {
-                            return AsyncFuture::completed(prePushResult);
-                        }
+                    const bool unsupportedLfsRemote = prePushResult.hasError()
+                        && prePushResult.errorMessage() == QStringLiteral("Unsupported LFS remote URL");
+                    if (prePushResult.hasError() && !unsupportedLfsRemote) {
+                        return AsyncFuture::completed(prePushResult);
                     }
 
                     return QtConcurrent::run([=]() {
@@ -2766,6 +2762,10 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
                             git_remote_free(gitRemote);
 
+                            if (unsupportedLfsRemote) {
+                                return ResultBase(QStringLiteral("LFS upload skipped: remote URL does not support LFS"),
+                                                  ResultBase::Warning);
+                            }
                             return ResultBase();
                         });
                     });
@@ -3482,7 +3482,6 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 
         auto createMergeCommit = [&index, &commitsToMerge, create_merge_commit]() {
             create_merge_commit(index, commitsToMerge);
-            printf("Merge made\n");
             return MergeResult(MergeResult::MergeCommitCreated);
         };
 
