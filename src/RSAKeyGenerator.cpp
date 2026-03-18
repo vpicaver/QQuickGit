@@ -9,6 +9,7 @@
 #include <openssl/x509.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+#include <openssl/core_names.h>
 
 //Qt includes
 #include <QtGlobal>
@@ -70,7 +71,8 @@ int pem_to_openssh(const char* pemPublicKey,  const char* description, const cha
     FILE* pFile = NULL;
     FILE* openSSHFile = NULL;
     EVP_PKEY *pPubKey = NULL;
-    RSA* pRsa = NULL;
+    BIGNUM *n = NULL;
+    BIGNUM *e = NULL;
     BIO *bio, *b64;
 
     ERR_load_crypto_strings();
@@ -99,18 +101,15 @@ int pem_to_openssh(const char* pemPublicKey,  const char* description, const cha
         goto error;
     }
 
-    pRsa = EVP_PKEY_get1_RSA(pPubKey);
-    if (!pRsa)
+    if (!EVP_PKEY_get_bn_param(pPubKey, OSSL_PKEY_PARAM_RSA_N, &n) ||
+        !EVP_PKEY_get_bn_param(pPubKey, OSSL_PKEY_PARAM_RSA_E, &e))
     {
-        printf("Failed to get RSA public key : %s\n", ERR_error_string(ERR_get_error(), NULL));
+        printf("Failed to get RSA key parameters: %s\n", ERR_error_string(ERR_get_error(), NULL));
         iRet = 5;
         goto error;
     }
 
     // reading the modulus
-    const BIGNUM *n;
-    const BIGNUM *e;
-    RSA_get0_key(pRsa, &n, &e, NULL);
     nLen = BN_num_bytes(n);
     nBytes = (unsigned char*) malloc(nLen);
     BN_bn2bin(n, nBytes);
@@ -153,8 +152,6 @@ int pem_to_openssh(const char* pemPublicKey,  const char* description, const cha
 error:
     if (pFile)
         fclose(pFile);
-    if (pRsa)
-        RSA_free(pRsa);
     if (pPubKey)
         EVP_PKEY_free(pPubKey);
     if (nBytes)
@@ -163,6 +160,10 @@ error:
         free(eBytes);
     if (pEncoding)
         free(pEncoding);
+    if (n)
+        BN_free(n);
+    if (e)
+        BN_free(e);
 
     EVP_cleanup();
     ERR_free_strings();
@@ -319,11 +320,6 @@ void RSAKeyGenerator::generate()
 {
     int rc;
 
-    using BN_ptr = std::unique_ptr<BIGNUM, decltype(&::BN_free)>;
-    using RSA_ptr = std::unique_ptr<RSA, decltype(&::RSA_free)>;
-    using EVP_KEY_ptr = std::unique_ptr<EVP_PKEY, decltype(&::EVP_PKEY_free)>;
-    using BIO_FILE_ptr = std::unique_ptr<BIO, decltype(&::BIO_free)>;
-
     auto dir = appKeyDirectory();
     dir.mkpath(".");
 
@@ -332,21 +328,22 @@ void RSAKeyGenerator::generate()
     QByteArray publicKeyFilename = dir.absoluteFilePath(defaultPublicKeyFilename()).toLocal8Bit();
 
     { //Scoped here, because destroying the file handle flushes (writes) it to disk
-        RSA_ptr rsa(RSA_new(), ::RSA_free);
-        BN_ptr bn(BN_new(), ::BN_free);
+        using EVP_PKEY_CTX_ptr = std::unique_ptr<EVP_PKEY_CTX, decltype(&::EVP_PKEY_CTX_free)>;
+        using EVP_KEY_ptr = std::unique_ptr<EVP_PKEY, decltype(&::EVP_PKEY_free)>;
+        using BIO_FILE_ptr = std::unique_ptr<BIO, decltype(&::BIO_free)>;
 
-        rc = BN_set_word(bn.get(), RSA_F4);
+        EVP_PKEY_CTX_ptr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL), ::EVP_PKEY_CTX_free);
+
+        rc = EVP_PKEY_keygen_init(ctx.get());
         assert(rc == 1);
 
-        // Generate key
-        rc = RSA_generate_key_ex(rsa.get(), 3072, bn.get(), NULL);
-        assert(rc == 1);
+        rc = EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 3072);
+        assert(rc > 0);
 
-        // Convert RSA to PKEY
-        EVP_KEY_ptr pkey(EVP_PKEY_new(), ::EVP_PKEY_free);
-        rc = EVP_PKEY_set1_RSA(pkey.get(), rsa.get());
+        EVP_PKEY* pkey_raw = nullptr;
+        rc = EVP_PKEY_generate(ctx.get(), &pkey_raw);
         assert(rc == 1);
-
+        EVP_KEY_ptr pkey(pkey_raw, ::EVP_PKEY_free);
 
         BIO_FILE_ptr pem1(BIO_new_file(publicKeyPEMFilename, "w"), ::BIO_free);
         BIO_FILE_ptr pem5(BIO_new_file(privateKeyFilename, "w"), ::BIO_free);
@@ -355,8 +352,8 @@ void RSAKeyGenerator::generate()
         rc = PEM_write_bio_PUBKEY(pem1.get(), pkey.get());
         assert(rc == 1);
 
-        // Write private key in Traditional PEM
-        rc = PEM_write_bio_RSAPrivateKey(pem5.get(), rsa.get(), NULL, NULL, 0, NULL, NULL);
+        // Write private key in traditional PEM format for SSH compatibility
+        rc = PEM_write_bio_PrivateKey_traditional(pem5.get(), pkey.get(), NULL, NULL, 0, NULL, NULL);
         assert(rc == 1);
     }
 

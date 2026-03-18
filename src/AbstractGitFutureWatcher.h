@@ -50,7 +50,7 @@ protected:
 protected:
     template<typename Future>
     void watchProgress(Future future) {
-        watchProgress(future, [=]() {
+        watchProgress(future, [future, this]() {
             watchFuture(future,
                         [this](const Monad::ResultBase& result)
                         {

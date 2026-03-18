@@ -188,7 +188,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
 
         {
             QFile file(cloneDir.absoluteFilePath("test.txt"));
-            file.open(QFile::WriteOnly);
+            REQUIRE(file.open(QFile::WriteOnly));
             file.write("Hello world!\n");
         }
 
@@ -198,7 +198,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
 
         {
             QFile file(cloneDir.absoluteFilePath("test2.txt"));
-            file.open(QFile::WriteOnly);
+            REQUIRE(file.open(QFile::WriteOnly));
             file.write("Hello world! 2\n");
         }
 
@@ -210,14 +210,14 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
             // Add *.ignore pattern to .gitignore
             {
                 QFile file(cloneDir.absoluteFilePath(".gitignore"));
-                file.open(QFile::WriteOnly);
+                REQUIRE(file.open(QFile::WriteOnly));
                 file.write("*.ignore\n");
             }
 
             // Create an .ignore file
             for(int i = 0; i < 10; i++) {
                 QFile file(cloneDir.absoluteFilePath(QString("test%1.ignore").arg(i)));
-                file.open(QFile::WriteOnly);
+                REQUIRE(file.open(QFile::WriteOnly));
                 file.write("This should be ignored!\n");
             }
 
@@ -285,7 +285,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
 
                 {
                     QFile file(cloneDir.absoluteFilePath("test2.txt"));
-                    file.open(QFile::Append);
+                    REQUIRE(file.open(QFile::Append));
                     file.write("sauce\n");
                 }
 
@@ -302,7 +302,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                     cloneDir.mkdir("test");
                     {
                         QFile file(cloneDir.absoluteFilePath("test/test3.txt"));
-                        file.open(QFile::WriteOnly);
+                        REQUIRE(file.open(QFile::WriteOnly));
                         file.write("sauce2\n");
                     }
 
@@ -413,7 +413,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                     cloneDir.mkdir("test");
                     {
                         QFile file(cloneDir.absoluteFilePath("test/test4.txt"));
-                        file.open(QFile::WriteOnly);
+                        REQUIRE(file.open(QFile::WriteOnly));
                         file.write("sauce3\n");
                     }
 
@@ -427,7 +427,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                     cloneDir2.mkdir("test");
                     {
                         QFile file(cloneDir2.absoluteFilePath("test/test3.txt"));
-                        file.open(QFile::WriteOnly);
+                        REQUIRE(file.open(QFile::WriteOnly));
                         file.write("sauce2\n");
                     }
 
@@ -490,7 +490,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                 cloneDir2.mkdir("test");
                 {
                     QFile file(cloneDir2.absoluteFilePath("test/test3.txt"));
-                    file.open(QFile::WriteOnly);
+                    REQUIRE(file.open(QFile::WriteOnly));
                     file.write("sauce2\n");
                 }
 
@@ -506,7 +506,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                     cloneDir.mkdir("test");
                     {
                         QFile file(cloneDir.absoluteFilePath("test/test4.txt"));
-                        file.open(QFile::WriteOnly);
+                        REQUIRE(file.open(QFile::WriteOnly));
                         file.write("sauce3\n");
                     }
 
@@ -552,7 +552,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
                     cloneDir.mkdir("test");
                     {
                         QFile file(cloneDir.absoluteFilePath("test/test3.txt"));
-                        file.open(QFile::WriteOnly);
+                        REQUIRE(file.open(QFile::WriteOnly));
                         file.write("sauce3\n");
                     }
 
@@ -581,7 +581,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
 
         {
             QFile file(cloneDir.absoluteFilePath("test8.txt"));
-            file.open(QFile::WriteOnly);
+            REQUIRE(file.open(QFile::WriteOnly));
             file.write("Hello world :D :D!\n");
         }
 
@@ -618,7 +618,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
     {
         QFile file(tempDir.absoluteFilePath("test.txt"));
-        file.open(QFile::WriteOnly);
+        REQUIRE(file.open(QFile::WriteOnly));
         file.write("Hello world!\n");
     }
 
@@ -638,7 +638,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
     SECTION("Merge") {
         {
             QFile file(tempDir.absoluteFilePath("test2.txt"));
-            file.open(QFile::WriteOnly);
+            REQUIRE(file.open(QFile::WriteOnly));
             file.write("Hello world 2!\n");
         }
 
@@ -660,7 +660,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
             {
                 QFile file(tempDir.absoluteFilePath("test3.txt"));
-                file.open(QFile::WriteOnly);
+                REQUIRE(file.open(QFile::WriteOnly));
                 file.write("Hello world 3!\n");
             }
 
@@ -675,7 +675,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         SECTION("Test merge conflicts") {
             {
                 QFile file(tempDir.absoluteFilePath("test.txt"));
-                file.open(QFile::WriteOnly);
+                REQUIRE(file.open(QFile::WriteOnly));
                 file.write(":D Hello world!\n");
             }
 
@@ -686,7 +686,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
             {
                 QFile file(tempDir.absoluteFilePath("test.txt"));
-                file.open(QFile::WriteOnly);
+                REQUIRE(file.open(QFile::WriteOnly));
                 file.write(":( Hello world!\n");
             }
 
@@ -697,7 +697,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
             CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
             QFile file(tempDir.absoluteFilePath("test.txt"));
-            file.open(QFile::ReadOnly);
+            REQUIRE(file.open(QFile::ReadOnly));
             auto fileContent = file.readAll();
             CHECK(fileContent.toStdString() == ":( Hello world!\n");
         }
