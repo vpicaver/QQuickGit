@@ -3043,7 +3043,6 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
         }
         err = git_checkout_tree(repo, target, &ff_checkout_options);
         if (err != 0) {
-            fprintf(stderr, "failed to checkout HEAD reference\n");
             return -1;
         }
 
