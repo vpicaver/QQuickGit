@@ -312,6 +312,11 @@ int stageFilteredStatusEntries(git_repository* repo,
         if (rawPath == nullptr || *rawPath == '\0') {
             return;
         }
+        // Skip directory entries — git_index_add_bypath only accepts file paths
+        const size_t len = std::strlen(rawPath);
+        if (len > 0 && rawPath[len - 1] == '/') {
+            return;
+        }
         const int err = git_index_add_bypath(index, rawPath);
         if (err != GIT_OK) {
             throw std::runtime_error(gitErrorMessageWithPrefix(QStringLiteral("Failed to add path to index")).toStdString());
