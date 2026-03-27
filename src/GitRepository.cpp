@@ -18,6 +18,7 @@
 //LibGit2 includes
 #include "git2.h"
 #include <git2/index.h>
+#include <git2/sys/errors.h>
 #include <libssh2.h>
 
 //Qt includes
@@ -1795,7 +1796,11 @@ public:
                     "x-access-token",
                     callbackPayload->httpsToken.toUtf8().constData());
             }
-            return GIT_PASSTHROUGH;
+            // No token — signal HTTP 401 so isHttpAuthFailure() can detect it
+            // cleanly instead of letting libgit2 retry and produce a misleading
+            // SSL or network error.
+            git_error_set_str(GIT_ERROR_HTTP, "401 Unauthorized: no access token");
+            return GIT_EAUTH;
         }
 
         if(allowed_types & GIT_CREDENTIAL_SSH_KEY) {
