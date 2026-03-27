@@ -25,6 +25,10 @@ namespace QQuickGit {
 class LfsStore;
 class LfsPolicy;
 
+struct QQUICKGIT_EXPORT GitCredentials {
+    QString httpsToken;   // empty = SSH-only path (default, no behaviour change)
+};
+
 class QQUICKGIT_EXPORT GitRepository : public QObject
 {
     Q_OBJECT
@@ -68,7 +72,8 @@ public:
     enum class GitErrorCode : int {
         PushRejectedByRemoteAdvance = Monad::ResultBase::CustomError + 1,
         PushWildcardRefSpecUnsupported = Monad::ResultBase::CustomError + 2,
-        PushFailed = Monad::ResultBase::CustomError + 3
+        PushFailed = Monad::ResultBase::CustomError + 3,
+        HttpAuthFailed = Monad::ResultBase::CustomError + 4
     };
     Q_ENUM(GitErrorCode)
 
@@ -109,6 +114,8 @@ public:
 
     Account* account() const;
     void setAccount(Account* account);
+
+    void setCredentials(const GitCredentials& credentials);
 
     void initRepository();
     void setLfsPolicy(const LfsPolicy& policy);

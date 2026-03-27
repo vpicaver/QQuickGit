@@ -438,6 +438,7 @@ struct SshCallbackPayload {
     int agentMaxAttempts = 1;
     int agentAttempts = 0;
     bool allowAgent = true;
+    QString httpsToken;
 };
 
 struct PrePushCredentialPayload {
@@ -1733,6 +1734,7 @@ public:
     QPointer<Account> mAccount; //!<
     LfsPolicy mLfsPolicy;
     std::shared_ptr<LfsStore> mLfsStore;
+    GitCredentials m_credentials;
 
     ~GitRepositoryData() {
         if(repo) {
@@ -1769,6 +1771,17 @@ public:
                                   void *payload)
     {
         const char *userName = (username_from_url && *username_from_url) ? username_from_url : "git";
+
+        if (allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) {
+            auto callbackPayload = reinterpret_cast<SshCallbackPayload*>(payload);
+            if (callbackPayload && !callbackPayload->httpsToken.isEmpty()) {
+                return git_credential_userpass_plaintext_new(
+                    out,
+                    "x-access-token",
+                    callbackPayload->httpsToken.toUtf8().constData());
+            }
+            return GIT_PASSTHROUGH;
+        }
 
         if(allowed_types & GIT_CREDENTIAL_SSH_KEY) {
             auto callbackPayload = reinterpret_cast<SshCallbackPayload*>(payload);
@@ -2283,12 +2296,13 @@ bool GitRepository::isRepository(const QDir& dir)
 namespace {
 GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
                                                const QString& remote,
-                                               std::function<void(const ProgressState&)> reportProgress)
+                                               std::function<void(const ProgressState&)> reportProgress,
+                                               const GitCredentials& credentials)
 {
     const QByteArray path = repositoryDir.absolutePath().toLocal8Bit();
     const QString fixedRemote = remote;
-    return QtConcurrent::run([path, fixedRemote, reportProgress]() mutable {
-        return mtry([path, fixedRemote, reportProgress]() mutable -> ResultBase {
+    return QtConcurrent::run([path, fixedRemote, reportProgress, credentials]() mutable {
+        return mtry([path, fixedRemote, reportProgress, credentials]() mutable -> ResultBase {
             git_repository* repo = nullptr;
             GitRepositoryData::check(git_repository_open(&repo, path));
             std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
@@ -2305,6 +2319,7 @@ GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
             callbackPayload.allowAgent = true;
             callbackPayload.agentMaxAttempts = 1;
             callbackPayload.agentAttempts = 0;
+            callbackPayload.httpsToken = credentials.httpsToken;
             options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
             GitRepositoryData::check(git_remote_fetch(gitRemote, nullptr, &options, nullptr));
@@ -2334,7 +2349,8 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
             git_repository* repo = nullptr;
         };
 
-        auto future = QtConcurrent::run([dir, url, progressInterface]() mutable ->Result<Repo> {
+        const GitCredentials credentials = d->m_credentials;   // snapshot on main thread
+        auto future = QtConcurrent::run([dir, url, progressInterface, credentials]() mutable ->Result<Repo> {
             return mtry([=]() mutable ->Result<Repo> {
                 progressInterface.setProgressValueAndText(progressInterface.progressValue() + 1,
                                                           QStringLiteral("Cloning from ") + url.toString());
@@ -2391,6 +2407,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         callbackPayload.allowAgent = allowAgent;
                         callbackPayload.agentMaxAttempts = 1;
                         callbackPayload.agentAttempts = 0;
+                        callbackPayload.httpsToken = credentials.httpsToken;
 
                         clone_opts.fetch_opts.callbacks.payload = static_cast<void*>(&callbackPayload);
 
@@ -2721,6 +2738,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto fixRemote = fixUpRemote(remote);
+            const GitCredentials credentials = d->m_credentials;   // snapshot on main thread
             auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this);
 
             return AsyncFuture::observe(prePushUploadFuture)
@@ -2756,6 +2774,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                             callbackPayload.allowAgent = true;
                             callbackPayload.agentMaxAttempts = 1;
                             callbackPayload.agentAttempts = 0;
+                            callbackPayload.httpsToken = credentials.httpsToken;
                             options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
                             const int pushError = git_remote_push(gitRemote, &refspecs, &options);
@@ -2790,7 +2809,8 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                 fixedRemote,
                 [progressInterface](const ProgressState& progress) mutable {
                     setProgress(&progressInterface, progress);
-                });
+                },
+                d->m_credentials);
             AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
                 if(!fetchFuture.progressText().isEmpty()) {
                     setProgress(&progressInterface, fetchFuture.progressText());
@@ -2840,7 +2860,8 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                 fixedRemote,
                 [progressInterface](const ProgressState& progress) mutable {
                     setProgress(&progressInterface, progress);
-                });
+                },
+                d->m_credentials);
             AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
                 if(!fetchFuture.progressText().isEmpty()) {
                     setProgress(&progressInterface, fetchFuture.progressText());
@@ -2939,7 +2960,8 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
                 fixUpRemote(remote),
                 [progressInterface](const ProgressState& progress) mutable {
                     setProgress(&progressInterface, progress);
-                });
+                },
+                d->m_credentials);
 
             return AsyncFuture::observe(fetchFuture)
                 .context(this, [=]() mutable -> GitFuture {
@@ -4424,4 +4446,9 @@ void GitRepository::setAccount(Account* account) {
 
 Account* GitRepository::account() const {
     return d->mAccount;
+}
+
+void GitRepository::setCredentials(const GitCredentials& credentials)
+{
+    d->m_credentials = credentials;
 }
