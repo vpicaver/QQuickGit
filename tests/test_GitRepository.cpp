@@ -847,6 +847,13 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
         CHECK(headResult.value().isEmpty());
     }
 
+    SECTION("headCommitMessage should be empty when repository has no commits")
+    {
+        auto messageResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!messageResult.hasError());
+        CHECK(messageResult.value().isEmpty());
+    }
+
     Account account;
     account.setName("Sauce");
     account.setEmail("sauce@email.com");
@@ -864,6 +871,14 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
     REQUIRE(!firstHeadResult.value().isEmpty());
     const QString firstHead = firstHeadResult.value();
     CHECK(firstHead.size() == 40);
+
+    SECTION("headCommitMessage should return the most recent commit message")
+    {
+        auto messageResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!messageResult.hasError());
+        // commitAll(subject, description) stores "subject\n\ndescription"; strip trailing newline
+        CHECK(messageResult.value().trimmed() == QStringLiteral("first\n\nfirst commit"));
+    }
 
     SECTION("diffPathsBetweenCommits should include root commit files")
     {
@@ -892,6 +907,13 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
     const QString secondHead = secondHeadResult.value();
     CHECK(secondHead.size() == 40);
     CHECK(secondHead != firstHead);
+
+    SECTION("headCommitMessage should update to the latest commit after a new commit")
+    {
+        auto messageResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!messageResult.hasError());
+        CHECK(messageResult.value().trimmed() == QStringLiteral("second\n\nsecond commit"));
+    }
 
     SECTION("diffPathsBetweenCommits should include changed paths between commits")
     {

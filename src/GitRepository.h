@@ -158,6 +158,7 @@ public:
     Q_INVOKABLE AheadBehindFuture remoteAheadBehindCommitCounts(const QString& remote = QString(),
                                                                 const QString& branchName = QString()) const;
     static Monad::ResultString headCommitOid(const QString& repositoryPath);
+    static Monad::ResultString headCommitMessage(const QString& repositoryPath);
     static Monad::ResultString mergeBaseCommitOid(const QString& repositoryPath,
                                                   const QString& firstCommitOid,
                                                   const QString& secondCommitOid);

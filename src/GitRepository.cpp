@@ -4096,6 +4096,38 @@ Monad::ResultString GitRepository::headCommitOid(const QString& repositoryPath)
     return Monad::ResultString(QString::fromLatin1(oidBuffer));
 }
 
+Monad::ResultString GitRepository::headCommitMessage(const QString& repositoryPath)
+{
+    git_repository* repo = nullptr;
+    const int openResult = git_repository_open(&repo, repositoryPath.toLocal8Bit().constData());
+    if (openResult != GIT_OK || repo == nullptr) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to open repository")),
+                                   openResult);
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    git_oid headOid;
+    const int headResult = git_reference_name_to_id(&headOid, repo, "HEAD");
+    if (headResult == GIT_EUNBORNBRANCH || headResult == GIT_ENOTFOUND) {
+        return Monad::ResultString(QString());
+    }
+    if (headResult != GIT_OK) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to resolve HEAD")),
+                                   headResult);
+    }
+
+    git_commit* commit = nullptr;
+    const int lookupResult = git_commit_lookup(&commit, repo, &headOid);
+    if (lookupResult != GIT_OK || commit == nullptr) {
+        return Monad::ResultString(gitErrorMessageWithPrefix(QStringLiteral("Failed to lookup HEAD commit")),
+                                   lookupResult);
+    }
+    std::unique_ptr<git_commit, decltype(&git_commit_free)> commitHolder(commit, &git_commit_free);
+
+    const char* message = git_commit_message(commit);
+    return Monad::ResultString(message != nullptr ? QString::fromUtf8(message) : QString());
+}
+
 Monad::ResultString GitRepository::mergeBaseCommitOid(const QString& repositoryPath,
                                                       const QString& firstCommitOid,
                                                       const QString& secondCommitOid)
