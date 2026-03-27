@@ -521,8 +521,23 @@ bool pushRejectedByRemoteAdvanceMessage(const QString& errorMessage)
            || normalizedMessage.contains(QStringLiteral("cannot push because a reference that you are trying to update on the remote"));
 }
 
+bool isHttpAuthFailure(int libgitError, const QString& errorMessage)
+{
+    if (libgitError == GIT_OK) {
+        return false;
+    }
+    const git_error* err = git_error_last();
+    return err
+        && err->klass == GIT_ERROR_HTTP
+        && (errorMessage.contains(QLatin1String("401"))
+            || errorMessage.contains(QLatin1String("authentication")));
+}
+
 int classifyPushErrorCode(int libgitError, const QString& errorMessage)
 {
+    if (isHttpAuthFailure(libgitError, errorMessage)) {
+        return static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed);
+    }
     if (libgitError == GIT_ENONFASTFORWARD || pushRejectedByRemoteAdvanceMessage(errorMessage)) {
         return static_cast<int>(GitRepository::GitErrorCode::PushRejectedByRemoteAdvance);
     }
@@ -2322,7 +2337,14 @@ GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
             callbackPayload.httpsToken = credentials.httpsToken;
             options.callbacks.payload = static_cast<void*>(&callbackPayload);
 
-            GitRepositoryData::check(git_remote_fetch(gitRemote, nullptr, &options, nullptr));
+            const int fetchError = git_remote_fetch(gitRemote, nullptr, &options, nullptr);
+            if (fetchError != GIT_OK) {
+                const QString msg = gitErrorMessageWithPrefix(QStringLiteral("Failed to fetch"));
+                const int code = isHttpAuthFailure(fetchError, msg)
+                                 ? static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed)
+                                 : fetchError;
+                return ResultBase(msg, code);
+            }
             return ResultBase();
         });
     });
@@ -2458,7 +2480,12 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     }
 
                     if(!repo) {
-                        throw std::runtime_error(errorMessage.toStdString());
+                        const int code = (errorClass == GIT_ERROR_HTTP
+                                          && (errorMessage.contains(QLatin1String("401"))
+                                              || errorMessage.contains(QLatin1String("authentication"))))
+                                         ? static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed)
+                                         : errorCode;
+                        return Result<Repo>(errorMessage, code);
                     }
 
                     return Result<Repo>(Repo({repo}));
@@ -3998,9 +4025,11 @@ GitRepository::AheadBehindFuture GitRepository::remoteAheadBehindCommitCounts(co
             callbacks.payload = &credentialPayload;
             const int connectResult = git_remote_connect(gitRemote, GIT_DIRECTION_FETCH, &callbacks, nullptr, nullptr);
             if (connectResult != GIT_OK) {
-                return Monad::Result<AheadBehindCounts>(
-                    gitErrorMessageWithPrefix(QStringLiteral("Failed to connect remote for ahead/behind")),
-                    connectResult);
+                const QString msg = gitErrorMessageWithPrefix(QStringLiteral("Failed to connect remote for ahead/behind"));
+                const int code = isHttpAuthFailure(connectResult, msg)
+                                 ? static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed)
+                                 : connectResult;
+                return Monad::Result<AheadBehindCounts>(msg, code);
             }
 
             const git_remote_head** remoteHeads = nullptr;
