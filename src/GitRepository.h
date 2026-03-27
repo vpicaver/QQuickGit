@@ -135,7 +135,9 @@ public:
     bool hasCommits() const;
 
     Q_INVOKABLE void checkStatus();
+    QFuture<bool> checkStatusAsync();
     Q_INVOKABLE void resetHard(const QString& refSpec);
+    Q_INVOKABLE void cleanUntracked();
 
     Q_INVOKABLE void commitAll(const QString& subject,
                                const QString& description);

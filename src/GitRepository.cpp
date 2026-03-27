@@ -2591,6 +2591,37 @@ void GitRepository::checkStatus()
     }
 }
 
+QFuture<bool> GitRepository::checkStatusAsync()
+{
+    if (!d->repo) {
+        return QtConcurrent::run([]() { return false; });
+    }
+    const QString dirPath = d->mDirectory.absolutePath();
+    auto future = QtConcurrent::run([dirPath]() -> bool {
+        git_repository* repo = nullptr;
+        if (git_repository_open(&repo, dirPath.toLocal8Bit().constData()) != GIT_OK) {
+            return false;
+        }
+        auto repoGuard = qScopeGuard([&repo]() { git_repository_free(repo); });
+
+        git_status_options opt = GIT_STATUS_OPTIONS_INIT;
+        opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+        opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+        git_status_list* list = nullptr;
+        if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
+            return false;
+        }
+        auto listGuard = qScopeGuard([&list]() { git_status_list_free(list); });
+        return git_status_list_entrycount(list) > 0;
+    });
+
+    AsyncFuture::observe(future).context(this, [this, future]() {
+        setModifiedFileCount(future.result() ? 1 : 0);
+    });
+
+    return future;
+}
+
 void GitRepository::resetHard(const QString& refSpec)
 {
     git_object* object;
@@ -2600,6 +2631,50 @@ void GitRepository::resetHard(const QString& refSpec)
     check(git_reset(d->repo, object, GIT_RESET_HARD, &checkoutOptions));
 
     git_object_free(object);
+}
+
+void GitRepository::cleanUntracked()
+{
+    if (!d->repo) {
+        return;
+    }
+
+    git_status_list* list = nullptr;
+    git_status_options opt = GIT_STATUS_OPTIONS_INIT;
+    opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    // Do NOT recurse into untracked directories: report each new untracked
+    // directory as a single entry so we can removeRecursively() it in one
+    // call.  Recursing would yield individual files, leaving the parent
+    // directory behind as an empty (but still present) directory.
+    opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED;
+
+    if (git_status_list_new(&list, d->repo, &opt) != GIT_OK) {
+        return;
+    }
+    auto listGuard = qScopeGuard([&list]() { git_status_list_free(list); });
+
+    const QDir repoDir(d->mDirectory.absolutePath());
+    const size_t entryCount = git_status_list_entrycount(list);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (!entry || !(entry->status & GIT_STATUS_WT_NEW)) {
+            continue;
+        }
+        const char* rawPath = (entry->index_to_workdir != nullptr)
+                              ? entry->index_to_workdir->new_file.path
+                              : nullptr;
+        if (!rawPath) {
+            continue;
+        }
+        const QString fullPath = repoDir.absoluteFilePath(
+            QString::fromUtf8(rawPath));
+        const QFileInfo fi(fullPath);
+        if (fi.isDir()) {
+            QDir(fullPath).removeRecursively();
+        } else {
+            QFile::remove(fullPath);
+        }
+    }
 }
 
 void GitRepository::commitAll(const QString &subject,
@@ -3891,7 +3966,8 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
                         break;
                     case ResetMode::Hard:
                         resetType = GIT_RESET_HARD;
-                        checkoutOptions.checkout_strategy = GIT_CHECKOUT_FORCE;
+                        checkoutOptions.checkout_strategy = GIT_CHECKOUT_FORCE
+                            | GIT_CHECKOUT_REMOVE_UNTRACKED;
                         checkoutOptionsPtr = &checkoutOptions;
                         break;
                     }
