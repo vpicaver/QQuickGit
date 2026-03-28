@@ -74,7 +74,7 @@ QString gitErrorMessageWithPrefix(const QString& prefix)
 {
     const git_error* lastError = git_error_last();
     if (lastError && lastError->message) {
-        return QStringLiteral("%1: %2").arg(prefix, QString::fromUtf8(lastError->message));
+        return QStringLiteral("%1: %2").arg(prefix, QString::fromUtf8(lastError->message).trimmed());
     }
     return prefix;
 }
@@ -2454,7 +2454,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         const git_error *errInfo = git_error_last();
                         if(errorMessage) {
                             if(errInfo && errInfo->message) {
-                                *errorMessage = QString::fromUtf8(errInfo->message);
+                                *errorMessage = QString::fromUtf8(errInfo->message).trimmed();
                             } else {
                                 *errorMessage = QStringLiteral("Unknown git error");
                             }
