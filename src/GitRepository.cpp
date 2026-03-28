@@ -1858,6 +1858,18 @@ public:
         return unit(bytes);
     }
 
+    static int certificateCheckCallback(git_cert* cert, int /*valid*/, const char* /*host*/, void* /*payload*/)
+    {
+        // Accept SSH host keys unconditionally (same tradeoff as the rest of the app).
+        // For X.509 (HTTPS), return 0 so libgit2 uses its own validation result — this
+        // avoids the macOS/OpenSSL CA store mismatch that produces GIT_ECERTIFICATE when
+        // the system cert bundle is not on OpenSSL's default search path.
+        if (cert->cert_type == GIT_CERT_HOSTKEY_LIBSSH2) {
+            return GIT_OK;
+        }
+        return 0;
+    }
+
     static int transferProgress(	unsigned int current,
                                 unsigned int total,
                                 size_t bytes,
@@ -2333,6 +2345,7 @@ GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
 
             git_fetch_options options = GIT_FETCH_OPTIONS_INIT;
             options.callbacks.credentials = GitRepositoryData::credentailCallBack;
+            options.callbacks.certificate_check = GitRepositoryData::certificateCheckCallback;
             options.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
             SshCallbackPayload callbackPayload;
             callbackPayload.reportProgress = reportProgress;
@@ -2345,7 +2358,8 @@ GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
             const int fetchError = git_remote_fetch(gitRemote, nullptr, &options, nullptr);
             if (fetchError != GIT_OK) {
                 const QString msg = gitErrorMessageWithPrefix(QStringLiteral("Failed to fetch"));
-                const int code = isHttpAuthFailure(fetchError, msg)
+                const bool isAuth = isHttpAuthFailure(fetchError, msg);
+                const int code = isAuth
                                  ? static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed)
                                  : fetchError;
                 return ResultBase(msg, code);
@@ -2410,21 +2424,8 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                                                     int* errorCode) -> git_repository* {
                         git_repository* localRepo = nullptr;
 
-                        // Callback signature
-                        auto hostkey_cb = [](git_cert *cert, int valid, const char *host, void *payload)->int {
-                            Q_UNUSED(valid)
-                            Q_UNUSED(host)
-                            Q_UNUSED(payload)
-                            // Only care about SSH hostkeys
-                            if (cert->cert_type == GIT_CERT_HOSTKEY_LIBSSH2) {
-                                //always accept the cert, could open the door for man in the middle attack
-                                return GIT_OK;
-                            }
-                            return 0;  // allow other cert types
-                        };
-
                         git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
-                        clone_opts.fetch_opts.callbacks.certificate_check = hostkey_cb;
+                        clone_opts.fetch_opts.callbacks.certificate_check = GitRepositoryData::certificateCheckCallback;
                         clone_opts.fetch_opts.callbacks.credentials = GitRepositoryData::credentailCallBack;
                         clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
                         SshCallbackPayload callbackPayload;
@@ -2873,6 +2874,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
                             check(git_push_options_init(&options, GIT_PUSH_OPTIONS_VERSION ));
                             options.callbacks.credentials = GitRepositoryData::credentailCallBack;
+                            options.callbacks.certificate_check = GitRepositoryData::certificateCheckCallback;
                             options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
                             SshCallbackPayload callbackPayload;
                             callbackPayload.reportProgress = [progressInterface](const ProgressState& progress) mutable {
@@ -4063,9 +4065,10 @@ GitRepository::AheadBehindFuture GitRepository::remoteAheadBehindCommitCounts(co
     const QString fixedBranch = branchName.isEmpty() ? headBranchName() : branchName;
     const QString localRefSpec = QStringLiteral("refs/heads/%1").arg(fixedBranch);
     const QString remoteRefSpec = QStringLiteral("refs/heads/%1").arg(fixedBranch);
+    const GitCredentials credentials = d->m_credentials;
 
-    return QtConcurrent::run([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec]() {
-        return mtry([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec]() -> Monad::Result<AheadBehindCounts> {
+    return QtConcurrent::run([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec, credentials]() {
+        return mtry([repositoryPath, fixedRemote, fixedBranch, localRefSpec, remoteRefSpec, credentials]() -> Monad::Result<AheadBehindCounts> {
             if (repositoryPath.isEmpty()) {
                 return Monad::Result<AheadBehindCounts>(QStringLiteral("Repository path is empty."));
             }
@@ -4101,9 +4104,11 @@ GitRepository::AheadBehindFuture GitRepository::remoteAheadBehindCommitCounts(co
             std::unique_ptr<git_remote, decltype(&git_remote_free)> gitRemoteHolder(gitRemote, &git_remote_free);
 
             git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
-            PrePushCredentialPayload credentialPayload;
-            callbacks.credentials = prePushRemoteCredentialCallback;
-            callbacks.payload = &credentialPayload;
+            SshCallbackPayload callbackPayload;
+            callbackPayload.httpsToken = credentials.httpsToken;
+            callbacks.credentials = GitRepositoryData::credentailCallBack;
+            callbacks.certificate_check = GitRepositoryData::certificateCheckCallback;
+            callbacks.payload = &callbackPayload;
             const int connectResult = git_remote_connect(gitRemote, GIT_DIRECTION_FETCH, &callbacks, nullptr, nullptr);
             if (connectResult != GIT_OK) {
                 const QString msg = gitErrorMessageWithPrefix(QStringLiteral("Failed to connect remote for ahead/behind"));

@@ -18,6 +18,8 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QUuid>
+#include <QTcpServer>
+#include <QTcpSocket>
 
 //Std includes
 #include <iostream>
@@ -1154,6 +1156,58 @@ TEST_CASE("GitRepository remoteAheadBehindCommitCounts should read advertised re
         REQUIRE(AsyncFuture::waitForFinished(missingBranchFuture, defaultTimeout));
         CHECK(missingBranchFuture.result().hasError());
     }
+}
+
+TEST_CASE("GitRepository remoteAheadBehindCommitCounts with empty HTTPS token returns HttpAuthFailed", "[GitRepository]")
+{
+    // Spin up a local TCP server that always responds HTTP 401.
+    // This exercises the credential-callback path without needing a real remote.
+    QTcpServer httpServer;
+    REQUIRE(httpServer.listen(QHostAddress::LocalHost, 0));
+    const quint16 port = httpServer.serverPort();
+
+    QObject::connect(&httpServer, &QTcpServer::newConnection, [&httpServer]() {
+        QTcpSocket* socket = httpServer.nextPendingConnection();
+        QObject::connect(socket, &QTcpSocket::readyRead, socket, [socket]() {
+            socket->readAll(); // discard the request
+            socket->write("HTTP/1.1 401 Unauthorized\r\n"
+                          "WWW-Authenticate: Basic realm=\"git\"\r\n"
+                          "Content-Length: 0\r\n"
+                          "Connection: close\r\n"
+                          "\r\n");
+            socket->flush();
+            socket->disconnectFromHost();
+        });
+    });
+
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString localPath = tempDir.absoluteFilePath(QStringLiteral("repo"));
+    REQUIRE(QDir().mkpath(localPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    GitRepository repo;
+    repo.setDirectory(QDir(localPath));
+    repo.initRepository();
+    repo.setAccount(&account);
+    repo.addRemote(QStringLiteral("origin"),
+                   QUrl(QStringLiteral("http://127.0.0.1:%1/repo.git").arg(port)));
+
+    QFile file(QDir(localPath).absoluteFilePath(QStringLiteral("state.txt")));
+    REQUIRE(file.open(QFile::WriteOnly));
+    file.write("initial");
+    file.close();
+    CHECK_NOTHROW(repo.commitAll(QStringLiteral("Initial"), QStringLiteral("initial commit")));
+
+    // No credentials set — empty token must produce HttpAuthFailed, not an SSL error
+    auto future = repo.remoteAheadBehindCommitCounts();
+    REQUIRE(AsyncFuture::waitForFinished(future, defaultTimeout));
+    const auto result = future.result();
+    INFO("Error message: " << result.errorMessage().toStdString());
+    REQUIRE(result.hasError());
+    CHECK(result.errorCode() == static_cast<int>(GitRepository::GitErrorCode::HttpAuthFailed));
 }
 
 TEST_CASE("GitRepository pullRebaseOrMerge should prefer rebase and fallback to merge on conflicts", "[GitRepository]")

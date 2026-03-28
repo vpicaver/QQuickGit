@@ -157,6 +157,7 @@ target_link_libraries(qquickgit-test
     qquickgit-lfs-test-server
     Catch2::Catch2
     Qt6::Test
+    Qt6::Network
     SignalSpyChecker
 )
 
