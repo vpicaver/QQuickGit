@@ -449,6 +449,7 @@ struct PrePushCredentialPayload {
     int sshAgentAttempts = 0;
     int sshKeyMaxAttempts = 1;
     int sshKeyAttempts = 0;
+    QString httpsToken;   // empty = SSH-only path (default, no behaviour change)
 };
 
 std::function<void(const ProgressState&)> progressFromPayload(void* payload)
@@ -761,6 +762,11 @@ int prePushRemoteCredentialCallback(git_credential **out,
     const QByteArray userNameUtf8 = userNameText.toUtf8();
     const char *userName = userNameUtf8.constData();
     if (allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) {
+        if (prePushPayload && !prePushPayload->httpsToken.isEmpty()) {
+            return git_credential_userpass_plaintext_new(
+                out, "x-access-token",
+                prePushPayload->httpsToken.toUtf8().constData());
+        }
         if (!userNameText.isEmpty() && !urlPassword.isEmpty()) {
             const QByteArray passwordUtf8 = urlPassword.toUtf8();
             const int result = git_credential_userpass_plaintext_new(out,
@@ -826,7 +832,8 @@ int prePushRemoteCredentialCallback(git_credential **out,
 
 bool hideAdvertisedRemoteTips(git_repository* repo,
                               git_revwalk* revwalk,
-                              const QString& remoteName)
+                              const QString& remoteName,
+                              const QString& httpsToken = QString())
 {
     if (!repo || !revwalk || remoteName.isEmpty()) {
         return false;
@@ -842,6 +849,7 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
     const QString remoteUrl = remoteUrlRaw ? QString::fromUtf8(remoteUrlRaw) : QString();
     git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
     PrePushCredentialPayload credentialPayload;
+    credentialPayload.httpsToken = httpsToken;
     callbacks.credentials = prePushRemoteCredentialCallback;
     callbacks.payload = &credentialPayload;
     const int connectResult = git_remote_connect(remote, GIT_DIRECTION_PUSH, &callbacks, nullptr, nullptr);
@@ -872,7 +880,8 @@ bool hideAdvertisedRemoteTips(git_repository* repo,
 
 Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
                                                         const QString& refSpec,
-                                                        const QString& remoteName)
+                                                        const QString& remoteName,
+                                                        const QString& httpsToken = QString())
 {
     if (!repo) {
         return Monad::Result<LfsPushUploadPlan>(QStringLiteral("Failed to open repository for LFS push upload"));
@@ -912,7 +921,7 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
         }
     }
 
-    const bool listedAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName);
+    const bool listedAdvertisedTips = hideAdvertisedRemoteTips(repo, revwalk, remoteName, httpsToken);
     if (!listedAdvertisedTips) {
         // Fall back to local tracking refs only when advertised refs are unavailable.
         // Advertised refs are authoritative for push reachability and avoid stale local
@@ -1108,10 +1117,11 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
 GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                                              const QString& refSpec,
                                              const QString& remoteName,
-                                             QObject* context)
+                                             QObject* context,
+                                             const QString& httpsToken = QString())
 {
-    auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName]() {
-        return mtry([repoPath, refSpec, remoteName]() -> Monad::Result<LfsPushUploadPlan> {
+    auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName, httpsToken]() {
+        return mtry([repoPath, refSpec, remoteName, httpsToken]() -> Monad::Result<LfsPushUploadPlan> {
             git_repository* repo = nullptr;
             const int openResult = git_repository_open(&repo, repoPath.constData());
             if (openResult != GIT_OK || !repo) {
@@ -1122,7 +1132,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                 return Monad::Result<LfsPushUploadPlan>(message, openResult);
             }
             std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
-            return buildLfsPushUploadPlan(repo, refSpec, remoteName);
+            return buildLfsPushUploadPlan(repo, refSpec, remoteName, httpsToken);
         });
     });
 
@@ -2850,7 +2860,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto fixRemote = fixUpRemote(remote);
             const GitCredentials credentials = d->m_credentials;   // snapshot on main thread
-            auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this);
+            auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this, credentials.httpsToken);
 
             return AsyncFuture::observe(prePushUploadFuture)
                 .context(this, [=]() -> GitFuture {
