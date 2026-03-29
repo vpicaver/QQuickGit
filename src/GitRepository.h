@@ -116,6 +116,7 @@ public:
     void setAccount(Account* account);
 
     void setCredentials(const GitCredentials& credentials);
+    GitCredentials credentials() const;
 
     void initRepository();
     void setLfsPolicy(const LfsPolicy& policy);

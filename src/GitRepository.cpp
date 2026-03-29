@@ -2048,6 +2048,9 @@ void GitRepository::initRepository()
 
     ensureLfsAttributes();
     ensureStandardLfsFilterConfig(d->repo);
+
+    emit remotesChanged();
+    emit headBranchNameChanged();
 }
 
 void GitRepository::setLfsPolicy(const LfsPolicy& policy)
@@ -4566,4 +4569,9 @@ Account* GitRepository::account() const {
 void GitRepository::setCredentials(const GitCredentials& credentials)
 {
     d->m_credentials = credentials;
+}
+
+GitCredentials GitRepository::credentials() const
+{
+    return d->m_credentials;
 }
