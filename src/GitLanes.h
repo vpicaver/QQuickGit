@@ -42,7 +42,6 @@ public:
     void afterBranch();
     void nextParent(const QString& sha);
 
-    void setLanes(QVector<GitLane>& ln);
     QVector<GitLane> getLanes() const;
 
     int activeLaneIndex() const;
@@ -63,10 +62,6 @@ private:
 
 inline bool GitLanes::isEmpty() const {
     return mTypeVec.empty();
-}
-
-inline void GitLanes::setLanes(QVector<GitLane>& ln) {
-    ln = mTypeVec;
 }
 
 inline QVector<GitLane> GitLanes::getLanes() const {

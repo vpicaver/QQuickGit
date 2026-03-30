@@ -50,10 +50,6 @@ QString oidToString(const git_oid* oid)
     return QString::fromLatin1(buffer);
 }
 
-/**
- * Build a map from commit SHA to list of ref names that point at it.
- * Includes local branches (refs/heads/) and remote branches (refs/remotes/).
- */
 QHash<QString, QStringList> buildRefMap(git_repository* repo)
 {
     QHash<QString, QStringList> refMap;
@@ -77,7 +73,6 @@ QHash<QString, QStringList> buildRefMap(git_repository* repo)
 
         QString refName = QString::fromUtf8(name);
 
-        // Only include local and remote branches
         QString shortName;
         if (refName.startsWith(QStringLiteral("refs/heads/")))
             shortName = refName.mid(11);
@@ -86,7 +81,6 @@ QHash<QString, QStringList> buildRefMap(git_repository* repo)
         else
             continue;
 
-        // Resolve to the target OID
         git_reference* resolved = nullptr;
         if (git_reference_resolve(&resolved, ref) != GIT_OK)
             continue;
@@ -105,11 +99,7 @@ QHash<QString, QStringList> buildRefMap(git_repository* repo)
     return refMap;
 }
 
-/**
- * Run the index pass: walk all refs, collect OIDs, run lane calculator,
- * and build the ref map. Checks isCanceled periodically.
- */
-IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futureInterface)
+IndexPassResult runIndexPass(const QString& repoPath)
 {
     IndexPassResult result;
 
@@ -120,10 +110,8 @@ IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futu
     std::unique_ptr<git_repository, decltype(&git_repository_free)>
         repoHolder(repo, &git_repository_free);
 
-    // Build ref map
     result.refMap = buildRefMap(repo);
 
-    // Create revwalk
     git_revwalk* walk = nullptr;
     if (git_revwalk_new(&walk, repo) != GIT_OK || !walk)
         return result;
@@ -133,24 +121,17 @@ IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futu
 
     git_revwalk_sorting(walk, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
 
-    // Push all local and remote refs
     git_revwalk_push_glob(walk, "refs/heads/*");
     git_revwalk_push_glob(walk, "refs/remotes/*");
 
-    // Walk commits and compute lanes
     GitLanes lanes;
     git_oid oid;
     bool firstCommit = true;
 
     while (git_revwalk_next(&oid, walk) == GIT_OK)
     {
-        // Check for cancellation every iteration
-        if (futureInterface && futureInterface->isCanceled())
-            return IndexPassResult();
-
         QString sha = oidToString(&oid);
 
-        // Look up commit to get parent info (needed for lane calculator)
         git_commit* commit = nullptr;
         if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit)
             continue;
@@ -160,7 +141,6 @@ IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futu
 
         unsigned int parentCount = git_commit_parentcount(commit);
 
-        // Get parent SHAs
         QStringList parentShas;
         parentShas.reserve(parentCount);
         for (unsigned int i = 0; i < parentCount; i++)
@@ -169,35 +149,28 @@ IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futu
             parentShas.append(oidToString(parentOid));
         }
 
-        // Initialize lane calculator on first commit
         if (firstCommit)
         {
             lanes.init(sha);
             firstCommit = false;
         }
 
-        // Per-commit lane call order (follows GitQlient's calculateLanes + resetLanes):
-        // 1. isFork
+        // Call order matters — follows GitQlient's calculateLanes + resetLanes
         bool isDiscontinuity = false;
         bool fork = lanes.isFork(sha, isDiscontinuity);
 
-        // 2. changeActiveLane only on discontinuity
         if (isDiscontinuity)
             lanes.changeActiveLane(sha);
 
-        // 3. setFork (if isFork returned true)
         if (fork)
             lanes.setFork(sha);
 
-        // 4. setMerge (if multiple parents)
         if (parentCount > 1)
             lanes.setMerge(parentShas);
 
-        // 5. setInitial (if no parents)
         if (parentCount == 0)
             lanes.setInitial();
 
-        // 6. getLanes — capture result before resetLanes
         GitRowGraph rowGraph;
         rowGraph.sha = sha;
         rowGraph.lanes = lanes.getLanes();
@@ -206,7 +179,6 @@ IndexPassResult runIndexPass(const QString& repoPath, QFutureInterfaceBase* futu
         result.oids.append(oidToBytes(&oid));
         result.graph.append(std::move(rowGraph));
 
-        // resetLanes: nextParent, then post-processing
         QString nextSha = parentCount == 0 ? QString() : parentShas.first();
         lanes.nextParent(nextSha);
 
@@ -342,10 +314,8 @@ void GitGraphModel::refresh()
 
             auto result = future.result().value<IndexPassResult>();
 
-            // Clear old data
             clearModel();
 
-            // Insert new data
             if (!result.oids.isEmpty())
             {
                 beginInsertRows(QModelIndex(), 0, result.oids.size() - 1);
@@ -366,7 +336,7 @@ void GitGraphModel::refresh()
 
     mRestarter.restart([repoPath]() -> QFuture<QVariant> {
         return QtConcurrent::run([repoPath]() -> QVariant {
-            auto result = runIndexPass(repoPath, nullptr);
+            auto result = runIndexPass(repoPath);
             return QVariant::fromValue(result);
         });
     });

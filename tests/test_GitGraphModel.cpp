@@ -4,7 +4,6 @@
 //Our includes
 #include "GitGraphModel.h"
 #include "GitRepository.h"
-#include "GitLaneType.h"
 #include "Account.h"
 
 //Async includes
@@ -57,7 +56,6 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         GitGraphModel model;
         model.setRepository(&repo);
 
-        // Wait for async completion
         QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
         if (model.loading())
             REQUIRE(loadingSpy.wait(5000));
@@ -72,20 +70,17 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         model.setRepository(&repo);
 
         QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
-        // Wait for loading to become true then false
         if (model.loading())
             REQUIRE(loadingSpy.wait(5000));
 
         CHECK(model.rowCount() == 1);
 
-        // Check data roles
         QModelIndex idx = model.index(0, 0);
         CHECK(!model.data(idx, GitGraphModel::ShaRole).toString().isEmpty());
         CHECK(model.data(idx, GitGraphModel::MessageRole).toString() == "Initial commit");
         CHECK(model.data(idx, GitGraphModel::AuthorRole).toString() == "Test");
         CHECK(model.data(idx, GitGraphModel::TimestampRole).toDateTime().isValid());
 
-        // Lanes should have one active lane
         auto lanes = model.data(idx, GitGraphModel::LanesRole).value<QList<int>>();
         CHECK(lanes.size() >= 1);
 
@@ -106,7 +101,6 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         CHECK(model.rowCount() == 3);
 
-        // Most recent commit should be first
         QModelIndex idx = model.index(0, 0);
         CHECK(model.data(idx, GitGraphModel::MessageRole).toString() == "Commit 3");
     }
@@ -141,10 +135,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         CHECK(model.rowCount() == 1);
 
-        // Add another commit
         createFileAndCommit(repo, "file2.txt", "world", "Commit 2");
-
-        // Refresh the model
         model.refresh();
 
         loadingSpy.clear();
@@ -153,7 +144,6 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         CHECK(model.rowCount() == 2);
 
-        // New commit should be at top
         QModelIndex idx = model.index(0, 0);
         CHECK(model.data(idx, GitGraphModel::MessageRole).toString() == "Commit 2");
     }
@@ -173,7 +163,6 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         QModelIndex idx = model.index(0, 0);
         auto refs = model.data(idx, GitGraphModel::RefsRole).toStringList();
 
-        // Should contain the main branch name
         bool hasMainRef = false;
         for (const auto& ref : refs)
         {

@@ -11,14 +11,9 @@
 #include <QStringList>
 #include <QVector>
 #include <QTemporaryDir>
-#include <QSet>
 
 //libgit2
 #include "git2.h"
-
-//Std includes
-#include <random>
-#include <algorithm>
 
 using namespace QQuickGit;
 using LT = GitLaneType::Type;
@@ -46,12 +41,10 @@ CommitResult createCommit(git_repository* repo,
                            const QVector<git_oid>& parentOids,
                            const QString& branchRef = QStringLiteral("refs/heads/main"))
 {
-    // Create a blob
     git_oid blobOid;
     QByteArray content = message.toUtf8();
     REQUIRE(git_blob_create_from_buffer(&blobOid, repo, content.constData(), content.size()) == GIT_OK);
 
-    // Build a tree with one entry
     git_treebuilder* tb = nullptr;
     REQUIRE(git_treebuilder_new(&tb, repo, nullptr) == GIT_OK);
     REQUIRE(git_treebuilder_insert(nullptr, tb, "file.txt", &blobOid, GIT_FILEMODE_BLOB) == GIT_OK);
@@ -63,11 +56,9 @@ CommitResult createCommit(git_repository* repo,
     git_tree* tree = nullptr;
     REQUIRE(git_tree_lookup(&tree, repo, &treeOid) == GIT_OK);
 
-    // Build signature
     git_signature* sig = nullptr;
     REQUIRE(git_signature_now(&sig, "Test", "test@test.com") == GIT_OK);
 
-    // Look up parent commits
     QVector<git_commit*> parentPtrs;
     for (const auto& pid : parentOids)
     {
@@ -76,7 +67,7 @@ CommitResult createCommit(git_repository* repo,
         parentPtrs.append(parent);
     }
 
-    // Build const parent array for git_commit_create
+    // Separate const array needed for git_commit_create's API
     QVector<const git_commit*> constParents;
     constParents.reserve(parentPtrs.size());
     for (auto* p : parentPtrs)
@@ -98,7 +89,6 @@ CommitResult createCommit(git_repository* repo,
 
     REQUIRE(err == GIT_OK);
 
-    // Cleanup
     for (auto* p : parentPtrs)
         git_commit_free(p);
     git_tree_free(tree);
@@ -153,7 +143,6 @@ QVector<WalkRow> walkAndComputeLanes(git_repository* repo)
             first = false;
         }
 
-        // Follow GitQlient's calculateLanes + resetLanes order exactly
         bool isDisc = false;
         bool fork = lanes.isFork(sha, isDisc);
 
@@ -175,7 +164,6 @@ QVector<WalkRow> walkAndComputeLanes(git_repository* repo)
         row.activeLane = lanes.activeLaneIndex();
         rows.append(row);
 
-        // resetLanes
         QString nextSha = parentCount == 0 ? QString() : parentShas.first();
         lanes.nextParent(nextSha);
 
@@ -259,22 +247,17 @@ TEST_CASE("GitLanes linear topology", "[GitLanes]")
 
     REQUIRE(rows.size() == 3);
 
-    // Each row should have exactly one lane
     for (const auto& row : rows)
     {
         CHECK(row.lanes.size() == 1);
         CHECK(row.activeLane == 0);
     }
 
-    // The active lane should be Active or Branch/Initial type
-    // First row (most recent, C3) should be Branch -> then Active after afterBranch
-    // Middle and end rows should be Active
     for (int i = 0; i < rows.size() - 1; i++)
     {
         CHECK(rows[i].lanes[0].isActive());
     }
 
-    // Last row (initial commit) should be Initial
     CHECK(rows.last().lanes[0].equals(LT::Initial));
 
     git_repository_free(repo);
@@ -298,16 +281,12 @@ TEST_CASE("GitLanes simple fork", "[GitLanes]")
 
     REQUIRE(rows.size() == 3);
 
-    // After the fork point, there should be 2 lanes
-    // C1 is the fork point — its row should have Tail or MergeFork types
-    // The fork commit should show multiple lanes
     bool foundForkRow = false;
     for (const auto& row : rows)
     {
         if (row.sha == c1.sha)
         {
             foundForkRow = true;
-            // At the fork point, we expect to see fork-related lane types
             bool hasForkType = false;
             for (const auto& lane : row.lanes)
             {
@@ -337,21 +316,18 @@ TEST_CASE("GitLanes simple merge", "[GitLanes]")
     auto c2 = createCommit(repo, "C2", {c1.oid});
     auto c3 = createCommit(repo, "C3", {c1.oid}, QStringLiteral("refs/heads/feature"));
 
-    // Create merge commit with both parents on main
     auto m1 = createCommit(repo, "Merge", {c2.oid, c3.oid});
 
     auto rows = walkAndComputeLanes(repo);
 
     REQUIRE(rows.size() == 4);
 
-    // Check the merge commit row
     bool foundMerge = false;
     for (const auto& row : rows)
     {
         if (row.sha == m1.sha)
         {
             foundMerge = true;
-            // Merge commit should have merge-fork or head/join types
             bool hasMergeType = false;
             for (const auto& lane : row.lanes)
             {
@@ -389,8 +365,6 @@ TEST_CASE("GitLanes lane reuse after branch joins", "[GitLanes]")
 
     REQUIRE(rows.size() == 6);
 
-    // After the merge, the lane count should go back down
-    // The most recent commits (C5, C4) should have 1 lane
     CHECK(rows[0].lanes.size() == 1); // C5
     CHECK(rows[1].lanes.size() == 1); // C4
 
@@ -405,10 +379,8 @@ TEST_CASE("GitLanes torture test - many branches", "[GitLanes]")
     git_repository* repo = nullptr;
     REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), false) == GIT_OK);
 
-    // Create a base commit
     auto base = createCommit(repo, "Base", {});
 
-    // Create 20 branches from base
     const int numBranches = 20;
     QVector<git_oid> branchTips;
     for (int i = 0; i < numBranches; i++)
@@ -422,11 +394,9 @@ TEST_CASE("GitLanes torture test - many branches", "[GitLanes]")
         branchTips.append(branchCommit.oid);
     }
 
-    // Merge branches back one at a time into a merge branch
     git_oid current = branchTips.first();
     for (int i = 1; i < numBranches; i++)
     {
-        // Use nullptr for update_ref on intermediate merges, update refs/heads/merge on last
         QString ref = (i == numBranches - 1)
             ? QStringLiteral("refs/heads/merge")
             : QString();
@@ -440,10 +410,8 @@ TEST_CASE("GitLanes torture test - many branches", "[GitLanes]")
 
     auto rows = walkAndComputeLanes(repo);
 
-    // Basic invariants
     REQUIRE(rows.size() > 0);
 
-    // No two active commits share the same lane at the same row
     for (const auto& row : rows)
     {
         int activeCount = 0;
@@ -452,14 +420,11 @@ TEST_CASE("GitLanes torture test - many branches", "[GitLanes]")
             if (lane.isActive())
                 activeCount++;
         }
-        // There should be exactly one active lane per row
         CHECK(activeCount >= 1);
     }
 
-    // The final commit should have lane count 1
     CHECK(rows[0].lanes.size() >= 1);
 
-    // The base commit (last or near-last) should have fork types
     bool foundBase = false;
     for (const auto& row : rows)
     {
