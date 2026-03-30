@@ -13,7 +13,7 @@ namespace QQuickGit {
 class QQUICKGIT_EXPORT GitLaneType
 {
     Q_GADGET
-    QML_ELEMENT
+    QML_NAMED_ELEMENT(gitLaneType)
 
 public:
     enum Type
