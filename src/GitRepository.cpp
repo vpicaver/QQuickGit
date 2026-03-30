@@ -2168,7 +2168,20 @@ void GitRepository::ensureLfsAttributes()
 QString GitRepository::addRemote(const QString &name, const QUrl &url) noexcept
 {
     try {
-        addRemoteHelper(name, url);
+        addRemoteHelper(name, url.toString());
+    } catch (const std::runtime_error& error) {
+        return QString::fromLocal8Bit(error.what()).trimmed();
+    }
+    return QString();
+}
+
+// Accepts a raw URL string, bypassing QUrl parsing.
+// Needed for SSH SCP-syntax URLs (e.g. git@host:user/repo.git) which QUrl
+// cannot round-trip correctly through its strict parser.
+QString GitRepository::addRemote(const QString &name, const QString &rawUrl) noexcept
+{
+    try {
+        addRemoteHelper(name, rawUrl);
     } catch (const std::runtime_error& error) {
         return QString::fromLocal8Bit(error.what()).trimmed();
     }
@@ -2230,7 +2243,7 @@ QFuture<GitRepository::RemoteConnectionReport> GitRepository::testRemoteConnecti
                 error = git_remote_lookup(&remote, tempRepository.d->repo, remoteName.toLocal8Bit());
             }
             if (error != GIT_OK) {
-                tempRepository.addRemoteHelper(remoteName, url);
+                tempRepository.addRemoteHelper(remoteName, url.toString());
             } else {
                 check(git_remote_set_url(tempRepository.d->repo,
                                          remoteName.toLocal8Bit(),
@@ -4036,13 +4049,13 @@ QString GitRepository::fixUpRemote(const QString &remote)
     }
 }
 
-void GitRepository::addRemoteHelper(const QString &name, const QUrl &url)
+void GitRepository::addRemoteHelper(const QString &name, const QString &url)
 {
     auto remote = makeScopedPtr(&git_remote_free);
     check(git_remote_create(&remote,
                             d->repo,
                             name.toLocal8Bit(),
-                            url.toString().toLocal8Bit()));
+                            url.toLocal8Bit()));
     emit remotesChanged();
 }
 

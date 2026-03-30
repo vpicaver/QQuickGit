@@ -1430,6 +1430,67 @@ TEST_CASE("GitRepository testRemoteConnectionDetailed should report transport an
     CHECK(emptyUrlReport.transportErrorMessage.toStdString() == "cannot set empty URL");
 }
 
+TEST_CASE("GitRepository addRemote raw-string overload should work correctly", "[GitRepository]") {
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString repoPath = tempDir.absoluteFilePath(QStringLiteral("repo"));
+
+    REQUIRE(QDir().mkpath(repoPath));
+
+    GitRepository repo;
+    repo.setDirectory(QDir(repoPath));
+    repo.initRepository();
+
+    SECTION("Adding a remote with a local file URL string succeeds") {
+        const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote.git"));
+
+        git_repository* bareRepo = nullptr;
+        REQUIRE(git_repository_init(&bareRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
+        git_repository_free(bareRepo);
+
+        QSignalSpy remotesChangedSpy(&repo, &GitRepository::remotesChanged);
+        const QString error = repo.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString());
+        CHECK(error.isEmpty());
+        CHECK(remotesChangedSpy.size() == 1);
+
+        const auto remotes = repo.remotes();
+        REQUIRE(remotes.size() == 1);
+        CHECK(remotes.at(0).name() == QStringLiteral("origin"));
+    }
+
+    SECTION("Adding a remote with SSH SCP-syntax URL succeeds") {
+        // QUrl cannot round-trip git@host:path SCP syntax; verify the raw-string
+        // overload stores the URL verbatim by querying libgit2 directly.
+        const QString scpUrl = QStringLiteral("git@github.com:vpicaver/libgit2-test.git");
+
+        QSignalSpy remotesChangedSpy(&repo, &GitRepository::remotesChanged);
+        const QString error = repo.addRemote(QStringLiteral("origin"), scpUrl);
+        CHECK(error.isEmpty());
+        CHECK(remotesChangedSpy.size() == 1);
+
+        const auto remotes = repo.remotes();
+        REQUIRE(remotes.size() == 1);
+        CHECK(remotes.at(0).name() == QStringLiteral("origin"));
+
+        // GitRemoteInfo stores QUrl which cannot round-trip SCP syntax; verify
+        // the raw URL is preserved by opening the repo via libgit2 directly.
+        git_repository* rawRepo = nullptr;
+        REQUIRE(git_repository_open(&rawRepo, repoPath.toLocal8Bit().constData()) == GIT_OK);
+        git_remote* remote = nullptr;
+        REQUIRE(git_remote_lookup(&remote, rawRepo, "origin") == GIT_OK);
+        CHECK(QString::fromUtf8(git_remote_url(remote)) == scpUrl);
+        git_remote_free(remote);
+        git_repository_free(rawRepo);
+    }
+
+    SECTION("Adding a duplicate remote name returns a non-empty error string") {
+        const QString scpUrl = QStringLiteral("git@github.com:vpicaver/libgit2-test.git");
+        REQUIRE(repo.addRemote(QStringLiteral("origin"), scpUrl).isEmpty());
+
+        const QString error = repo.addRemote(QStringLiteral("origin"), scpUrl);
+        CHECK_FALSE(error.isEmpty());
+    }
+}
+
 TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     QDir cloneDir("clone-test");
 

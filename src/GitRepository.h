@@ -122,7 +122,8 @@ public:
     void setLfsPolicy(const LfsPolicy& policy);
     std::shared_ptr<LfsStore> lfsStore() const;
 
-    Q_INVOKABLE QString addRemote(const QString& name, const QUrl& url) noexcept;
+    QString addRemote(const QString& name, const QUrl& url) noexcept;
+    Q_INVOKABLE QString addRemote(const QString& name, const QString& rawUrl) noexcept;
     QUrl remoteUrl(QString name = QString()) const;
     QVector<GitRemoteInfo> remotes() const;
 
@@ -300,7 +301,7 @@ private:
 
     static QString fixUpRemote(const QString& remote);
 
-    void addRemoteHelper(const QString& name, const QUrl& url);
+    void addRemoteHelper(const QString& name, const QString& url);
     void ensureLfsAttributes();
 
     GitRepositoryData* d;
