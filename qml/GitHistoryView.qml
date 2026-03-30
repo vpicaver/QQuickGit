@@ -19,7 +19,7 @@ Item {
 
     BusyIndicator {
         anchors.centerIn: parent
-        running: graphModel.loading && graphModel.rowCount() === 0
+        running: graphModel.loading && listView.count === 0
         visible: running
     }
 
@@ -49,7 +49,7 @@ Item {
     Label {
         anchors.centerIn: parent
         text: qsTr("No commits")
-        visible: !graphModel.loading && graphModel.rowCount() === 0
+        visible: !graphModel.loading && listView.count === 0
         opacity: 0.5
     }
 }

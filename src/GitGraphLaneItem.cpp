@@ -112,8 +112,11 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
         return;
 
     painter->setRenderHint(QCanvasPainter::RenderHint::Antialiasing);
+    painter->setLineWidth(mLineWidth);
 
-    // Draw vertical lines for each lane
+    const float activeCX = mActiveLane * lw + lw / 2.0f;
+    const int colorCount = mColors.size();
+
     for (int i = 0; i < laneCount; ++i)
     {
         const int type = mLanes[i];
@@ -121,10 +124,9 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             continue;
 
         const float cx = i * lw + lw / 2.0f;
-        const QColor color = mColors[i % mColors.size()];
+        const QColor color = mColors[i % colorCount];
 
         painter->setStrokeStyle(color);
-        painter->setLineWidth(mLineWidth);
 
         if (hasTopLine(type))
         {
@@ -141,46 +143,23 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             painter->lineTo(cx, h);
             painter->stroke();
         }
-    }
 
-    // Draw connection curves between non-active lanes and the active lane
-    const float activeCX = mActiveLane * lw + lw / 2.0f;
-
-    for (int i = 0; i < laneCount; ++i)
-    {
-        if (i == mActiveLane)
-            continue;
-
-        const int type = mLanes[i];
-        const float cx = i * lw + lw / 2.0f;
-        const QColor color = mColors[i % mColors.size()];
-
-        painter->setStrokeStyle(color);
-        painter->setLineWidth(mLineWidth);
-
-        if (isHeadType(type))
+        if (i != mActiveLane)
         {
-            // Merge: new parent lane starts here, curve from active lane down to this lane
-            painter->beginPath();
-            painter->moveTo(activeCX, midY);
-            painter->quadraticCurveTo(cx, midY, cx, h);
-            painter->stroke();
-        }
-        else if (isTailType(type))
-        {
-            // Fork: child lane ends here, curve from this lane down to active lane
-            painter->beginPath();
-            painter->moveTo(cx, 0);
-            painter->quadraticCurveTo(cx, midY, activeCX, midY);
-            painter->stroke();
-        }
-        else if (isJoinType(type))
-        {
-            // Join: lane merges into active lane
-            painter->beginPath();
-            painter->moveTo(cx, 0);
-            painter->quadraticCurveTo(cx, midY, activeCX, midY);
-            painter->stroke();
+            if (isHeadType(type))
+            {
+                painter->beginPath();
+                painter->moveTo(activeCX, midY);
+                painter->quadraticCurveTo(cx, midY, cx, h);
+                painter->stroke();
+            }
+            else if (isTailType(type) || isJoinType(type))
+            {
+                painter->beginPath();
+                painter->moveTo(cx, 0);
+                painter->quadraticCurveTo(cx, midY, activeCX, midY);
+                painter->stroke();
+            }
         }
     }
 
@@ -195,10 +174,10 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
         painter->circle(activeCX, midY, mNodeRadius);
         painter->fill();
 
-        // Inner circle (darker center for depth)
-        painter->setFillStyle(QColor(255, 255, 255, 200));
+        // Inner highlight for depth
+        painter->setFillStyle(QColor(255, 255, 255));
         painter->beginPath();
-        painter->circle(activeCX, midY, mNodeRadius * 0.5f);
+        painter->circle(activeCX, midY, mNodeRadius * 0.4f);
         painter->fill();
     }
 }

@@ -5,13 +5,13 @@ import QQuickGit
 Item {
     id: row
 
-    required property var laneData
+    required property list<int> laneData
     required property int activeLaneIndex
     required property string commitMessage
     required property string commitAuthor
     required property date commitTimestamp
     required property string commitSha
-    required property var commitRefs
+    required property list<string> commitRefs
     property list<color> laneColors
     property real laneWidth: 20
 
