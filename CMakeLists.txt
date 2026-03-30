@@ -31,6 +31,7 @@ find_package(Qt6
     Test
     Concurrent
     Network
+    CanvasPainter
 )
 
 qt_standard_project_setup(REQUIRES 6.8)
@@ -112,6 +113,7 @@ target_link_libraries(qquickgit
     Qt6::Core
     Qt6::Concurrent
     Qt6::Network
+    Qt6::CanvasPainter
     monad
     asyncfuture
     PRIVATE

@@ -1,0 +1,77 @@
+import QtQuick
+import QtQuick.Layouts
+import QQuickGit
+
+Item {
+    id: row
+
+    required property var laneData
+    required property int activeLaneIndex
+    required property string commitMessage
+    required property string commitAuthor
+    required property date commitTimestamp
+    required property string commitSha
+    required property var commitRefs
+    property list<color> laneColors
+    property real laneWidth: 20
+
+    implicitHeight: 28
+
+    RowLayout {
+        anchors.fill: parent
+        spacing: 6
+
+        GitGraphLaneItem {
+            Layout.preferredWidth: Math.max(row.laneWidth, row.laneData.length * row.laneWidth)
+            Layout.fillHeight: true
+            lanes: row.laneData
+            activeLane: row.activeLaneIndex
+            colors: row.laneColors
+            laneWidth: row.laneWidth
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: row.commitMessage
+            elide: Text.ElideRight
+            color: row.palette.text
+            font.pixelSize: 13
+        }
+
+        Row {
+            spacing: 4
+            visible: row.commitRefs.length > 0
+
+            Repeater {
+                model: row.commitRefs
+                RefBadge {
+                    required property string modelData
+                    required property int index
+                    text: modelData
+                    accentColor: row.laneColors.length > 0
+                        ? row.laneColors[row.activeLaneIndex % row.laneColors.length]
+                        : "#4dc9f6"
+                }
+            }
+        }
+
+        Text {
+            text: row.commitAuthor
+            color: row.palette.text
+            opacity: 0.6
+            font.pixelSize: 12
+            Layout.preferredWidth: 100
+            elide: Text.ElideRight
+            horizontalAlignment: Text.AlignRight
+        }
+
+        Text {
+            text: Qt.formatDateTime(row.commitTimestamp, "yyyy-MM-dd")
+            color: row.palette.text
+            opacity: 0.4
+            font.pixelSize: 12
+            Layout.preferredWidth: 80
+            horizontalAlignment: Text.AlignRight
+        }
+    }
+}
