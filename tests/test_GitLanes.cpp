@@ -258,7 +258,11 @@ TEST_CASE("GitLanes linear topology", "[GitLanes]")
         CHECK(rows[i].lanes[0].isActive());
     }
 
+    // Root commit: connects up to child (hasTopLine), no parent below (no hasBottomLine)
     CHECK(rows.last().lanes[0].equals(LT::Initial));
+
+    // Branch tip (newest commit, C3): must be Branch so the renderer skips the top half-line
+    CHECK(rows.first().lanes[0].equals(LT::Branch));
 
     git_repository_free(repo);
 }
@@ -338,6 +342,49 @@ TEST_CASE("GitLanes simple merge", "[GitLanes]")
         }
     }
     CHECK(foundMerge);
+
+    git_repository_free(repo);
+}
+
+TEST_CASE("GitLanes root commit at fork point has Initial on active lane", "[GitLanes]")
+{
+    // Regression: when a root commit is also a fork (multiple branches diverge from it),
+    // setFork() sets the active lane to MergeFork, then setInitial() must override it to
+    // Initial so the renderer does not draw a bottom half-line into the void.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), false) == GIT_OK);
+
+    // C1 is the root commit; two branches diverge from it
+    auto c1 = createCommit(repo, "C1", {});
+    createCommit(repo, "C2", {c1.oid}, QStringLiteral("refs/heads/main"));
+    createCommit(repo, "C3", {c1.oid}, QStringLiteral("refs/heads/feature"));
+
+    auto rows = walkAndComputeLanes(repo);
+
+    REQUIRE(rows.size() == 3);
+
+    const WalkRow* rootRow = nullptr;
+    for (const auto& row : rows)
+    {
+        if (row.sha == c1.sha)
+            rootRow = &row;
+    }
+    REQUIRE(rootRow != nullptr);
+
+    // Active lane must be Initial, not MergeFork — no bottom line should be drawn
+    CHECK(rootRow->lanes[rootRow->activeLane].equals(LT::Initial));
+
+    // Surrounding lanes should still carry Tail variants so the fork shape is visible
+    bool hasTail = false;
+    for (int i = 0; i < rootRow->lanes.size(); ++i)
+    {
+        if (i != rootRow->activeLane && rootRow->lanes[i].isTail())
+            hasTail = true;
+    }
+    CHECK(hasTail);
 
     git_repository_free(repo);
 }

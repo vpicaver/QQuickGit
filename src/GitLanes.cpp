@@ -154,10 +154,7 @@ void GitLanes::setMerge(const QStringList& parents)
 
 void GitLanes::setInitial()
 {
-    auto& t = mTypeVec[mActiveLane];
-
-    if (!isNode(t))
-        t.setType(GitLaneType::Initial);
+    mTypeVec[mActiveLane].setType(GitLaneType::Initial);
 }
 
 void GitLanes::changeActiveLane(const QString& sha)

@@ -28,7 +28,7 @@ bool hasTopLine(int type)
     case LT::JoinLeft:
     case LT::JoinRight:
     case LT::Cross:
-    case LT::Branch:
+    case LT::Initial:
         return true;
     default:
         return false;
