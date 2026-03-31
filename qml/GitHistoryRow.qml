@@ -30,14 +30,6 @@ Item {
             laneWidth: row.laneWidth
         }
 
-        Text {
-            Layout.fillWidth: true
-            text: row.commitMessage
-            elide: Text.ElideRight
-            color: row.palette.text
-            font.pixelSize: 13
-        }
-
         Row {
             spacing: 4
             visible: row.commitRefs.length > 0
@@ -53,6 +45,14 @@ Item {
                         : "#4dc9f6"
                 }
             }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: row.commitMessage
+            elide: Text.ElideRight
+            color: row.palette.text
+            font.pixelSize: 13
         }
 
         Text {
