@@ -39,6 +39,7 @@ void createFileAndCommit(GitRepository& repo, const QString& filename,
     account.setEmail("test@test.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
+    repo.checkStatus();
 }
 
 } // anonymous namespace
@@ -241,5 +242,143 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         model.setRepository(nullptr);
         CHECK(model.rowCount() == 0);
+    }
+
+    SECTION("Dirty repo shows synthetic Uncommitted Changes row at index 0") {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        // Create an uncommitted file to make the repo dirty
+        QDir dir = repo.directory();
+        QFile dirtyFile(dir.filePath("dirty.txt"));
+        REQUIRE(dirtyFile.open(QFile::WriteOnly | QFile::Text));
+        dirtyFile.write("uncommitted");
+        dirtyFile.close();
+        repo.checkStatus();
+        REQUIRE(repo.modifiedFileCount() > 0);
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        // Should have synthetic row + 1 real commit
+        CHECK(model.rowCount() == 2);
+        CHECK(model.hasUncommittedChanges());
+
+        // Synthetic row at index 0 has empty SHA
+        auto idx0 = model.index(0);
+        CHECK(model.data(idx0, GitGraphModel::ShaRole).toString().isEmpty());
+        CHECK(model.data(idx0, GitGraphModel::MessageRole).toString() == "Uncommitted Changes");
+        CHECK(model.data(idx0, GitGraphModel::AuthorRole).toString().isEmpty());
+        CHECK(model.data(idx0, GitGraphModel::RefsRole).toStringList().isEmpty());
+
+        // Real commit at index 1
+        auto idx1 = model.index(1);
+        CHECK(!model.data(idx1, GitGraphModel::ShaRole).toString().isEmpty());
+        CHECK(model.data(idx1, GitGraphModel::MessageRole).toString() == "Initial commit");
+        CHECK(model.data(idx1, GitGraphModel::AuthorRole).toString() == "Test");
+    }
+
+    SECTION("Clean repo has no synthetic row") {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        CHECK(repo.modifiedFileCount() == 0);
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 1);
+        CHECK_FALSE(model.hasUncommittedChanges());
+
+        // First row is the real commit, not synthetic
+        auto idx0 = model.index(0);
+        CHECK(!model.data(idx0, GitGraphModel::ShaRole).toString().isEmpty());
+    }
+
+    SECTION("Synthetic row appears and disappears with modifiedFileCount transitions") {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 1);
+        CHECK_FALSE(model.hasUncommittedChanges());
+
+        QSignalSpy rowsInsertedSpy(&model, &GitGraphModel::rowsInserted);
+        QSignalSpy rowsRemovedSpy(&model, &GitGraphModel::rowsRemoved);
+        QSignalSpy uncommittedSpy(&model, &GitGraphModel::hasUncommittedChangesChanged);
+
+        // Dirty the repo — synthetic row should be inserted
+        QDir dir = repo.directory();
+        QFile dirtyFile(dir.filePath("dirty.txt"));
+        REQUIRE(dirtyFile.open(QFile::WriteOnly | QFile::Text));
+        dirtyFile.write("uncommitted");
+        dirtyFile.close();
+        repo.checkStatus();
+
+        CHECK(model.rowCount() == 2);
+        CHECK(model.hasUncommittedChanges());
+        CHECK(rowsInsertedSpy.count() == 1);
+        CHECK(uncommittedSpy.count() == 1);
+
+        // Verify incremental insert at row 0
+        auto insertArgs = rowsInsertedSpy.takeFirst();
+        CHECK(insertArgs.at(1).toInt() == 0); // first
+        CHECK(insertArgs.at(2).toInt() == 0); // last
+
+        // Commit all changes — synthetic row should be removed
+        Account account;
+        account.setName("Test");
+        account.setEmail("test@test.com");
+        repo.setAccount(&account);
+        repo.commitAll("Commit dirty file", QString());
+        repo.checkStatus();
+
+        // After refresh completes, wait for loading to finish
+        loadingSpy.clear();
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK_FALSE(model.hasUncommittedChanges());
+    }
+
+    SECTION("Synthetic row mirrors HEAD commit lane data") {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        // Dirty the repo
+        QDir dir = repo.directory();
+        QFile dirtyFile(dir.filePath("dirty.txt"));
+        REQUIRE(dirtyFile.open(QFile::WriteOnly | QFile::Text));
+        dirtyFile.write("uncommitted");
+        dirtyFile.close();
+        repo.checkStatus();
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        REQUIRE(model.rowCount() >= 2);
+
+        // Synthetic row lanes should match HEAD commit lanes
+        auto syntheticLanes = model.data(model.index(0), GitGraphModel::LanesRole).value<QList<int>>();
+        auto headLanes = model.data(model.index(1), GitGraphModel::LanesRole).value<QList<int>>();
+        CHECK(syntheticLanes == headLanes);
+
+        auto syntheticActiveLane = model.data(model.index(0), GitGraphModel::ActiveLaneRole).toInt();
+        auto headActiveLane = model.data(model.index(1), GitGraphModel::ActiveLaneRole).toInt();
+        CHECK(syntheticActiveLane == headActiveLane);
     }
 }

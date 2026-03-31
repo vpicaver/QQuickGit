@@ -207,10 +207,13 @@ void GitGraphModel::setRepository(GitRepository* repository)
         connect(mRepository, &GitRepository::directoryChanged, this, &GitGraphModel::refresh);
         connect(mRepository, &GitRepository::remotesChanged, this, &GitGraphModel::refresh);
         connect(mRepository, &GitRepository::headBranchNameChanged, this, &GitGraphModel::refresh);
+        connect(mRepository, &GitRepository::modifiedFileCountChanged, this, &GitGraphModel::updateSyntheticRow);
         refresh();
     }
     else
     {
+        if (mHasSyntheticRow)
+            removeSyntheticRow();
         clearModel();
     }
 
@@ -222,44 +225,69 @@ int GitGraphModel::rowCount(const QModelIndex& parent) const
     if (parent.isValid())
         return 0;
 
-    return mOids.size();
+    return mOids.size() + syntheticOffset();
 }
 
 QVariant GitGraphModel::data(const QModelIndex& index, int role) const
 {
-    if (!index.isValid() || index.row() < 0 || index.row() >= mOids.size())
+    if (!index.isValid() || index.row() < 0 || index.row() >= rowCount())
         return QVariant();
 
     const int row = index.row();
 
+    // Synthetic "Uncommitted Changes" row at index 0
+    if (mHasSyntheticRow && row == 0)
+    {
+        switch (role)
+        {
+        case ShaRole:
+            return QString();
+        case MessageRole:
+            return QStringLiteral("Uncommitted Changes");
+        case AuthorRole:
+            return QString();
+        case TimestampRole:
+            return QDateTime::currentDateTime();
+        case LanesRole:
+            // Mirror HEAD commit's lanes if available
+            if (!mGraph.isEmpty())
+                return QVariant::fromValue(lanesToIntList(mGraph.at(0).lanes));
+            return QVariant::fromValue(QList<int>());
+        case ActiveLaneRole:
+            return mGraph.isEmpty() ? 0 : mGraph.at(0).activeLane;
+        case RefsRole:
+            return QVariant::fromValue(QStringList());
+        }
+        return QVariant();
+    }
+
+    // Real commit row — offset by synthetic row
+    const int realRow = row - syntheticOffset();
+    if (realRow < 0 || realRow >= mOids.size())
+        return QVariant();
+
     switch (role)
     {
     case ShaRole:
-        return mGraph.at(row).sha;
+        return mGraph.at(realRow).sha;
 
     case MessageRole:
-        return fetchDetail(row).message;
+        return fetchDetail(realRow).message;
 
     case AuthorRole:
-        return fetchDetail(row).author;
+        return fetchDetail(realRow).author;
 
     case TimestampRole:
-        return fetchDetail(row).timestamp;
+        return fetchDetail(realRow).timestamp;
 
-    case LanesRole: {
-        const auto& lanes = mGraph.at(row).lanes;
-        QList<int> laneTypes;
-        laneTypes.reserve(lanes.size());
-        for (const auto& lane : lanes)
-            laneTypes.append(static_cast<int>(lane.type()));
-        return QVariant::fromValue(laneTypes);
-    }
+    case LanesRole:
+        return QVariant::fromValue(lanesToIntList(mGraph.at(realRow).lanes));
 
     case ActiveLaneRole:
-        return mGraph.at(row).activeLane;
+        return mGraph.at(realRow).activeLane;
 
     case RefsRole: {
-        const QString& sha = mGraph.at(row).sha;
+        const QString& sha = mGraph.at(realRow).sha;
         return QVariant::fromValue(mRefMap.value(sha));
     }
     }
@@ -302,16 +330,24 @@ void GitGraphModel::refresh()
 
             auto result = future.result();
 
+            // Remove synthetic row before clearing real data
+            if (mHasSyntheticRow)
+                removeSyntheticRow();
+
             clearModel();
 
             if (!result.oids.isEmpty())
             {
-                beginInsertRows(QModelIndex(), 0, result.oids.size() - 1);
+                const int offset = syntheticOffset();
+                beginInsertRows(QModelIndex(), offset, offset + result.oids.size() - 1);
                 mOids = std::move(result.oids);
                 mGraph = std::move(result.graph);
                 mRefMap = std::move(result.refMap);
                 endInsertRows();
             }
+
+            // Re-insert synthetic row if repo has uncommitted changes
+            updateSyntheticRow();
 
             mLoading = false;
             emit loadingChanged();
@@ -333,13 +369,54 @@ void GitGraphModel::clearModel()
 {
     if (!mOids.isEmpty())
     {
-        beginRemoveRows(QModelIndex(), 0, mOids.size() - 1);
+        const int offset = syntheticOffset();
+        beginRemoveRows(QModelIndex(), offset, offset + mOids.size() - 1);
         mOids.clear();
         mGraph.clear();
         mRefMap.clear();
         mCache.clear();
         endRemoveRows();
     }
+}
+
+void GitGraphModel::updateSyntheticRow()
+{
+    if (!mRepository)
+        return;
+
+    bool shouldHaveSyntheticRow = mRepository->modifiedFileCount() > 0;
+
+    if (shouldHaveSyntheticRow && !mHasSyntheticRow)
+        insertSyntheticRow();
+    else if (!shouldHaveSyntheticRow && mHasSyntheticRow)
+        removeSyntheticRow();
+}
+
+void GitGraphModel::insertSyntheticRow()
+{
+    Q_ASSERT(!mHasSyntheticRow);
+    beginInsertRows(QModelIndex(), 0, 0);
+    mHasSyntheticRow = true;
+    endInsertRows();
+    emit hasUncommittedChangesChanged();
+}
+
+void GitGraphModel::removeSyntheticRow()
+{
+    Q_ASSERT(mHasSyntheticRow);
+    beginRemoveRows(QModelIndex(), 0, 0);
+    mHasSyntheticRow = false;
+    endRemoveRows();
+    emit hasUncommittedChangesChanged();
+}
+
+QList<int> GitGraphModel::lanesToIntList(const QVector<GitLane>& lanes)
+{
+    QList<int> laneTypes;
+    laneTypes.reserve(lanes.size());
+    for (const auto& lane : lanes)
+        laneTypes.append(static_cast<int>(lane.type()));
+    return laneTypes;
 }
 
 const GitCommitDetail& GitGraphModel::fetchDetail(int row) const
