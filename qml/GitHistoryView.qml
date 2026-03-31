@@ -11,6 +11,7 @@ Item {
         "#acc236", "#166a8f", "#00a950", "#58595b"
     ]
     property real laneWidth: 12
+    property real scrollBarSpacing: 0
 
     GitGraphModel {
         id: graphModel
@@ -30,6 +31,10 @@ Item {
         clip: true
         reuseItems: true
 
+        ScrollBar.vertical: ScrollBar {
+            id: verticalScrollBar
+        }
+
         delegate: GitHistoryRow {
             required property list<int> lanes
             required property int activeLane
@@ -39,7 +44,7 @@ Item {
             required property string sha
             required property list<string> refs
 
-            width: listView.width
+            width: listView.width - (verticalScrollBar.visible ? verticalScrollBar.width + root.scrollBarSpacing : 0)
             laneData: lanes
             activeLaneIndex: activeLane
             commitMessage: message
@@ -50,8 +55,6 @@ Item {
             laneColors: root.laneColors
             laneWidth: root.laneWidth
         }
-
-        ScrollBar.vertical: ScrollBar {}
     }
 
     Label {
