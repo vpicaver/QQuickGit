@@ -9,6 +9,7 @@
 #include "Account.h"
 #include "TestUtilities.h"
 #include "ProgressState.h"
+#include "LfsStore.h"
 
 //Qt includes
 #include <QDir>
@@ -1520,4 +1521,93 @@ TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     CHECK(count > 0);
     INFO("Json:" << future.progressText().toStdString());
     CHECK(ProgressState::fromJson(future.progressText()).progress() == 1.0);
+}
+
+TEST_CASE("GitRepository::hasMissingLfsFiles", "[GitRepository][lfs]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    // Valid LFS pointer content referencing a non-existent object.
+    LfsPointer pointer;
+    pointer.oid = QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    pointer.size = 42;
+    const QByteArray pointerText = pointer.toPointerText();
+    REQUIRE(!pointerText.isEmpty());
+
+    QObject* ctx = QCoreApplication::instance();
+
+    SECTION("returns false for a non-repository directory") {
+        const QDir nonRepo(tempDir.filePath(QStringLiteral("not-a-repo")));
+        REQUIRE(QDir().mkpath(nonRepo.absolutePath()));
+
+        auto future = GitRepository::hasMissingLfsFiles(nonRepo, ctx);
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == false);
+    }
+
+    SECTION("returns false when no LFS pointer files exist") {
+        const QDir repoDir(tempDir.filePath(QStringLiteral("clean-repo")));
+        REQUIRE(QDir().mkpath(repoDir.absolutePath()));
+
+        GitRepository repo;
+        repo.setDirectory(repoDir);
+        repo.initRepository();
+
+        // Write a plain text file — not an LFS pointer.
+        QFile f(repoDir.filePath(QStringLiteral("notes.txt")));
+        REQUIRE(f.open(QIODevice::WriteOnly));
+        f.write("just some text\n");
+        f.close();
+
+        auto future = GitRepository::hasMissingLfsFiles(repoDir, ctx);
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == false);
+    }
+
+    SECTION("returns true when an LFS pointer file has no backing object") {
+        const QDir repoDir(tempDir.filePath(QStringLiteral("missing-obj-repo")));
+        REQUIRE(QDir().mkpath(repoDir.absolutePath()));
+
+        GitRepository repo;
+        repo.setDirectory(repoDir);
+        repo.initRepository();
+
+        // Write a pointer file to the working tree without storing the object.
+        QFile f(repoDir.filePath(QStringLiteral("asset.png")));
+        REQUIRE(f.open(QIODevice::WriteOnly));
+        f.write(pointerText);
+        f.close();
+
+        auto future = GitRepository::hasMissingLfsFiles(repoDir, ctx);
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == true);
+    }
+
+    SECTION("returns false when the LFS object is present in the store") {
+        const QDir repoDir(tempDir.filePath(QStringLiteral("hydrated-repo")));
+        REQUIRE(QDir().mkpath(repoDir.absolutePath()));
+
+        git_repository* rawRepo = nullptr;
+        REQUIRE(git_repository_init(&rawRepo, repoDir.absolutePath().toLocal8Bit().constData(), 0) == GIT_OK);
+        const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(rawRepo))).absolutePath();
+        git_repository_free(rawRepo);
+
+        // Write the pointer file to the working tree.
+        QFile f(repoDir.filePath(QStringLiteral("asset.png")));
+        REQUIRE(f.open(QIODevice::WriteOnly));
+        f.write(pointerText);
+        f.close();
+
+        // Store a dummy object so the pointer is considered hydrated.
+        const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+        REQUIRE(QDir().mkpath(QFileInfo(objectPath).absolutePath()));
+        QFile obj(objectPath);
+        REQUIRE(obj.open(QIODevice::WriteOnly));
+        obj.write(QByteArray(static_cast<int>(pointer.size), 'x'));
+        obj.close();
+
+        auto future = GitRepository::hasMissingLfsFiles(repoDir, ctx);
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == false);
+    }
 }

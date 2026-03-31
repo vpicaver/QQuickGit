@@ -2579,6 +2579,19 @@ GitRepository::GitFuture GitRepository::hydrateLfsFiles(const QDir& repositoryDi
     return runLfsHydrationForDirectory(repositoryDir, context);
 }
 
+QFuture<bool> GitRepository::hasMissingLfsFiles(const QDir& repositoryDir, QObject* context)
+{
+    auto planFuture = prepareLfsHydrationPlan(repositoryDir);
+    return AsyncFuture::observe(planFuture)
+        .context(context, [planFuture]() -> bool {
+            const auto& result = planFuture.result();
+            if (result.hasError()) {
+                return false;
+            }
+            return !result.value().missingPointers.isEmpty();
+        }).future();
+}
+
 /**
 * @brief GitRepository::modifiedFileCount
 * @return

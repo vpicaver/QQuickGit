@@ -185,6 +185,7 @@ public:
                                                           const QString& commitOid,
                                                           const QString& relativePath);
     static GitFuture hydrateLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
+    static QFuture<bool> hasMissingLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
 
     static void initGitEngine();
     static void shutdownGitEngine();
