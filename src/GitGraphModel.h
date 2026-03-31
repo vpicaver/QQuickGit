@@ -28,6 +28,13 @@ struct GitCommitDetail
     QDateTime timestamp;
 };
 
+struct IndexPassResult
+{
+    QVector<QByteArray> oids;
+    QVector<GitRowGraph> graph;
+    QHash<QString, QStringList> refMap;
+};
+
 class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -78,7 +85,7 @@ private:
     mutable QHash<int, GitCommitDetail> mCache;
     bool mLoading = false;
 
-    AsyncFuture::Restarter<QVariant> mRestarter;
+    AsyncFuture::Restarter<IndexPassResult> mRestarter;
 };
 
 inline GitRepository* GitGraphModel::repository() const {

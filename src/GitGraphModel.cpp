@@ -2,30 +2,15 @@
 #include "GitGraphModel.h"
 #include "GitRepository.h"
 #include "GitLanes.h"
+#include "GitConcurrent.h"
 
 //Qt includes
-#include <QtConcurrent>
 #include <QDir>
 
 //libgit2
 #include "git2.h"
 
 using namespace QQuickGit;
-
-namespace GitGraphModelPrivate {
-
-struct IndexPassResult
-{
-    QVector<QByteArray> oids;
-    QVector<GitRowGraph> graph;
-    QHash<QString, QStringList> refMap;
-};
-
-} // namespace GitGraphModelPrivate
-
-Q_DECLARE_METATYPE(GitGraphModelPrivate::IndexPassResult)
-
-using namespace GitGraphModelPrivate;
 
 namespace {
 
@@ -203,7 +188,6 @@ GitGraphModel::GitGraphModel(QObject* parent)
     : QAbstractListModel(parent)
     , mRestarter(this)
 {
-    qRegisterMetaType<GitGraphModelPrivate::IndexPassResult>();
 }
 
 GitGraphModel::~GitGraphModel() = default;
@@ -316,7 +300,7 @@ void GitGraphModel::refresh()
             if (future.isCanceled())
                 return;
 
-            auto result = future.result().value<IndexPassResult>();
+            auto result = future.result();
 
             clearModel();
 
@@ -338,10 +322,9 @@ void GitGraphModel::refresh()
     emit loadingChanged();
     mCache.clear();
 
-    mRestarter.restart([repoPath]() -> QFuture<QVariant> {
-        return QtConcurrent::run([repoPath]() -> QVariant {
-            auto result = runIndexPass(repoPath);
-            return QVariant::fromValue(result);
+    mRestarter.restart([repoPath]() -> QFuture<IndexPassResult> {
+        return GitConcurrent::run([repoPath]() -> IndexPassResult {
+            return runIndexPass(repoPath);
         });
     });
 }
