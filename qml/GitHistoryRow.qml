@@ -13,7 +13,7 @@ Item {
     required property string commitSha
     required property list<string> commitRefs
     property list<color> laneColors
-    property real laneWidth: 20
+    property real laneWidth: 12
 
     implicitHeight: 28
 

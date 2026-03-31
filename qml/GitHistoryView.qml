@@ -10,7 +10,7 @@ Item {
         "#4dc9f6", "#f67019", "#f53794", "#537bc4",
         "#acc236", "#166a8f", "#00a950", "#58595b"
     ]
-    property real laneWidth: 20
+    property real laneWidth: 12
 
     GitGraphModel {
         id: graphModel
@@ -31,14 +31,22 @@ Item {
         reuseItems: true
 
         delegate: GitHistoryRow {
+            required property list<int> lanes
+            required property int activeLane
+            required property string message
+            required property string author
+            required property date timestamp
+            required property string sha
+            required property list<string> refs
+
             width: listView.width
-            laneData: model.lanes
-            activeLaneIndex: model.activeLane
-            commitMessage: model.message
-            commitAuthor: model.author
-            commitTimestamp: model.timestamp
-            commitSha: model.sha
-            commitRefs: model.refs
+            laneData: lanes
+            activeLaneIndex: activeLane
+            commitMessage: message
+            commitAuthor: author
+            commitTimestamp: timestamp
+            commitSha: sha
+            commitRefs: refs
             laneColors: root.laneColors
             laneWidth: root.laneWidth
         }

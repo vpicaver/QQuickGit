@@ -85,7 +85,7 @@ private:
     QList<int> mLanes;
     int mActiveLane = 0;
     QList<QColor> mColors;
-    float mLaneWidth = 20.0f;
+    float mLaneWidth = 12.0f;
     float mNodeRadius = 4.0f;
     float mLineWidth = 2.0f;
 };
@@ -108,6 +108,8 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
     const float lw = mLaneWidth;
     const int laneCount = mLanes.size();
 
+    painter->clearRect(0, 0, width(), h);
+
     if (laneCount == 0 || mColors.isEmpty())
         return;
 
@@ -128,36 +130,50 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
 
         painter->setStrokeStyle(color);
 
-        if (hasTopLine(type))
-        {
-            painter->beginPath();
-            painter->moveTo(cx, 0);
-            painter->lineTo(cx, midY);
-            painter->stroke();
-        }
+        const bool isCurvedLane = (i != mActiveLane) &&
+            (isHeadType(type) || isTailType(type) || isJoinType(type));
 
-        if (hasBottomLine(type))
+        if (isCurvedLane)
         {
+            // Smooth S-curve connecting this lane to the active lane.
+            // Skip the straight vertical segments — the curve covers them.
             painter->beginPath();
-            painter->moveTo(cx, midY);
-            painter->lineTo(cx, h);
-            painter->stroke();
-        }
-
-        if (i != mActiveLane)
-        {
             if (isHeadType(type))
             {
-                painter->beginPath();
                 painter->moveTo(activeCX, midY);
                 painter->quadraticCurveTo(cx, midY, cx, h);
+            }
+            else // isTailType || isJoinType
+            {
+                painter->moveTo(cx, 0);
+                painter->quadraticCurveTo(cx, midY, activeCX, midY);
+            }
+            painter->stroke();
+
+            // Join lanes also continue below the commit row — draw that segment.
+            if (isJoinType(type))
+            {
+                painter->beginPath();
+                painter->moveTo(cx, midY);
+                painter->lineTo(cx, h);
                 painter->stroke();
             }
-            else if (isTailType(type) || isJoinType(type))
+        }
+        else
+        {
+            if (hasTopLine(type))
             {
                 painter->beginPath();
                 painter->moveTo(cx, 0);
-                painter->quadraticCurveTo(cx, midY, activeCX, midY);
+                painter->lineTo(cx, midY);
+                painter->stroke();
+            }
+
+            if (hasBottomLine(type))
+            {
+                painter->beginPath();
+                painter->moveTo(cx, midY);
+                painter->lineTo(cx, h);
                 painter->stroke();
             }
         }
@@ -188,6 +204,7 @@ GitGraphLaneItem::GitGraphLaneItem(QQuickItem* parent)
     : QCanvasPainterItem(parent)
 {
     setFillColor(Qt::transparent);
+    setAlphaBlending(true);
 }
 
 void GitGraphLaneItem::setLanes(const QList<int>& lanes)

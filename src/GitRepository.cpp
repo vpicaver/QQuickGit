@@ -2188,6 +2188,17 @@ QString GitRepository::addRemote(const QString &name, const QString &rawUrl) noe
     return QString();
 }
 
+QString GitRepository::removeRemote(const QString &name) noexcept
+{
+    try {
+        check(git_remote_delete(d->repo, name.toLocal8Bit()));
+        emit remotesChanged();
+    } catch (const std::runtime_error& error) {
+        return QString::fromLocal8Bit(error.what()).trimmed();
+    }
+    return QString();
+}
+
 QUrl GitRepository::remoteUrl(QString name) const
 {
     name = fixUpRemote(name);

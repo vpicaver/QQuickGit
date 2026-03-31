@@ -3,6 +3,7 @@
 
 #include "QQuickGitExport.h"
 #include <QObject>
+#include <QQmlEngine>
 #include <QUrl>
 #include <QFuture>
 
@@ -11,6 +12,7 @@ namespace QQuickGit {
 class QQUICKGIT_EXPORT GitTestConnection : public QObject
 {
     Q_OBJECT
+    QML_ELEMENT
 
     Q_PROPERTY(QUrl url READ url WRITE setUrl NOTIFY urlChanged)
     Q_PROPERTY(State state READ state NOTIFY stateChanged)
