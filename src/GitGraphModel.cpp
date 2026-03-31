@@ -81,6 +81,10 @@ QHash<QString, QStringList> buildRefMap(git_repository* repo)
         else
             continue;
 
+        // Skip symbolic refs (e.g. origin/HEAD) — they duplicate the branch they point to
+        if (git_reference_type(ref) == GIT_REFERENCE_SYMBOLIC)
+            continue;
+
         git_reference* resolved = nullptr;
         if (git_reference_resolve(&resolved, ref) != GIT_OK)
             continue;

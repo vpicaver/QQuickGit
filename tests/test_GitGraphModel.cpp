@@ -189,6 +189,44 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(roles[GitGraphModel::LanesRole] == "lanes");
     }
 
+    SECTION("Symbolic refs like origin/HEAD are excluded from ref labels") {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+
+        // Create origin/main (direct ref) and origin/HEAD (symbolic ref) using libgit2
+        git_repository* rawRepo = nullptr;
+        REQUIRE(git_repository_open(&rawRepo, tempDir.path().toLocal8Bit().constData()) == GIT_OK);
+        std::unique_ptr<git_repository, decltype(&git_repository_free)>
+            repoHolder(rawRepo, &git_repository_free);
+
+        git_reference* headRef = nullptr;
+        REQUIRE(git_repository_head(&headRef, rawRepo) == GIT_OK);
+        const git_oid* headOid = git_reference_target(headRef);
+        REQUIRE(headOid != nullptr);
+
+        git_reference* originMain = nullptr;
+        git_reference_create(&originMain, rawRepo, "refs/remotes/origin/main", headOid, 1, nullptr);
+        if (originMain) git_reference_free(originMain);
+
+        git_reference* originHead = nullptr;
+        git_reference_symbolic_create(&originHead, rawRepo, "refs/remotes/origin/HEAD",
+                                      "refs/remotes/origin/main", 1, nullptr);
+        if (originHead) git_reference_free(originHead);
+        git_reference_free(headRef);
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        REQUIRE(model.rowCount() == 1);
+        auto refs = model.data(model.index(0, 0), GitGraphModel::RefsRole).toStringList();
+
+        CHECK(refs.contains("origin/main"));
+        CHECK_FALSE(refs.contains("origin/HEAD"));
+    }
+
     SECTION("Setting null repository clears model") {
         createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
 
