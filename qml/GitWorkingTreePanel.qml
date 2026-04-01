@@ -200,18 +200,33 @@ Item {
                 wrapMode: TextEdit.Wrap
             }
 
-            Button {
-                id: commitButton
-                objectName: "commitButton"
+            RowLayout {
                 Layout.fillWidth: true
-                text: qsTr("Commit All Changes")
-                enabled: subjectField.text.trim().length > 0
-                         && root._fileCount > 0
+                spacing: 8
 
-                // commitAll() requires account() to be set.
-                // CaveWhere guarantees this at startup before the UI is reachable.
-                onClicked: root.commitRequested(subjectField.text.trim(),
-                                                descriptionField.text.trim())
+                Button {
+                    id: commitButton
+                    objectName: "commitButton"
+                    Layout.fillWidth: true
+                    text: qsTr("Commit All Changes")
+                    enabled: subjectField.text.trim().length > 0
+                             && root._fileCount > 0
+
+                    // commitAll() requires account() to be set.
+                    // CaveWhere guarantees this at startup before the UI is reachable.
+                    onClicked: root.commitRequested(subjectField.text.trim(),
+                                                    descriptionField.text.trim())
+                }
+
+                Button {
+                    id: discardButton
+                    objectName: "discardButton"
+                    text: qsTr("Discard All")
+                    enabled: root._fileCount > 0
+                    palette.buttonText: root.deletedColor
+
+                    onClicked: discardDialog.open()
+                }
             }
 
             Label {
@@ -222,6 +237,44 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 visible: root._fileCount > 0
             }
+        }
+    }
+
+    Dialog {
+        id: discardDialog
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Discard All Changes?")
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("This will permanently delete all uncommitted changes including untracked files. This cannot be undone.")
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        footer: DialogButtonBox {
+            alignment: Qt.AlignRight
+
+            Button {
+                text: qsTr("Cancel")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+
+            Button {
+                text: qsTr("Discard All Changes")
+                palette.buttonText: root.deletedColor
+                DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
+            }
+        }
+
+        onDiscarded: {
+            root.repository.resetHard("HEAD")
+            root.repository.cleanUntracked()
+            root.repository.checkStatus()
         }
     }
 }
