@@ -20,7 +20,7 @@ Item {
     property color errorColor: "#ff4444"
     property color errorBackground: "#44ff0000"
 
-    signal fileClicked(string filePath, string statusText)
+    signal fileClicked(string filePath, bool isBinary, bool isImage, string statusText)
 
     function formatParentEntry(idx) {
         if (idx < 0 || idx >= commitInfoLoader.parentShas.length)
@@ -244,7 +244,7 @@ Item {
                 width: fileListView.width
                 implicitHeight: 28
 
-                onClicked: root.fileClicked(filePath, statusText)
+                onClicked: root.fileClicked(filePath, isBinary, isImage, statusText)
 
                 Component.onCompleted: {
                     fileModelLoader.fetchLineStats(index)
