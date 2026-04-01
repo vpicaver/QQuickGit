@@ -188,6 +188,7 @@ public:
     Q_INVOKABLE QByteArray fileContentAtCommit(const QString& commitOid,
                                                 const QString& relativePath) const;
     static GitFuture hydrateLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
+    static QFuture<bool> hasMissingLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
 
     static void initGitEngine();
     static void shutdownGitEngine();

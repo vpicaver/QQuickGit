@@ -258,10 +258,6 @@ QByteArray LfsPointer::toPointerText() const
 
 bool LfsPointer::parse(const QByteArray& data, LfsPointer* outPointer)
 {
-    if (!outPointer) {
-        return false;
-    }
-
     const QList<QByteArray> lines = data.split('\n');
     if (lines.isEmpty()) {
         return false;
@@ -304,9 +300,12 @@ bool LfsPointer::parse(const QByteArray& data, LfsPointer* outPointer)
         return false;
     }
 
-    outPointer->oid = QString::fromLatin1(oidBytes);
-    outPointer->size = size;
-    return outPointer->isValid();
+    if (outPointer) {
+        outPointer->oid = QString::fromLatin1(oidBytes);
+        outPointer->size = size;
+        return outPointer->isValid();
+    }
+    return !oidBytes.isEmpty() && size >= 0;
 }
 
 bool LfsStore::isLfsEligible(const QString& filePath) const
@@ -513,7 +512,7 @@ QObject* LfsStore::lfsContext() const
 bool LfsStore::shouldFallbackForFetchError(int errorCode)
 {
     const auto code = static_cast<LfsFetchErrorCode>(errorCode);
-    return code == LfsFetchErrorCode::NoRemote || code == LfsFetchErrorCode::Offline;
+    return code == LfsFetchErrorCode::NoRemote;
 }
 
 QString LfsStore::objectPath(const QString& gitDirPath, const QString& oid)

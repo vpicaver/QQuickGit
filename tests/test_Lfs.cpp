@@ -1171,6 +1171,17 @@ TEST_CASE("LfsPointer parse rejects traversal-style oid", "[LFS]") {
     CHECK_FALSE(LfsPointer::parse(pointerText, &parsed));
 }
 
+TEST_CASE("LfsPointer parse accepts nullptr out-pointer", "[LFS]") {
+    LfsPointer pointer;
+    pointer.oid = QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    pointer.size = 42;
+    const QByteArray validPointer = pointer.toPointerText();
+    REQUIRE(!validPointer.isEmpty());
+
+    CHECK(LfsPointer::parse(validPointer, nullptr));
+    CHECK_FALSE(LfsPointer::parse(QByteArray("not a pointer"), nullptr));
+}
+
 TEST_CASE("LfsStore store/read bytes", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
@@ -1251,6 +1262,62 @@ TEST_CASE("Lfs filter clean/smudge round trip", "[LFS]") {
     git_buf_dispose(&smudgeOut);
     git_filter_list_free(cleanFilters);
     git_filter_list_free(smudgeFilters);
+    LfsStoreRegistry::unregisterStore(gitDirPath, store);
+    git_repository_free(repo);
+}
+
+TEST_CASE("Lfs filter clean is idempotent for existing LFS pointer", "[LFS]") {
+    // Applying the clean filter to a file that already contains an LFS pointer
+    // (e.g. an unhydrated clone) must emit the same pointer unchanged. Without
+    // this the pointer would be double-encoded as a new LFS object with a
+    // different OID, breaking subsequent sync/download.
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init(&repo, tempDir.path().toLocal8Bit().constData(), 0) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    auto store = std::make_shared<LfsStore>(gitDirPath, makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    LfsStoreRegistry::registerStore(store);
+
+    const QString repoPath = tempDir.path();
+    const QString attributesPath = QDir(repoPath).filePath(QStringLiteral(".gitattributes"));
+    REQUIRE(writeTextFile(attributesPath, QByteArray("*.png filter=lfs diff=lfs merge=lfs -text\n")));
+
+    // Stage a binary payload through the clean filter to obtain its canonical LFS pointer.
+    const QByteArray binaryPayload("lfs-binary-\x01\x02\x03", 14);
+    git_filter_list* cleanFilters = nullptr;
+    REQUIRE(git_filter_list_load(&cleanFilters, repo, nullptr, "test.png", GIT_FILTER_TO_ODB, GIT_FILTER_DEFAULT) == GIT_OK);
+
+    git_buf firstCleanOut = GIT_BUF_INIT;
+    REQUIRE(git_filter_list_apply_to_buffer(&firstCleanOut, cleanFilters, binaryPayload.constData(), static_cast<size_t>(binaryPayload.size())) == GIT_OK);
+    const QByteArray firstPointerText(firstCleanOut.ptr, static_cast<int>(firstCleanOut.size));
+
+    LfsPointer firstPointer;
+    REQUIRE(LfsPointer::parse(firstPointerText, &firstPointer));
+
+    git_buf_dispose(&firstCleanOut);
+    git_filter_list_free(cleanFilters);
+
+    // Now apply the clean filter again to the pointer text itself (simulating
+    // re-staging an unhydrated working-tree file that contains pointer text).
+    git_filter_list* cleanFilters2 = nullptr;
+    REQUIRE(git_filter_list_load(&cleanFilters2, repo, nullptr, "test.png", GIT_FILTER_TO_ODB, GIT_FILTER_DEFAULT) == GIT_OK);
+
+    git_buf secondCleanOut = GIT_BUF_INIT;
+    REQUIRE(git_filter_list_apply_to_buffer(&secondCleanOut, cleanFilters2, firstPointerText.constData(), static_cast<size_t>(firstPointerText.size())) == GIT_OK);
+    const QByteArray secondPointerText(secondCleanOut.ptr, static_cast<int>(secondCleanOut.size));
+
+    LfsPointer secondPointer;
+    REQUIRE(LfsPointer::parse(secondPointerText, &secondPointer));
+
+    // The OID and size must be identical — the clean filter must be idempotent.
+    CHECK(secondPointer.oid == firstPointer.oid);
+    CHECK(secondPointer.size == firstPointer.size);
+
+    git_buf_dispose(&secondCleanOut);
+    git_filter_list_free(cleanFilters2);
     LfsStoreRegistry::unregisterStore(gitDirPath, store);
     git_repository_free(repo);
 }
@@ -1542,7 +1609,8 @@ TEST_CASE("Lfs reset falls back to pointer when object is missing and no remote 
     INFO("Reset error:" << resetFuture.result().errorMessage().toStdString()
          << "code:" << resetFuture.result().errorCode());
 
-    // Expected behavior: no-remote/offline fetch errors should fall back to pointer text.
+    // Expected behavior: no-remote fetch errors should fall back to pointer text.
+    // Offline errors are hard failures and do not fall back.
     CHECK(!resetFuture.result().hasError());
 
     const QByteArray postResetBytes = readFileBytes(imagePath);
