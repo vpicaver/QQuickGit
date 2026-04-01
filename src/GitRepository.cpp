@@ -3507,6 +3507,18 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                                      &theirsInput,
                                      &options));
 
+                if (!result.automergeable) {
+                    git_merge_file_result_free(&result);
+                    result = {};
+                    git_merge_file_options retryOptions = GIT_MERGE_FILE_OPTIONS_INIT;
+                    retryOptions.favor = GIT_MERGE_FILE_FAVOR_OURS;
+                    check(git_merge_file(&result,
+                                         &ancestorInput,
+                                         &oursInput,
+                                         &theirsInput,
+                                         &retryOptions));
+                }
+
                 QByteArray mergedBuffer = result.ptr != nullptr && result.len > 0
                     ? QByteArray(result.ptr, static_cast<int>(result.len))
                     : QByteArray();

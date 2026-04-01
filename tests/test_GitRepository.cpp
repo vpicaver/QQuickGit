@@ -829,8 +829,117 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             QFile mergedTripFile(tempDir.absoluteFilePath("Trip Renamed/Trip Renamed.cwtrip"));
             REQUIRE(mergedTripFile.open(QFile::ReadOnly));
             const auto mergedTripContent = mergedTripFile.readAll();
-            CHECK(mergedTripContent.contains("date=2024-08-23"));
+            CHECK_FALSE(mergedTripContent.contains("<<<<<<<"));
+            CHECK_FALSE(mergedTripContent.contains("======="));
+            CHECK_FALSE(mergedTripContent.contains(">>>>>>>"));
             CHECK(mergedTripContent.contains("name=Trip Renamed"));
+        }
+
+        SECTION("Test no conflict markers when ours renames directory and both sides modify a file inside it") {
+            // Regression: when one branch renames a directory AND both branches modify
+            // a file inside it, reconcileRenameMap() calls mergeBuffers() which calls
+            // git_merge_file(). When both sides changed the same line, this generates
+            // conflict markers with path labels (e.g. "<<<<<<< Cave 3006/notes/1.cwnote")
+            // rather than "<<<<<<< HEAD". These markers were staged and committed as-is.
+            // The file must be long enough for libgit2's rename detection (similarity > 50%).
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            // Build a realistic-length JSON note file (~30 lines) so libgit2's rename
+            // detection sees high similarity despite the one-field change.
+            const QByteArray notePrefix =
+                "{\n"
+                " \"image\": {\n"
+                "  \"size\": { \"width\": 3195, \"height\": 2564 },\n"
+                "  \"dotPerMeter\": 3780,\n"
+                "  \"path\": \"1.jpeg\"\n"
+                " },\n"
+                " \"rotation\": 0,\n"
+                " \"scraps\": [\n"
+                "  {\n"
+                "   \"outlinePoints\": [\n"
+                "    { \"x\": 0.555, \"y\": 0.496 },\n"
+                "    { \"x\": 0.567, \"y\": 0.523 },\n"
+                "    { \"x\": 0.589, \"y\": 0.538 },\n"
+                "    { \"x\": 0.597, \"y\": 0.569 },\n"
+                "    { \"x\": 0.610, \"y\": 0.583 },\n"
+                "    { \"x\": 0.635, \"y\": 0.626 },\n"
+                "    { \"x\": 0.647, \"y\": 0.662 },\n"
+                "    { \"x\": 0.646, \"y\": 0.694 },\n"
+                "    { \"x\": 0.648, \"y\": 0.731 },\n"
+                "    { \"x\": 0.653, \"y\": 0.738 }\n"
+                "   ],\n"
+                "   \"type\": \"Plan\",\n"
+                "   \"id\": \"0ff83d05-648f-4ab2-9336-e98b853f0871\"\n"
+                "  }\n"
+                " ],\n"
+                " \"imageResolution\": {\n"
+                "  \"value\": 96.012,\n"
+                "  \"unit\": \"DotsPerInch\"\n"
+                " },\n"
+                " \"name\": \"1\",\n"
+                " \"fileVersion\": {\n"
+                "  \"version\": 8,\n";
+            const QByteArray noteSuffix =
+                " },\n"
+                " \"id\": \"228fa0cc-2db5-45ed-b7ca-1d17ac93c207\"\n"
+                "}\n";
+
+            REQUIRE(tempDir.mkpath(QStringLiteral("Cave 3000/notes")));
+            {
+                QFile noteFile(tempDir.absoluteFilePath("Cave 3000/notes/1.cwnote"));
+                REQUIRE(noteFile.open(QFile::WriteOnly | QFile::Truncate));
+                noteFile.write(notePrefix);
+                noteFile.write("  \"cavewhereVersion\": \"base\"\n");
+                noteFile.write(noteSuffix);
+            }
+            CHECK_NOTHROW(repo.commitAll("seed note", "seed note file in Cave 3000"));
+
+            // Ours branch: rename Cave 3000 -> Cave 3006 AND change the version field
+            CHECK_NOTHROW(repo.createBranch("renameAndModifyBranch"));
+            CHECK(repo.headBranchName().toStdString() == "renameAndModifyBranch");
+
+            REQUIRE(QDir(tempDir.absolutePath()).rename(QStringLiteral("Cave 3000"),
+                                                        QStringLiteral("Cave 3006")));
+            {
+                QFile noteFile(tempDir.absoluteFilePath("Cave 3006/notes/1.cwnote"));
+                REQUIRE(noteFile.open(QFile::WriteOnly | QFile::Truncate));
+                noteFile.write(notePrefix);
+                noteFile.write("  \"cavewhereVersion\": \"ours-version\"\n");
+                noteFile.write(noteSuffix);
+            }
+            CHECK_NOTHROW(repo.commitAll("rename and modify", "rename Cave dir and update version"));
+
+            // Theirs (master): modify same field, no rename
+            waitForGitFuture(repo.checkout("refs/heads/master"));
+            CHECK(repo.headBranchName().toStdString() == "master");
+
+            {
+                QFile noteFile(tempDir.absoluteFilePath("Cave 3000/notes/1.cwnote"));
+                REQUIRE(noteFile.open(QFile::WriteOnly | QFile::Truncate));
+                noteFile.write(notePrefix);
+                noteFile.write("  \"cavewhereVersion\": \"theirs-version\"\n");
+                noteFile.write(noteSuffix);
+            }
+            CHECK_NOTHROW(repo.commitAll("theirs modify", "update version on master"));
+
+            // Back to ours, merge theirs
+            waitForGitFuture(repo.checkout("refs/heads/renameAndModifyBranch"));
+            CHECK(repo.headBranchName().toStdString() == "renameAndModifyBranch");
+
+            GitRepository::MergeResult result;
+            CHECK_NOTHROW(result = repo.merge({"master"}));
+            CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
+
+            // The merged file must not contain raw conflict markers
+            QFile mergedFile(tempDir.absoluteFilePath("Cave 3006/notes/1.cwnote"));
+            REQUIRE(mergedFile.open(QFile::ReadOnly));
+            const auto mergedContent = QString::fromUtf8(mergedFile.readAll());
+            CHECK_FALSE(mergedContent.contains(QStringLiteral("<<<<<<<")));
+            CHECK_FALSE(mergedContent.contains(QStringLiteral("=======")));
+            CHECK_FALSE(mergedContent.contains(QStringLiteral(">>>>>>>")));
+            // resolveWithOurs picks our (renamed) version
+            CHECK(mergedContent.contains(QStringLiteral("ours-version")));
         }
     }
 }
