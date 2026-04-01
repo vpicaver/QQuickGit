@@ -14,8 +14,32 @@ Item {
     required property list<string> commitRefs
     property list<color> laneColors
     property real laneWidth: 12
+    property bool selected: false
+    property color highlightColor: palette.highlight
+    property color syntheticBackground: palette.mid
+    property color syntheticBorderColor: palette.dark
+    property url syntheticIconSource
+
+    readonly property bool _isSynthetic: commitSha === ""
 
     implicitHeight: 28
+
+    Rectangle {
+        anchors.fill: parent
+        color: row.selected ? row.highlightColor
+             : row._isSynthetic ? row.syntheticBackground
+             : "transparent"
+        radius: 3
+    }
+
+    Loader {
+        anchors.fill: parent
+        active: row._isSynthetic
+        sourceComponent: GitDashedBorderItem {
+            borderColor: row.syntheticBorderColor
+            radius: 3
+        }
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -28,6 +52,16 @@ Item {
             activeLane: row.activeLaneIndex
             colors: row.laneColors
             laneWidth: row.laneWidth
+        }
+
+        Loader {
+            active: row._isSynthetic && row.syntheticIconSource.toString() !== ""
+            sourceComponent: Image {
+                source: row.syntheticIconSource
+                sourceSize.width: 14
+                sourceSize.height: 14
+                opacity: 0.7
+            }
         }
 
         Row {
@@ -53,6 +87,7 @@ Item {
             elide: Text.ElideRight
             color: row.palette.text
             font.pixelSize: 13
+            font.italic: row._isSynthetic
         }
 
         Text {

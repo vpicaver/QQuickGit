@@ -97,6 +97,7 @@ void TestUtilities::createFileAndCommit(QQuickGit::GitRepository& repo, const QS
     account.setEmail("test@example.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
+    repo.checkStatus();
 }
 
 void TestUtilities::deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
@@ -112,6 +113,7 @@ void TestUtilities::deleteFileAndCommit(QQuickGit::GitRepository& repo, const QS
     account.setEmail("test@example.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
+    repo.checkStatus();
 }
 
 QString TestUtilities::getHeadSha(const QDir& dir)

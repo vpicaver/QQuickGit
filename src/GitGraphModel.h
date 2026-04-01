@@ -28,6 +28,13 @@ struct GitCommitDetail
     QDateTime timestamp;
 };
 
+struct IndexPassResult
+{
+    QVector<QByteArray> oids;
+    QVector<GitRowGraph> graph;
+    QHash<QString, QStringList> refMap;
+};
+
 class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -35,6 +42,7 @@ class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel
 
     Q_PROPERTY(QQuickGit::GitRepository* repository READ repository WRITE setRepository NOTIFY repositoryChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+    Q_PROPERTY(bool hasUncommittedChanges READ hasUncommittedChanges NOTIFY hasUncommittedChangesChanged)
 
 public:
     enum Roles
@@ -56,6 +64,7 @@ public:
     void setRepository(GitRepository* repository);
 
     bool loading() const;
+    bool hasUncommittedChanges() const;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
@@ -66,9 +75,15 @@ public:
 signals:
     void repositoryChanged();
     void loadingChanged();
+    void hasUncommittedChangesChanged();
 
 private:
     void clearModel();
+    void updateSyntheticRow();
+    void insertSyntheticRow();
+    void removeSyntheticRow();
+    int syntheticOffset() const;
+    static QList<int> lanesToIntList(const QVector<GitLane>& lanes);
     const GitCommitDetail& fetchDetail(int row) const;
 
     GitRepository* mRepository = nullptr;
@@ -77,8 +92,9 @@ private:
     QHash<QString, QStringList> mRefMap; //!< sha -> list of ref names
     mutable QHash<int, GitCommitDetail> mCache;
     bool mLoading = false;
+    bool mHasSyntheticRow = false;
 
-    AsyncFuture::Restarter<QVariant> mRestarter;
+    AsyncFuture::Restarter<IndexPassResult> mRestarter;
 };
 
 inline GitRepository* GitGraphModel::repository() const {
@@ -87,6 +103,14 @@ inline GitRepository* GitGraphModel::repository() const {
 
 inline bool GitGraphModel::loading() const {
     return mLoading;
+}
+
+inline bool GitGraphModel::hasUncommittedChanges() const {
+    return mHasSyntheticRow;
+}
+
+inline int GitGraphModel::syntheticOffset() const {
+    return mHasSyntheticRow ? 1 : 0;
 }
 
 }

@@ -88,10 +88,11 @@ private:
 };
 
 TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
-    QDir cloneDir("clone-test");
+    QTemporaryDir tempParent;
+    REQUIRE(tempParent.isValid());
+    QDir cloneDir(tempParent.filePath("clone-test"));
 
     INFO("Dir:" << QDir::toNativeSeparators(cloneDir.absolutePath()).toStdString());
-    CHECK(cloneDir.removeRecursively());
 
     GitRepository repository;
     repository.setDirectory(cloneDir);
@@ -120,8 +121,7 @@ TEST_CASE("GitRepository should work correctly", "[GitRepository]") {
 
     CHECK(cloneDir.exists("README.md"));
 
-    QDir cloneDir2("clone-test2");
-    CHECK(cloneDir2.removeRecursively());
+    QDir cloneDir2(tempParent.filePath("clone-test2"));
 
     GitRepository repository2;
     repository2.setDirectory(cloneDir2);
@@ -1492,10 +1492,11 @@ TEST_CASE("GitRepository addRemote raw-string overload should work correctly", "
 }
 
 TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
-    QDir cloneDir("clone-test");
+    QTemporaryDir tempParent;
+    REQUIRE(tempParent.isValid());
+    QDir cloneDir(tempParent.filePath("clone-test"));
 
     INFO("Dir:" << QDir::toNativeSeparators(cloneDir.absolutePath()).toStdString());
-    CHECK(cloneDir.removeRecursively());
 
     GitRepository repository;
     repository.setDirectory(cloneDir);

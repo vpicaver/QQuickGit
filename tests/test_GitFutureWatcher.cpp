@@ -12,6 +12,7 @@ using namespace SignalSpyChecker;
 
 //Qt includes
 #include <QDir>
+#include <QTemporaryDir>
 
 const int timeout = 30000;
 
@@ -20,10 +21,11 @@ using namespace QQuickGit;
 //This test case is flakey
 TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[GitFutureWatcher]") {
 
-    QDir cloneDir("clone-test");
+    QTemporaryDir tempParent;
+    REQUIRE(tempParent.isValid());
+    QDir cloneDir(tempParent.filePath("clone-test"));
 
     INFO("Dir:" << QDir::toNativeSeparators(cloneDir.absolutePath()).toStdString());
-    CHECK(cloneDir.removeRecursively());
 
     GitRepository repository;
     repository.setDirectory(cloneDir);
@@ -64,10 +66,11 @@ TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[Gi
 
 TEST_CASE("GitFutureWatcher Test bad url handling", "[GitFutureWatcher]") {
 
-    QDir cloneDir("clone-test");
+    QTemporaryDir tempParent;
+    REQUIRE(tempParent.isValid());
+    QDir cloneDir(tempParent.filePath("clone-test"));
 
     INFO("Dir:" << QDir::toNativeSeparators(cloneDir.absolutePath()).toStdString());
-    CHECK(cloneDir.removeRecursively());
 
     GitRepository repository;
     repository.setDirectory(cloneDir);
