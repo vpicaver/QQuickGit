@@ -14,8 +14,16 @@ Item {
     required property list<string> commitRefs
     property list<color> laneColors
     property real laneWidth: 12
+    property bool selected: false
+    property color highlightColor: palette.highlight
 
     implicitHeight: 28
+
+    Rectangle {
+        anchors.fill: parent
+        color: row.selected ? row.highlightColor : "transparent"
+        radius: 3
+    }
 
     RowLayout {
         anchors.fill: parent

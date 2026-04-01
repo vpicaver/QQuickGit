@@ -12,10 +12,30 @@ Item {
     ]
     property real laneWidth: 12
     property real scrollBarSpacing: 0
+    property color highlightColor: palette.highlight
+
+    readonly property string selectedSha: _selectedSha
+    readonly property bool selectedIsUncommitted: _selectedSha === ""
+                                                  && _hasSelection
+
+    property string _selectedSha
+    property bool _hasSelection: false
+
+    function _selectIndex(index: int): void {
+        let sha = graphModel.data(graphModel.index(index, 0),
+                                  GitGraphModel.ShaRole)
+        _selectedSha = sha ?? ""
+        _hasSelection = true
+    }
 
     GitGraphModel {
         id: graphModel
         repository: root.repository
+
+        onRowsInserted: (parent, first, last) => {
+            if (!root._hasSelection && graphModel.rowCount() > 0)
+                root._selectIndex(0)
+        }
     }
 
     BusyIndicator {
@@ -43,6 +63,7 @@ Item {
             required property date timestamp
             required property string sha
             required property list<string> refs
+            required property int index
 
             width: listView.width - (verticalScrollBar.visible ? verticalScrollBar.width + root.scrollBarSpacing : 0)
             laneData: lanes
@@ -54,6 +75,12 @@ Item {
             commitRefs: refs
             laneColors: root.laneColors
             laneWidth: root.laneWidth
+            selected: root._hasSelection && sha === root._selectedSha
+            highlightColor: root.highlightColor
+
+            TapHandler {
+                onTapped: root._selectIndex(index)
+            }
         }
     }
 
