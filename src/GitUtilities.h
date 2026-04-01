@@ -18,6 +18,7 @@ public:
     Q_INVOKABLE static QUrl fixGitUrl(const QString& sshUrl);
     Q_INVOKABLE static QUrl lfsEndpointFromRemoteUrl(const QString& remoteUrl);
     Q_INVOKABLE static bool isRemoteNameValid(const QString& remoteName);
+    Q_INVOKABLE static void copyToClipboard(const QString& text);
 
 signals:
 

@@ -56,7 +56,9 @@ bool checkBinaryIsImage(git_repository* repo, const git_diff_delta* delta)
     // First check extension
     const char* path = delta->new_file.path ? delta->new_file.path : delta->old_file.path;
     if (path && isImageByExtension(QString::fromUtf8(path)))
+    {
         return true;
+    }
 
     // For binary files without recognized extension, check blob header
     if (git_oid_is_zero(&delta->new_file.id))

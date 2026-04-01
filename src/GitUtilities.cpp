@@ -1,6 +1,9 @@
 #include "GitUtilities.h"
 #include "git2.h"
 
+#include <QClipboard>
+#include <QGuiApplication>
+
 using namespace QQuickGit;
 
 GitUtilities::GitUtilities(QObject *parent) : QObject(parent)
@@ -62,4 +65,12 @@ QUrl GitUtilities::lfsEndpointFromRemoteUrl(const QString& remoteUrl)
 bool GitUtilities::isRemoteNameValid(const QString &remoteName)
 {
     return git_remote_is_valid_name(remoteName.toLocal8Bit());
+}
+
+void GitUtilities::copyToClipboard(const QString& text)
+{
+    if (auto* clipboard = QGuiApplication::clipboard())
+    {
+        clipboard->setText(text);
+    }
 }
