@@ -242,7 +242,6 @@ GitFilePatch::GitFilePatch(QObject* parent)
 GitFilePatch::~GitFilePatch()
 {
     mRestarter.future().cancel();
-    AsyncFuture::waitForFinished(mRestarter.future());
 }
 
 int GitFilePatch::rowCount(const QModelIndex& parent) const

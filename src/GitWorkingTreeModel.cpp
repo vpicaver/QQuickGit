@@ -343,8 +343,6 @@ GitWorkingTreeModel::~GitWorkingTreeModel()
 {
     cancelLineStatsFutures();
     mRestarter.future().cancel();
-    if (mRestarter.future().isRunning())
-        AsyncFuture::waitForFinished(mRestarter.future());
 }
 
 void GitWorkingTreeModel::setRepository(GitRepository* repository)

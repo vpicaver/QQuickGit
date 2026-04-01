@@ -209,7 +209,6 @@ GitCommitInfo::GitCommitInfo(QObject* parent)
 GitCommitInfo::~GitCommitInfo()
 {
     mRestarter.future().cancel();
-    AsyncFuture::waitForFinished(mRestarter.future());
 }
 
 void GitCommitInfo::setRepository(GitRepository* repository)

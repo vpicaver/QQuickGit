@@ -471,6 +471,50 @@ TEST_CASE("GitCommitFileModel setting commitInfo to null clears connection", "[G
     CHECK(model.rowCount() == 1);
 }
 
+TEST_CASE("GitCommitFileModel rapid SHA switch with pending line stats does not crash", "[GitCommitFileModel]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "aaa\nbbb\nccc\n", "First");
+    QString sha1 = TestUtilities::getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "aaa\nBBB\nccc\nDDD\n", "Second");
+    QString sha2 = TestUtilities::getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "XXX\nYYY\nZZZ\n", "Third");
+    QString sha3 = TestUtilities::getHeadSha(repo.directory());
+
+    GitCommitInfo info;
+    info.setRepository(&repo);
+
+    GitCommitFileModel model;
+    model.setCommitInfo(&info);
+
+    // Load first commit and kick off line stat fetches
+    info.setCommitSha(sha1);
+    waitForLoading(info);
+    REQUIRE(model.rowCount() >= 1);
+    model.fetchLineStats(0);
+
+    // Rapidly switch to another commit while line stats are still pending.
+    // Before the fix, this triggered a use-after-free in cancelAllLineStatFutures
+    // because waitForFinished spun the event loop, re-entering via fileListReady.
+    info.setCommitSha(sha2);
+    waitForLoading(info);
+    REQUIRE(model.rowCount() >= 1);
+    model.fetchLineStats(0);
+
+    info.setCommitSha(sha3);
+    waitForLoading(info);
+    REQUIRE(model.rowCount() >= 1);
+
+    // If we get here without ASan/crash, the fix works
+    CHECK(true);
+}
+
 TEST_CASE("GitCommitFileModel multi-file commit shows all files", "[GitCommitFileModel]")
 {
     QTemporaryDir tempDir;

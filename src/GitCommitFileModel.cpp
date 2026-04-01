@@ -10,6 +10,9 @@
 //Qt includes
 #include <QDir>
 
+//std includes
+#include <utility>
+
 //libgit2
 #include "git2.h"
 
@@ -221,13 +224,11 @@ void GitCommitFileModel::onFileListReady(const QVector<CommitLoadResult::FileEnt
 
 void GitCommitFileModel::cancelAllLineStatFutures()
 {
-    for (auto& future : mLineStatFutures) {
+    // Move futures out first — cancel can deliver queued signals via the event
+    // loop, which could re-enter this function through onFileListReady.
+    auto futures = std::exchange(mLineStatFutures, {});
+
+    for (auto& future : futures) {
         future.cancel();
     }
-
-    for (auto& future : mLineStatFutures) {
-        AsyncFuture::waitForFinished(future);
-    }
-
-    mLineStatFutures.clear();
 }
