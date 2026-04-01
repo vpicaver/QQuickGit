@@ -1,5 +1,6 @@
 //Our includes
 #include "GitFilePatch.h"
+#include "CommitDiffContext.h"
 #include "GitConcurrent.h"
 
 //Async includes
@@ -45,49 +46,9 @@ FilePatchResult loadPatch(const QString& repoPath, const QString& commitSha,
         return result;
     }
 
-    git_repository* repo = nullptr;
-    if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo) {
-        result.errorMessage = QStringLiteral("Failed to open repository");
+    auto ctx = CommitDiffContext::open(repoPath, commitSha, parentIndex, result.errorMessage);
+    if (!ctx) {
         return result;
-    }
-    std::unique_ptr<git_repository, decltype(&git_repository_free)>
-        repoHolder(repo, &git_repository_free);
-
-    git_oid oid;
-    if (git_oid_fromstr(&oid, commitSha.toLatin1().constData()) != GIT_OK) {
-        result.errorMessage = QStringLiteral("Invalid commit SHA: %1").arg(commitSha);
-        return result;
-    }
-
-    git_commit* commit = nullptr;
-    if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit) {
-        result.errorMessage = QStringLiteral("Commit not found: %1").arg(commitSha);
-        return result;
-    }
-    std::unique_ptr<git_commit, decltype(&git_commit_free)>
-        commitHolder(commit, &git_commit_free);
-
-    git_tree* commitTree = nullptr;
-    if (git_commit_tree(&commitTree, commit) != GIT_OK || !commitTree) {
-        result.errorMessage = QStringLiteral("Failed to get commit tree");
-        return result;
-    }
-    std::unique_ptr<git_tree, decltype(&git_tree_free)>
-        commitTreeHolder(commitTree, &git_tree_free);
-
-    git_tree* parentTree = nullptr;
-    std::unique_ptr<git_tree, decltype(&git_tree_free)> parentTreeHolder(nullptr, &git_tree_free);
-
-    unsigned int parentCount = git_commit_parentcount(commit);
-    if (parentCount > 0) {
-        int effectiveParentIndex = qBound(0, parentIndex, static_cast<int>(parentCount) - 1);
-        git_commit* parentCommit = nullptr;
-        if (git_commit_parent(&parentCommit, commit, effectiveParentIndex) == GIT_OK && parentCommit) {
-            std::unique_ptr<git_commit, decltype(&git_commit_free)>
-                parentCommitHolder(parentCommit, &git_commit_free);
-            git_commit_tree(&parentTree, parentCommit);
-            parentTreeHolder.reset(parentTree);
-        }
     }
 
     git_diff* diff = nullptr;
@@ -97,7 +58,8 @@ FilePatchResult loadPatch(const QString& repoPath, const QString& commitSha,
     diffOptions.pathspec.strings = const_cast<char**>(&pathspec);
     diffOptions.pathspec.count = 1;
 
-    if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff) {
+    if (git_diff_tree_to_tree(&diff, ctx->repo.get(), ctx->parentTree.get(),
+                              ctx->commitTree.get(), &diffOptions) != GIT_OK || !diff) {
         result.errorMessage = QStringLiteral("Failed to generate diff");
         return result;
     }

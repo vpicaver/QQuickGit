@@ -1,5 +1,6 @@
 //Our includes
 #include "GitCommitInfo.h"
+#include "CommitDiffContext.h"
 #include "GitConcurrent.h"
 #include "GitOidUtils.h"
 #include "GitRepository.h"
@@ -101,30 +102,13 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
         return result;
     }
 
-    git_repository* repo = nullptr;
-    if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo)
-    {
-        result.errorMessage = QStringLiteral("Failed to open repository");
-        return result;
-    }
-    std::unique_ptr<git_repository, decltype(&git_repository_free)>
-        repoHolder(repo, &git_repository_free);
-
-    git_oid oid;
-    if (git_oid_fromstr(&oid, commitSha.toLatin1().constData()) != GIT_OK)
-    {
-        result.errorMessage = QStringLiteral("Invalid commit SHA: %1").arg(commitSha);
+    auto ctx = CommitDiffContext::open(repoPath, commitSha, parentIndex, result.errorMessage);
+    if (!ctx) {
         return result;
     }
 
-    git_commit* commit = nullptr;
-    if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit)
-    {
-        result.errorMessage = QStringLiteral("Commit not found: %1").arg(commitSha);
-        return result;
-    }
-    std::unique_ptr<git_commit, decltype(&git_commit_free)>
-        commitHolder(commit, &git_commit_free);
+    git_commit* commit = ctx->commit.get();
+    git_repository* repo = ctx->repo.get();
 
     const git_signature* authorSig = git_commit_author(commit);
     if (authorSig)
@@ -172,34 +156,10 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
         result.parentSubjects.append(fetchParentSubject(repo, parentOid));
     }
 
-    git_tree* commitTree = nullptr;
-    if (git_commit_tree(&commitTree, commit) != GIT_OK || !commitTree)
-    {
-        result.errorMessage = QStringLiteral("Failed to get commit tree");
-        return result;
-    }
-    std::unique_ptr<git_tree, decltype(&git_tree_free)>
-        commitTreeHolder(commitTree, &git_tree_free);
-
-    git_tree* parentTree = nullptr;
-    std::unique_ptr<git_tree, decltype(&git_tree_free)> parentTreeHolder(nullptr, &git_tree_free);
-
-    if (parentCount > 0)
-    {
-        int effectiveParentIndex = qBound(0, parentIndex, static_cast<int>(parentCount) - 1);
-        git_commit* parentCommit = nullptr;
-        if (git_commit_parent(&parentCommit, commit, effectiveParentIndex) == GIT_OK && parentCommit)
-        {
-            std::unique_ptr<git_commit, decltype(&git_commit_free)>
-                parentCommitHolder(parentCommit, &git_commit_free);
-
-            git_commit_tree(&parentTree, parentCommit);
-            parentTreeHolder.reset(parentTree);
-        }
-    }
     git_diff* diff = nullptr;
     git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
-    if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff)
+    if (git_diff_tree_to_tree(&diff, repo, ctx->parentTree.get(),
+                              ctx->commitTree.get(), &diffOptions) != GIT_OK || !diff)
     {
         result.errorMessage = QStringLiteral("Failed to generate diff");
         return result;

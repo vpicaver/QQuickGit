@@ -1,5 +1,6 @@
 //Our includes
 #include "GitCommitFileModel.h"
+#include "CommitDiffContext.h"
 #include "GitConcurrent.h"
 #include "GitRepository.h"
 
@@ -151,47 +152,10 @@ void GitCommitFileModel::fetchLineStats(int row)
     auto future = GitConcurrent::run([repoPath, commitSha, parentIndex, filePath]() -> LineStats {
         LineStats stats;
 
-        git_repository* repo = nullptr;
-        if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo) {
+        QString errorMessage;
+        auto ctx = CommitDiffContext::open(repoPath, commitSha, parentIndex, errorMessage);
+        if (!ctx) {
             return stats;
-        }
-        std::unique_ptr<git_repository, decltype(&git_repository_free)>
-            repoHolder(repo, &git_repository_free);
-
-        git_oid oid;
-        if (git_oid_fromstr(&oid, commitSha.toLatin1().constData()) != GIT_OK) {
-            return stats;
-        }
-
-        git_commit* commit = nullptr;
-        if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit) {
-            return stats;
-        }
-        std::unique_ptr<git_commit, decltype(&git_commit_free)>
-            commitHolder(commit, &git_commit_free);
-
-        git_tree* commitTree = nullptr;
-        if (git_commit_tree(&commitTree, commit) != GIT_OK || !commitTree) {
-            return stats;
-        }
-        std::unique_ptr<git_tree, decltype(&git_tree_free)>
-            commitTreeHolder(commitTree, &git_tree_free);
-
-        git_tree* parentTree = nullptr;
-        std::unique_ptr<git_tree, decltype(&git_tree_free)> parentTreeHolder(nullptr, &git_tree_free);
-
-        unsigned int parentCount = git_commit_parentcount(commit);
-        if (parentCount > 0)
-        {
-            int effectiveParentIndex = qBound(0, parentIndex, static_cast<int>(parentCount) - 1);
-            git_commit* parentCommit = nullptr;
-            if (git_commit_parent(&parentCommit, commit, effectiveParentIndex) == GIT_OK && parentCommit)
-            {
-                std::unique_ptr<git_commit, decltype(&git_commit_free)>
-                    parentCommitHolder(parentCommit, &git_commit_free);
-                git_commit_tree(&parentTree, parentCommit);
-                parentTreeHolder.reset(parentTree);
-            }
         }
 
         git_diff* diff = nullptr;
@@ -201,7 +165,8 @@ void GitCommitFileModel::fetchLineStats(int row)
         diffOptions.pathspec.strings = const_cast<char**>(&pathspec);
         diffOptions.pathspec.count = 1;
 
-        if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff) {
+        if (git_diff_tree_to_tree(&diff, ctx->repo.get(), ctx->parentTree.get(),
+                                  ctx->commitTree.get(), &diffOptions) != GIT_OK || !diff) {
             return stats;
         }
         std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
