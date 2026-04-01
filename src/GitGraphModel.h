@@ -33,6 +33,7 @@ struct IndexPassResult
     QVector<QByteArray> oids;
     QVector<GitRowGraph> graph;
     QHash<QString, QStringList> refMap;
+    QString headSha;
 };
 
 class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel
@@ -53,7 +54,8 @@ public:
         TimestampRole,
         LanesRole,
         ActiveLaneRole,
-        RefsRole
+        RefsRole,
+        IsHeadRole
     };
     Q_ENUM(Roles)
 
@@ -65,7 +67,6 @@ public:
 
     bool loading() const;
     bool hasUncommittedChanges() const;
-
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
@@ -93,6 +94,7 @@ private:
     mutable QHash<int, GitCommitDetail> mCache;
     bool mLoading = false;
     bool mHasSyntheticRow = false;
+    QString mHeadSha;
 
     AsyncFuture::Restarter<IndexPassResult> mRestarter;
 };

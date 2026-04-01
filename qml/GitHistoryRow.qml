@@ -12,6 +12,7 @@ Item {
     required property date commitTimestamp
     required property string commitSha
     required property list<string> commitRefs
+    required property bool isHeadCommit
     property list<color> laneColors
     property real laneWidth: 12
     property bool selected: false
@@ -64,6 +65,16 @@ Item {
             }
         }
 
+        Loader {
+            active: row.isHeadCommit
+            sourceComponent: RefBadge {
+                text: qsTr("Current")
+                backgroundColor: row.palette.highlight
+                textColor: row.palette.highlightedText
+                accentColor: row.palette.highlight
+            }
+        }
+
         Row {
             spacing: 4
             visible: row.commitRefs.length > 0
@@ -88,6 +99,7 @@ Item {
             color: row.palette.text
             font.pixelSize: 13
             font.italic: row._isSynthetic
+            font.bold: row.isHeadCommit
         }
 
         Text {

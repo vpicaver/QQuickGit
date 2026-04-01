@@ -66,6 +66,7 @@ Item {
             required property date timestamp
             required property string sha
             required property list<string> refs
+            required property bool isHead
             required property int index
 
             width: listView.width - (verticalScrollBar.visible ? verticalScrollBar.width + root.scrollBarSpacing : 0)
@@ -76,6 +77,7 @@ Item {
             commitTimestamp: timestamp
             commitSha: sha
             commitRefs: refs
+            isHeadCommit: isHead
             laneColors: root.laneColors
             laneWidth: root.laneWidth
             selected: root._hasSelection && sha === root._selectedSha

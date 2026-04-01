@@ -64,6 +64,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(lanes.size() >= 1);
 
         CHECK(model.data(idx, GitGraphModel::ActiveLaneRole).toInt() == 0);
+        CHECK(model.data(idx, GitGraphModel::IsHeadRole).toBool() == true);
     }
 
     SECTION("Multiple commits produces correct rowCount") {
@@ -82,6 +83,9 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         QModelIndex idx = model.index(0, 0);
         CHECK(model.data(idx, GitGraphModel::MessageRole).toString() == "Commit 3");
+        CHECK(model.data(idx, GitGraphModel::IsHeadRole).toBool() == true);
+        CHECK(model.data(model.index(1, 0), GitGraphModel::IsHeadRole).toBool() == false);
+        CHECK(model.data(model.index(2, 0), GitGraphModel::IsHeadRole).toBool() == false);
     }
 
     SECTION("Uses beginInsertRows, not modelReset") {
@@ -166,6 +170,8 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(roles[GitGraphModel::ShaRole] == "sha");
         CHECK(roles[GitGraphModel::MessageRole] == "message");
         CHECK(roles[GitGraphModel::LanesRole] == "lanes");
+        CHECK(roles.contains(GitGraphModel::IsHeadRole));
+        CHECK(roles[GitGraphModel::IsHeadRole] == "isHead");
     }
 
     SECTION("Symbolic refs like origin/HEAD are excluded from ref labels") {
@@ -251,6 +257,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(model.data(idx0, GitGraphModel::MessageRole).toString() == "Uncommitted Changes");
         CHECK(model.data(idx0, GitGraphModel::AuthorRole).toString().isEmpty());
         CHECK(model.data(idx0, GitGraphModel::RefsRole).toStringList().isEmpty());
+        CHECK(model.data(idx0, GitGraphModel::IsHeadRole).toBool() == false);
 
         // Real commit at index 1
         auto idx1 = model.index(1);

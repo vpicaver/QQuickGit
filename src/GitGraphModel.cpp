@@ -95,6 +95,15 @@ IndexPassResult runIndexPass(const QString& repoPath)
 
     result.refMap = buildRefMap(repo);
 
+    git_reference* headRef = nullptr;
+    if (git_repository_head(&headRef, repo) == GIT_OK && headRef) {
+        std::unique_ptr<git_reference, decltype(&git_reference_free)>
+            headHolder(headRef, &git_reference_free);
+        const git_oid* headOid = git_reference_target(headRef);
+        if (headOid)
+            result.headSha = oidToString(headOid);
+    }
+
     git_revwalk* walk = nullptr;
     if (git_revwalk_new(&walk, repo) != GIT_OK || !walk)
         return result;
@@ -251,6 +260,8 @@ QVariant GitGraphModel::data(const QModelIndex& index, int role) const
             return mGraph.isEmpty() ? 0 : mGraph.at(0).activeLane;
         case RefsRole:
             return QVariant::fromValue(QStringList());
+        case IsHeadRole:
+            return false;
         }
         return QVariant();
     }
@@ -284,6 +295,9 @@ QVariant GitGraphModel::data(const QModelIndex& index, int role) const
         const QString& sha = mGraph.at(realRow).sha;
         return QVariant::fromValue(mRefMap.value(sha));
     }
+
+    case IsHeadRole:
+        return mGraph.at(realRow).sha == mHeadSha;
     }
 
     return QVariant();
@@ -298,7 +312,8 @@ QHash<int, QByteArray> GitGraphModel::roleNames() const
         {TimestampRole, "timestamp"},
         {LanesRole, "lanes"},
         {ActiveLaneRole, "activeLane"},
-        {RefsRole, "refs"}
+        {RefsRole, "refs"},
+        {IsHeadRole, "isHead"}
     };
 
     return roles;
@@ -329,6 +344,8 @@ void GitGraphModel::refresh()
                 removeSyntheticRow();
 
             clearModel();
+
+            mHeadSha = result.headSha;
 
             if (!result.oids.isEmpty())
             {
