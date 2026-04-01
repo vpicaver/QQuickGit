@@ -47,6 +47,30 @@ int writeToNext(git_writestream* next, const QByteArray& data)
     return GIT_OK;
 }
 
+// Writes pointerBuffer into the LFS store writer and clears the buffer.
+// Sets cleanWriteFailed and the git error string on failure.
+int flushPointerBufferToWriter(LfsFilterStream* state)
+{
+    if (state->pointerBuffer.isEmpty()) {
+        return GIT_OK;
+    }
+    auto result = state->writer.write(state->pointerBuffer.constData(),
+                                      static_cast<size_t>(state->pointerBuffer.size()));
+    state->pointerBuffer.clear();
+    if (result.hasError()) {
+        state->writer.discard();
+        state->writer = QQuickGit::LfsStore::StreamWriter();
+        state->writerReady = false;
+        state->cleanWriteFailed = true;
+        const QString error = result.errorMessage();
+        if (!error.isEmpty()) {
+            git_error_set_str(GIT_ERROR_FILTER, error.toUtf8().constData());
+        }
+        return GIT_ERROR;
+    }
+    return GIT_OK;
+}
+
 QString gitDirPathForSource(const git_filter_source* source)
 {
     if (!source) {
@@ -137,7 +161,24 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
         return state->next->write(state->next, buffer, len);
     }
 
+    // Buffer initial bytes to detect if input is already an LFS pointer (clean passthrough).
+    // This makes the clean filter idempotent: re-staging a pointer file re-emits the
+    // same pointer unchanged instead of double-encoding it.
     if (!state->writerReady) {
+        const int incoming = static_cast<int>(len);
+        const int available = LfsPointerMaxBytes - state->pointerBuffer.size();
+        if (available > 0) {
+            const int take = std::min(incoming, available);
+            state->pointerBuffer.append(buffer, take);
+            buffer += take;
+            len -= static_cast<size_t>(take);
+        }
+        if (len == 0) {
+            return GIT_OK; // Still buffering; pointer check deferred to close
+        }
+
+        // Buffer is full and more data is arriving — input cannot be a pointer.
+        // Initialize the LFS store writer and flush the buffered prefix through it.
         const QString gitDirPath = gitDirPathForSource(state->source);
         if (gitDirPath.isEmpty()) {
             git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
@@ -154,6 +195,11 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
         const QString filePath = resolvePathForSource(state->source);
         if (!state->store->isLfsEligible(filePath)) {
             state->passthrough = true;
+            int result = writeToNext(state->next, state->pointerBuffer);
+            state->pointerBuffer.clear();
+            if (result < 0) {
+                return result;
+            }
             return state->next->write(state->next, buffer, len);
         }
 
@@ -167,6 +213,11 @@ int lfsStreamWrite(git_writestream* stream, const char* buffer, size_t len)
         }
         state->writer = beginResult.value();
         state->writerReady = true;
+
+        int flushResult = flushPointerBufferToWriter(state);
+        if (flushResult != GIT_OK) {
+            return flushResult;
+        }
     }
 
     auto writeResult = state->writer.write(buffer, len);
@@ -200,21 +251,42 @@ int lfsStreamClose(git_writestream* stream)
         }
 
         if (!state->writerReady) {
+            // Still in buffering phase (write was never called, or all data fit in
+            // the pointer-check buffer). Resolve whether the content is already an
+            // LFS pointer (passthrough) or needs to be stored as an LFS object.
             const QString gitDirPath = gitDirPathForSource(state->source);
             if (gitDirPath.isEmpty()) {
                 git_error_set_str(GIT_ERROR_FILTER, "Missing git directory for LFS filter");
                 return GIT_ERROR;
             }
-            state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
             if (!state->store) {
-                qDebug() << "[LFS filter] no registered store for gitDirPath (close), using fallback policy:"
-                         << gitDirPath;
-                state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
+                state->store = QQuickGit::LfsStoreRegistry::storeFor(gitDirPath);
+                if (!state->store) {
+                    qDebug() << "[LFS filter] no registered store for gitDirPath (close), using fallback policy:"
+                             << gitDirPath;
+                    state->store = std::make_shared<QQuickGit::LfsStore>(gitDirPath, QQuickGit::LfsPolicy());
+                }
             }
             const QString filePath = resolvePathForSource(state->source);
             if (!state->store->isLfsEligible(filePath)) {
+                int result = writeToNext(state->next, state->pointerBuffer);
+                if (result < 0) {
+                    return result;
+                }
                 return state->next ? state->next->close(state->next) : GIT_OK;
             }
+            // If the buffered content is already a valid LFS pointer, pass it through
+            // unchanged. This makes the clean filter idempotent so that re-staging a
+            // pointer file does not double-encode it.
+            if (!state->pointerBuffer.isEmpty()
+                && QQuickGit::LfsPointer::parse(state->pointerBuffer, nullptr)) {
+                int result = writeToNext(state->next, state->pointerBuffer);
+                if (result < 0) {
+                    return result;
+                }
+                return state->next ? state->next->close(state->next) : GIT_OK;
+            }
+            // Not a pointer — store the buffered content as a new LFS object.
             auto beginResult = state->store->beginStore();
             if (beginResult.hasError()) {
                 const QString error = beginResult.errorMessage();
@@ -225,6 +297,10 @@ int lfsStreamClose(git_writestream* stream)
             }
             state->writer = beginResult.value();
             state->writerReady = true;
+            int flushResult = flushPointerBufferToWriter(state);
+            if (flushResult != GIT_OK) {
+                return flushResult;
+            }
         }
 
         auto finalizeResult = state->writer.finalize();
