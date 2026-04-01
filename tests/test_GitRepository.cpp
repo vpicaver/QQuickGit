@@ -627,14 +627,14 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
     CHECK_NOTHROW(repo.commitAll("test", "first test commit"));
 
-    CHECK(repo.headBranchName().toStdString() == "master");
+    CHECK(repo.headBranchName().toStdString() == "main");
 
     CHECK_NOTHROW(repo.createBranch("testBranch"));
     CHECK(repo.headBranchName().toStdString() == "testBranch");
 
     SECTION("Merge already up-to-date") {
         GitRepository::MergeResult result;
-        CHECK_NOTHROW(result = repo.merge({"master"}));
+        CHECK_NOTHROW(result = repo.merge({"main"}));
         CHECK(result.state() == GitRepository::MergeResult::AlreadyUpToDate);
     }
 
@@ -648,8 +648,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         CHECK_NOTHROW(repo.commitAll("test1", "2 test commit"));
 
         SECTION("Fast forward") {
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             GitRepository::MergeResult result;
             CHECK_NOTHROW(result = repo.merge({"testBranch"}));
@@ -658,8 +658,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         }
 
         SECTION("Simple merge, no conflicts") {
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile file(tempDir.absoluteFilePath("test3.txt"));
@@ -684,8 +684,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
 
             repo.commitAll("test2", "3 test commit");
 
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile file(tempDir.absoluteFilePath("test.txt"));
@@ -706,8 +706,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         }
 
         SECTION("Test merge conflict when ours renames and theirs modifies") {
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             CHECK_NOTHROW(repo.createBranch("renameBranch"));
             CHECK(repo.headBranchName().toStdString() == "renameBranch");
@@ -716,8 +716,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
                                   tempDir.absoluteFilePath("renamed.txt")));
             CHECK_NOTHROW(repo.commitAll("rename", "rename test.txt"));
 
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile file(tempDir.absoluteFilePath("test.txt"));
@@ -731,7 +731,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             CHECK(repo.headBranchName().toStdString() == "renameBranch");
 
             GitRepository::MergeResult result;
-            CHECK_NOTHROW(result = repo.merge({"master"}));
+            CHECK_NOTHROW(result = repo.merge({"main"}));
 
             CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
             CHECK(QFile::exists(tempDir.absoluteFilePath("renamed.txt")));
@@ -743,8 +743,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         }
 
         SECTION("Test merge conflict when ours modifies and theirs renames") {
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             CHECK_NOTHROW(repo.createBranch("renameBranch2"));
             CHECK(repo.headBranchName().toStdString() == "renameBranch2");
@@ -753,8 +753,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
                                   tempDir.absoluteFilePath("renamed2.txt")));
             CHECK_NOTHROW(repo.commitAll("rename", "rename test.txt to renamed2.txt"));
 
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile file(tempDir.absoluteFilePath("test.txt"));
@@ -777,8 +777,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
         }
 
         SECTION("Test merge conflict when ours renames a directory-like subtree and theirs modifies one file") {
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             REQUIRE(tempDir.mkpath(QStringLiteral("Trip/notes")));
             {
@@ -807,8 +807,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             }
             CHECK_NOTHROW(repo.commitAll("rename trip", "rename trip subtree"));
 
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile tripFile(tempDir.absoluteFilePath("Trip/Trip.cwtrip"));

@@ -2001,8 +2001,10 @@ void GitRepository::initRepository()
     auto path = d->mDirectory.absolutePath().toLocal8Bit();
     int error = git_repository_open(&(d->repo), path);
     if(error != GIT_OK) {
-        bool bare = false;
-        check(git_repository_init(&(d->repo), path, bare));
+        git_repository_init_options opts = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+        opts.flags = GIT_REPOSITORY_INIT_MKPATH;
+        opts.initial_head = "main";
+        check(git_repository_init_ext(&(d->repo), path, &opts));
     }
 
     if (d->repo) {
