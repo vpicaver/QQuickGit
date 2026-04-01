@@ -2,6 +2,7 @@
 #include "GitFilePatch.h"
 #include "CommitDiffContext.h"
 #include "GitConcurrent.h"
+#include "LfsStore.h"
 
 //Async includes
 #include "asyncfuture.h"
@@ -43,6 +44,32 @@ void setPathspec(git_diff_options& opts, const char** pathspec)
     opts.pathspec.count = 1;
 }
 
+bool isBlobLfsPointer(git_repository* repo, const git_oid* oid)
+{
+    if (!repo || !oid || git_oid_is_zero(oid)) {
+        return false;
+    }
+
+    git_blob* blob = nullptr;
+    if (git_blob_lookup(&blob, repo, oid) != GIT_OK || !blob) {
+        return false;
+    }
+    std::unique_ptr<git_blob, decltype(&git_blob_free)> holder(blob, &git_blob_free);
+
+    // LFS pointers are ~130 bytes; skip large blobs to avoid loading them into memory
+    git_object_size_t size = git_blob_rawsize(blob);
+    if (size > 200) {
+        return false;
+    }
+
+    auto content = QByteArray::fromRawData(
+        static_cast<const char*>(git_blob_rawcontent(blob)),
+        static_cast<int>(size));
+
+    LfsPointer pointer;
+    return LfsPointer::parse(content, &pointer);
+}
+
 FilePatchResult generatePatchLines(git_diff* diff, const QString& filePath, int maxDiffLines)
 {
     FilePatchResult result;
@@ -64,6 +91,16 @@ FilePatchResult generatePatchLines(git_diff* diff, const QString& filePath, int 
     if (delta && (delta->flags & GIT_DIFF_FLAG_BINARY)) {
         result.isBinary = true;
         return result;
+    }
+
+    // Check if either side is an LFS pointer stored in the ODB
+    if (delta) {
+        git_repository* repo = git_patch_owner(patch);
+        if (isBlobLfsPointer(repo, &delta->new_file.id)
+            || isBlobLfsPointer(repo, &delta->old_file.id)) {
+            result.isLfsPointer = true;
+            return result;
+        }
     }
 
     size_t totalContext = 0, totalAdded = 0, totalDeleted = 0;
@@ -386,10 +423,12 @@ void GitFilePatch::applyResult(const FilePatchResult& result)
 
     bool tooLargeChanged = (mTooLarge != result.tooLarge);
     bool isBinaryChanged = (mIsBinary != result.isBinary);
+    bool lfsChanged = (mIsLfsPointer != result.isLfsPointer);
     bool errorChanged = (mErrorMessage != result.errorMessage);
 
     mTooLarge = result.tooLarge;
     mIsBinary = result.isBinary;
+    mIsLfsPointer = result.isLfsPointer;
     mErrorMessage = result.errorMessage;
     mLoading = false;
 
@@ -401,6 +440,9 @@ void GitFilePatch::applyResult(const FilePatchResult& result)
     if (isBinaryChanged) {
         emit this->isBinaryChanged();
     }
+    if (lfsChanged) {
+        emit isLfsPointerChanged();
+    }
     if (errorChanged) {
         emit errorMessageChanged();
     }
@@ -411,6 +453,7 @@ void GitFilePatch::clear()
     bool wasLoading = mLoading;
     bool wasTooLarge = mTooLarge;
     bool wasBinary = mIsBinary;
+    bool wasLfs = mIsLfsPointer;
     bool hadError = !mErrorMessage.isEmpty();
 
     if (!mLines.isEmpty()) {
@@ -421,6 +464,7 @@ void GitFilePatch::clear()
 
     mTooLarge = false;
     mIsBinary = false;
+    mIsLfsPointer = false;
     mErrorMessage.clear();
     mLoading = false;
 
@@ -432,6 +476,9 @@ void GitFilePatch::clear()
     }
     if (wasBinary) {
         emit isBinaryChanged();
+    }
+    if (wasLfs) {
+        emit isLfsPointerChanged();
     }
     if (hadError) {
         emit errorMessageChanged();

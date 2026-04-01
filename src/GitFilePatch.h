@@ -25,6 +25,7 @@ struct FilePatchResult
     QVector<DiffLine> lines;
     bool tooLarge = false;
     bool isBinary = false;
+    bool isLfsPointer = false;
     QString errorMessage;
 };
 
@@ -42,6 +43,7 @@ class QQUICKGIT_EXPORT GitFilePatch : public QAbstractListModel
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool tooLarge READ tooLarge NOTIFY tooLargeChanged)
     Q_PROPERTY(bool isBinary READ isBinary NOTIFY isBinaryChanged)
+    Q_PROPERTY(bool isLfsPointer READ isLfsPointer NOTIFY isLfsPointerChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorMessageChanged)
 
 public:
@@ -81,6 +83,7 @@ public:
     bool loading() const;
     bool tooLarge() const;
     bool isBinary() const;
+    bool isLfsPointer() const;
     QString errorMessage() const;
 
 signals:
@@ -93,6 +96,7 @@ signals:
     void loadingChanged();
     void tooLargeChanged();
     void isBinaryChanged();
+    void isLfsPointerChanged();
     void errorMessageChanged();
 
 private:
@@ -111,6 +115,7 @@ private:
     bool mLoading = false;
     bool mTooLarge = false;
     bool mIsBinary = false;
+    bool mIsLfsPointer = false;
     QString mErrorMessage;
 
     AsyncFuture::Restarter<FilePatchResult> mRestarter;
@@ -125,6 +130,7 @@ inline bool GitFilePatch::workingTree() const { return mWorkingTree; }
 inline bool GitFilePatch::loading() const { return mLoading; }
 inline bool GitFilePatch::tooLarge() const { return mTooLarge; }
 inline bool GitFilePatch::isBinary() const { return mIsBinary; }
+inline bool GitFilePatch::isLfsPointer() const { return mIsLfsPointer; }
 inline QString GitFilePatch::errorMessage() const { return mErrorMessage; }
 
 } // namespace QQuickGit

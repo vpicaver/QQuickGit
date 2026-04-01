@@ -5,11 +5,13 @@
 #include "TestUtilities.h"
 #include "GitFilePatch.h"
 #include "GitRepository.h"
+#include "LfsStore.h"
 
 //Qt includes
 #include <QTemporaryDir>
 #include <QDir>
 #include <QFile>
+#include <QImage>
 #include <QSignalSpy>
 
 using namespace QQuickGit;
@@ -410,6 +412,56 @@ TEST_CASE("GitFilePatch committed diffs", "[GitFilePatch]")
         // Should still produce a diff despite invalid commitSha (it's ignored)
         REQUIRE(patch.rowCount() > 0);
         CHECK(patch.errorMessage().isEmpty());
+    }
+
+    SECTION("LFS-tracked file in committed diff sets isLfsPointer") {
+        // Set up LFS policy so *.png goes through LFS filter
+        LfsPolicy policy;
+        policy.setRule(QStringLiteral("png"), [](const QString&, const QByteArray*) { return true; });
+        policy.setDefaultRule([](const QString&, const QByteArray*) { return false; });
+        repo.setLfsPolicy(policy);
+
+        // Create and commit a PNG through LFS
+        QImage image(10, 10, QImage::Format_ARGB32);
+        image.fill(Qt::red);
+        QString imagePath = repo.directory().filePath("red.png");
+        REQUIRE(image.save(imagePath, "PNG"));
+
+        repo.checkStatus();
+        Account account;
+        account.setName("Test Author");
+        account.setEmail("test@example.com");
+        repo.setAccount(&account);
+        repo.commitAll("Add LFS png", QString());
+        repo.checkStatus();
+
+        QString sha = TestUtilities::getHeadSha(repo.directory());
+
+        GitFilePatch patch;
+        patch.setRepository(&repo);
+        patch.setCommitSha(sha);
+        patch.setFilePath("red.png");
+
+        waitForLoading(patch);
+
+        CHECK(patch.isLfsPointer());
+        CHECK(patch.rowCount() == 0);
+        CHECK(patch.errorMessage().isEmpty());
+    }
+
+    SECTION("Non-LFS text file does not set isLfsPointer") {
+        TestUtilities::createFileAndCommit(repo, "file.txt", "hello\n", "Add text");
+        QString sha = TestUtilities::getHeadSha(repo.directory());
+
+        GitFilePatch patch;
+        patch.setRepository(&repo);
+        patch.setCommitSha(sha);
+        patch.setFilePath("file.txt");
+
+        waitForLoading(patch);
+
+        CHECK_FALSE(patch.isLfsPointer());
+        CHECK(patch.rowCount() > 0);
     }
 
     SECTION("Setting null repository clears model") {
