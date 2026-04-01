@@ -96,11 +96,15 @@ Item {
                 opacity: 0.6
             }
 
-            Label {
+            TextEdit {
                 Layout.fillWidth: true
                 text: commitInfoLoader.author + " <" + commitInfoLoader.authorEmail + ">"
                 font.pixelSize: 12
-                elide: Text.ElideRight
+                color: root.palette.text
+                selectionColor: root.palette.highlight
+                selectedTextColor: root.palette.highlightedText
+                readOnly: true
+                selectByMouse: true
             }
 
             Label {
@@ -109,10 +113,15 @@ Item {
                 opacity: 0.6
             }
 
-            Label {
+            TextEdit {
                 Layout.fillWidth: true
                 text: Qt.formatDateTime(commitInfoLoader.timestamp, "yyyy-MM-dd hh:mm:ss")
                 font.pixelSize: 12
+                color: root.palette.text
+                selectionColor: root.palette.highlight
+                selectedTextColor: root.palette.highlightedText
+                readOnly: true
+                selectByMouse: true
             }
 
             Label {
@@ -121,35 +130,16 @@ Item {
                 opacity: 0.6
             }
 
-            RowLayout {
+            TextEdit {
                 Layout.fillWidth: true
-                spacing: 4
-
-                Label {
-                    text: root.commitSha.substring(0, 10)
-                    font.pixelSize: 12
-                    font.family: "monospace"
-                }
-
-                Button {
-                    id: copyButton
-                    text: copyTimer.running ? qsTr("Copied") : qsTr("Copy")
-                    font.pixelSize: 11
-                    padding: 2
-                    leftPadding: 6
-                    rightPadding: 6
-                    flat: true
-
-                    onClicked: {
-                        GitUtilities.copyToClipboard(root.commitSha)
-                        copyTimer.restart()
-                    }
-
-                    Timer {
-                        id: copyTimer
-                        interval: 2000
-                    }
-                }
+                text: root.commitSha
+                font.pixelSize: 12
+                font.family: "monospace"
+                color: root.palette.text
+                selectionColor: root.palette.highlight
+                selectedTextColor: root.palette.highlightedText
+                readOnly: true
+                selectByMouse: true
             }
         }
 
