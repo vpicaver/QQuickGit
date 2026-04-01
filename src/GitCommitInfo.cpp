@@ -56,22 +56,8 @@ bool checkBinaryIsImage(git_repository* repo, const git_diff_delta* delta)
     }
 
     // For binary files without recognized extension, check blob header
-    if (git_oid_is_zero(&delta->new_file.id)) {
-        return false;
-    }
-
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, &delta->new_file.id) != GIT_OK || !blob) {
-        return false;
-    }
-
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-    auto content = QByteArray::fromRawData(
-        static_cast<const char*>(git_blob_rawcontent(blob)),
-        static_cast<int>(git_blob_rawsize(blob)));
-
-    return isImageByHeader(content);
+    QByteArray content = blobContent(repo, &delta->new_file.id);
+    return !content.isEmpty() && isImageByHeader(content);
 }
 
 QString fetchParentSubject(git_repository* repo, const git_oid* parentOid)

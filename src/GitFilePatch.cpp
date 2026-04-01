@@ -2,6 +2,7 @@
 #include "GitFilePatch.h"
 #include "CommitDiffContext.h"
 #include "GitConcurrent.h"
+#include "GitOidUtils.h"
 #include "LfsStore.h"
 
 //Async includes
@@ -46,26 +47,11 @@ void setPathspec(git_diff_options& opts, const char** pathspec)
 
 bool isBlobLfsPointer(git_repository* repo, const git_oid* oid)
 {
-    if (!repo || !oid || git_oid_is_zero(oid)) {
+    // LFS pointers are ~130 bytes; skip large blobs
+    QByteArray content = blobContent(repo, oid, 200);
+    if (content.isEmpty()) {
         return false;
     }
-
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, oid) != GIT_OK || !blob) {
-        return false;
-    }
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> holder(blob, &git_blob_free);
-
-    // LFS pointers are ~130 bytes; skip large blobs to avoid loading them into memory
-    git_object_size_t size = git_blob_rawsize(blob);
-    if (size > 200) {
-        return false;
-    }
-
-    auto content = QByteArray::fromRawData(
-        static_cast<const char*>(git_blob_rawcontent(blob)),
-        static_cast<int>(size));
-
     LfsPointer pointer;
     return LfsPointer::parse(content, &pointer);
 }

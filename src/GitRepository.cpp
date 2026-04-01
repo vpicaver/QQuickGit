@@ -5,6 +5,7 @@
 
 //Our includes
 #include "GitRepository.h"
+#include "GitOidUtils.h"
 #include "RSAKeyGenerator.h"
 #include "Account.h"
 #include "LfsFilter.h"
@@ -164,19 +165,7 @@ QByteArray blobBytesForIndexPath(git_repository* repo, const QString& relativePa
         return QByteArray();
     }
 
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, &indexEntry->id) != GIT_OK || blob == nullptr) {
-        return QByteArray();
-    }
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-    const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-    const auto size = static_cast<int>(git_blob_rawsize(blob));
-    if (raw == nullptr || size <= 0) {
-        return QByteArray();
-    }
-
-    return QByteArray(raw, size);
+    return blobContent(repo, &indexEntry->id);
 }
 
 bool hydratedLfsFileMatchesIndexPointer(git_repository* repo,
@@ -605,20 +594,13 @@ int collectLfsPointersFromTree(const char* root, const git_tree_entry* entry, vo
         return 0;
     }
 
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, state->repo, git_tree_entry_id(entry)) != GIT_OK || !blob) {
-        return 0;
-    }
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-    const size_t rawSize = git_blob_rawsize(blob);
-    if (!raw || rawSize == 0 || rawSize > 4096) {
+    QByteArray content = blobContent(state->repo, git_tree_entry_id(entry), 4096);
+    if (content.isEmpty()) {
         return 0;
     }
 
     LfsPointer pointer;
-    if (!LfsPointer::parse(QByteArray(raw, static_cast<int>(rawSize)), &pointer)) {
+    if (!LfsPointer::parse(content, &pointer)) {
         return 0;
     }
     if (pointer.oid.isEmpty() || state->pointersByOid->contains(pointer.oid)) {
@@ -637,20 +619,13 @@ void collectLfsPointerFromBlobOid(git_repository* repo,
         return;
     }
 
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, blobOid) != GIT_OK || !blob) {
-        return;
-    }
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-    const size_t rawSize = git_blob_rawsize(blob);
-    if (!raw || rawSize == 0 || rawSize > 4096) {
+    QByteArray content = blobContent(repo, blobOid, 4096);
+    if (content.isEmpty()) {
         return;
     }
 
     LfsPointer pointer;
-    if (!LfsPointer::parse(QByteArray(raw, static_cast<int>(rawSize)), &pointer)) {
+    if (!LfsPointer::parse(content, &pointer)) {
         return;
     }
     if (pointer.oid.isEmpty() || pointersByOid->contains(pointer.oid)) {
@@ -1244,20 +1219,13 @@ Monad::Result<LfsHydrationPlan> buildLfsHydrationPlan(git_repository* repo)
                 continue;
             }
 
-            git_blob* blob = nullptr;
-            if (git_blob_lookup(&blob, repo, &entry->id) != GIT_OK || blob == nullptr) {
-                continue;
-            }
-            std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
-
-            const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-            const auto size = static_cast<int>(git_blob_rawsize(blob));
-            if (raw == nullptr || size <= 0) {
+            QByteArray content = blobContent(repo, &entry->id);
+            if (content.isEmpty()) {
                 continue;
             }
 
             LfsPointer pointer;
-            if (!LfsPointer::parse(QByteArray(raw, size), &pointer)) {
+            if (!LfsPointer::parse(content, &pointer)) {
                 continue;
             }
 
@@ -4563,19 +4531,24 @@ Monad::Result<QByteArray> GitRepository::fileContentAtCommit(const QString& repo
         return Monad::Result<QByteArray>(QByteArray());
     }
 
+    const git_oid* blobOid = git_tree_entry_id(entry);
+    if (!blobOid || git_oid_is_zero(blobOid)) {
+        return Monad::Result<QByteArray>(QByteArray());
+    }
+
     git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, git_tree_entry_id(entry)) != GIT_OK || blob == nullptr) {
+    if (git_blob_lookup(&blob, repo, blobOid) != GIT_OK || !blob) {
         return Monad::Result<QByteArray>(gitErrorMessageWithPrefix(QStringLiteral("Failed to load blob from commit tree")));
     }
     std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
 
-    const char* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-    const size_t rawSize = git_blob_rawsize(blob);
-    if (raw == nullptr || rawSize == 0) {
+    const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
+    const auto size = static_cast<int>(git_blob_rawsize(blob));
+    if (!raw || size <= 0) {
         return Monad::Result<QByteArray>(QByteArray());
     }
 
-    return Monad::Result<QByteArray>(QByteArray(raw, static_cast<int>(rawSize)));
+    return Monad::Result<QByteArray>(QByteArray(raw, size));
 }
 
 QByteArray GitRepository::fileContentAtCommit(const QString& commitOid,

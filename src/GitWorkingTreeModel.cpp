@@ -2,6 +2,7 @@
 #include "GitWorkingTreeModel.h"
 #include "GitRepository.h"
 #include "GitConcurrent.h"
+#include "GitOidUtils.h"
 #include "LfsStore.h"
 
 //Async Future includes
@@ -36,17 +37,7 @@ QByteArray blobBytesForIndexEntry(git_repository* repo, const QString& relativeP
     if (ie == nullptr || git_oid_is_zero(&ie->id))
         return {};
 
-    git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, &ie->id) != GIT_OK || blob == nullptr)
-        return {};
-    std::unique_ptr<git_blob, decltype(&git_blob_free)> blobGuard(blob, &git_blob_free);
-
-    const auto* raw = static_cast<const char*>(git_blob_rawcontent(blob));
-    const auto size = static_cast<int>(git_blob_rawsize(blob));
-    if (raw == nullptr || size <= 0)
-        return {};
-
-    return QByteArray(raw, size);
+    return blobContent(repo, &ie->id);
 }
 
 QString statusEntryPath(const git_status_entry* entry)
