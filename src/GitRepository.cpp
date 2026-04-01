@@ -2190,13 +2190,19 @@ QString GitRepository::addRemote(const QString &name, const QString &rawUrl) noe
 
 QUrl GitRepository::remoteUrl(QString name) const
 {
+    const QString raw = rawRemoteUrl(name);
+    return raw.isEmpty() ? QUrl() : QUrl(raw);
+}
+
+QString GitRepository::rawRemoteUrl(QString name) const
+{
     name = fixUpRemote(name);
 
     git_remote* remote = nullptr;
     int error = git_remote_lookup(&remote, d->repo, name.toLocal8Bit());
-    QUrl url;
+    QString url;
     if(error == GIT_OK) {
-        url = QUrl(QString::fromLocal8Bit(git_remote_url(remote)));
+        url = QString::fromLocal8Bit(git_remote_url(remote));
         git_remote_free(remote);
     }
     return url;

@@ -1601,6 +1601,36 @@ TEST_CASE("GitRepository addRemote raw-string overload should work correctly", "
     }
 }
 
+TEST_CASE("GitRepository rawRemoteUrl preserves SCP-style URLs", "[GitRepository]") {
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString repoPath = tempDir.absoluteFilePath(QStringLiteral("repo"));
+    REQUIRE(QDir().mkpath(repoPath));
+
+    GitRepository repo;
+    repo.setDirectory(QDir(repoPath));
+    repo.initRepository();
+
+    SECTION("Returns the raw SCP-style URL string") {
+        const QString scpUrl = QStringLiteral("git@github.com:User/Repo.git");
+        REQUIRE(repo.addRemote(QStringLiteral("origin"), scpUrl).isEmpty());
+
+        const QString raw = repo.rawRemoteUrl(QStringLiteral("origin"));
+        CHECK(raw.toStdString() == scpUrl.toStdString());
+    }
+
+    SECTION("Returns SSH URL string unchanged") {
+        const QString sshUrl = QStringLiteral("ssh://git@github.com/User/Repo.git");
+        REQUIRE(repo.addRemote(QStringLiteral("origin"), sshUrl).isEmpty());
+
+        const QString raw = repo.rawRemoteUrl(QStringLiteral("origin"));
+        CHECK(raw.toStdString() == sshUrl.toStdString());
+    }
+
+    SECTION("Returns empty string for nonexistent remote") {
+        CHECK(repo.rawRemoteUrl(QStringLiteral("origin")).isEmpty());
+    }
+}
+
 TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     QDir cloneDir("clone-test");
 

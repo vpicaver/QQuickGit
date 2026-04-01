@@ -28,7 +28,7 @@ QUrl GitUtilities::fixGitUrl(const QString &sshUrl)
     return url;
 }
 
-QUrl GitUtilities::lfsEndpointFromRemoteUrl(const QString& remoteUrl)
+QUrl GitUtilities::httpsUrlFromRemoteUrl(const QString& remoteUrl)
 {
     QUrl url = fixGitUrl(remoteUrl.trimmed());
     if (!url.isValid() || url.scheme().isEmpty()) {
@@ -37,16 +37,27 @@ QUrl GitUtilities::lfsEndpointFromRemoteUrl(const QString& remoteUrl)
 
     const QString scheme = url.scheme().toLower();
     if (scheme == QStringLiteral("ssh") || scheme == QStringLiteral("git")) {
-        QUrl httpsUrl(url);
-        httpsUrl.setScheme(QStringLiteral("https"));
-        httpsUrl.setUserName(QString());
-        httpsUrl.setPassword(QString());
-        url = httpsUrl;
+        url.setScheme(QStringLiteral("https"));
+        url.setUserName(QString());
+        url.setPassword(QString());
     }
 
-    const QString normalizedScheme = url.scheme().toLower();
-    if (normalizedScheme != QStringLiteral("http") && normalizedScheme != QStringLiteral("https")) {
+    if (url.scheme().toLower() != QStringLiteral("https")) {
         return QUrl();
+    }
+
+    return url;
+}
+
+QUrl GitUtilities::lfsEndpointFromRemoteUrl(const QString& remoteUrl)
+{
+    QUrl url = httpsUrlFromRemoteUrl(remoteUrl);
+
+    // httpsUrlFromRemoteUrl rejects plain http; accept it for LFS endpoints.
+    if (url.isEmpty()) {
+        url = fixGitUrl(remoteUrl.trimmed());
+        if (!url.isValid() || url.scheme().toLower() != QStringLiteral("http"))
+            return QUrl();
     }
 
     QString path = url.path();

@@ -59,3 +59,37 @@ TEST_CASE("GitUtilities rejects unsupported LFS endpoint remote urls", "[GitUtil
     CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QString()).isEmpty());
     CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QStringLiteral("file:///tmp/repo.git")).isEmpty());
 }
+
+TEST_CASE("GitUtilities httpsUrlFromRemoteUrl converts SSH and SCP to HTTPS", "[GitUtilities]")
+{
+    const QList<std::pair<QString, QString>> tests{
+        {QStringLiteral("https://github.com/User/Repo.git"),
+         QStringLiteral("https://github.com/User/Repo.git")},
+        {QStringLiteral("ssh://git@github.com/User/Repo.git"),
+         QStringLiteral("https://github.com/User/Repo.git")},
+        {QStringLiteral("git@github.com:User/Repo.git"),
+         QStringLiteral("https://github.com/User/Repo.git")},
+        {QStringLiteral("git://github.com/User/Repo.git"),
+         QStringLiteral("https://github.com/User/Repo.git")},
+    };
+
+    for (const auto& test : tests) {
+        const QUrl result = GitUtilities::httpsUrlFromRemoteUrl(test.first);
+        CHECK(result.toString().toStdString() == test.second.toStdString());
+    }
+}
+
+TEST_CASE("GitUtilities httpsUrlFromRemoteUrl strips credentials", "[GitUtilities]")
+{
+    const QUrl result = GitUtilities::httpsUrlFromRemoteUrl(
+        QStringLiteral("ssh://deploy@gitlab.com/org/repo.git"));
+    CHECK(result.userName().isEmpty());
+    CHECK(result.toString().toStdString() == std::string("https://gitlab.com/org/repo.git"));
+}
+
+TEST_CASE("GitUtilities httpsUrlFromRemoteUrl rejects non-convertible URLs", "[GitUtilities]")
+{
+    CHECK(GitUtilities::httpsUrlFromRemoteUrl(QString()).isEmpty());
+    CHECK(GitUtilities::httpsUrlFromRemoteUrl(QStringLiteral("file:///tmp/repo.git")).isEmpty());
+    CHECK(GitUtilities::httpsUrlFromRemoteUrl(QStringLiteral("http://example.com/repo.git")).isEmpty());
+}

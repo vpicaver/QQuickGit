@@ -125,6 +125,7 @@ public:
     QString addRemote(const QString& name, const QUrl& url) noexcept;
     Q_INVOKABLE QString addRemote(const QString& name, const QString& rawUrl) noexcept;
     QUrl remoteUrl(QString name = QString()) const;
+    QString rawRemoteUrl(QString name = QString()) const;
     QVector<GitRemoteInfo> remotes() const;
 
     Q_INVOKABLE static QFuture<QString> testRemoteConnection(const QUrl& url);
