@@ -20,10 +20,15 @@ TEST_CASE("GitConcurrent returns global pool by default", "[GitConcurrent]")
 
 TEST_CASE("GitConcurrent::run executes on the thread pool", "[GitConcurrent]")
 {
+    // Use a dedicated pool so the task is guaranteed to run on a worker thread,
+    // not inlined on the caller (which QThreadPool::globalInstance() may do).
+    QThreadPool pool;
+    pool.setMaxThreadCount(1);
+
     QThread* callerThread = QThread::currentThread();
     QThread* workerThread = nullptr;
 
-    auto future = GitConcurrent::run([callerThread, &workerThread]() {
+    auto future = QtConcurrent::run(&pool, [callerThread, &workerThread]() {
         workerThread = QThread::currentThread();
         return 42;
     });
