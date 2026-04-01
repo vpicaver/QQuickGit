@@ -13,6 +13,9 @@ Item {
     property real laneWidth: 12
     property real scrollBarSpacing: 0
     property color highlightColor: palette.highlight
+    property color syntheticBackground: palette.mid
+    property color syntheticBorderColor: palette.dark
+    property url syntheticIconSource
 
     readonly property string selectedSha: _selectedSha
     readonly property bool selectedIsUncommitted: _selectedSha === ""
@@ -77,6 +80,9 @@ Item {
             laneWidth: root.laneWidth
             selected: root._hasSelection && sha === root._selectedSha
             highlightColor: root.highlightColor
+            syntheticBackground: root.syntheticBackground
+            syntheticBorderColor: root.syntheticBorderColor
+            syntheticIconSource: root.syntheticIconSource
 
             TapHandler {
                 onTapped: root._selectIndex(index)
