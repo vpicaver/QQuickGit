@@ -1962,7 +1962,7 @@ GitRepository::GitRepository(QObject *parent) :
     QObject(parent),
     d(new GitRepositoryData)
 {
-
+    connect(this, &GitRepository::refsChanged, this, &GitRepository::checkStatusAsync);
 }
 
 GitRepository::~GitRepository()

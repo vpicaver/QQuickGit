@@ -431,6 +431,51 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(model.rowCount() == 2);
     }
 
+    SECTION("Synthetic row disappears after commitAll without explicit checkStatus") {
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        // Dirty the repo so the synthetic row appears
+        QDir dir = repo.directory();
+        {
+            QFile file(dir.filePath("dirty.txt"));
+            REQUIRE(file.open(QFile::WriteOnly | QFile::Text));
+            file.write("uncommitted");
+        }
+        repo.checkStatus();
+        REQUIRE(repo.modifiedFileCount() > 0);
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        // Synthetic row + 1 real commit
+        CHECK(model.rowCount() == 2);
+        CHECK(model.hasUncommittedChanges());
+
+        // Commit all changes — refsChanged should trigger checkStatusAsync
+        // automatically, removing the synthetic row without an explicit checkStatus call.
+        Account account;
+        account.setName("Test");
+        account.setEmail("test@test.com");
+        repo.setAccount(&account);
+        repo.commitAll("Commit dirty", QString());
+
+        // Wait for the async status check and model refresh to complete
+        QSignalSpy modifiedSpy(&repo, &GitRepository::modifiedFileCountChanged);
+        if (repo.modifiedFileCount() > 0)
+            REQUIRE(modifiedSpy.wait(5000));
+
+        loadingSpy.clear();
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK_FALSE(model.hasUncommittedChanges());
+        CHECK(model.rowCount() == 2); // 2 real commits now, no synthetic row
+    }
+
     SECTION("Synthetic row mirrors HEAD commit lane data") {
         TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
 
