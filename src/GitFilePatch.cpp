@@ -37,33 +37,15 @@ bool shouldFilterLine(char origin)
         || origin == GIT_DIFF_LINE_BINARY;
 }
 
-FilePatchResult loadPatch(const QString& repoPath, const QString& commitSha,
-                          int parentIndex, const QString& filePath, int maxDiffLines)
+void setPathspec(git_diff_options& opts, const char** pathspec)
+{
+    opts.pathspec.strings = const_cast<char**>(pathspec);
+    opts.pathspec.count = 1;
+}
+
+FilePatchResult generatePatchLines(git_diff* diff, const QString& filePath, int maxDiffLines)
 {
     FilePatchResult result;
-
-    if (commitSha.isEmpty() || filePath.isEmpty()) {
-        return result;
-    }
-
-    auto ctx = CommitDiffContext::open(repoPath, commitSha, parentIndex, result.errorMessage);
-    if (!ctx) {
-        return result;
-    }
-
-    git_diff* diff = nullptr;
-    git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
-    QByteArray pathBytes = filePath.toUtf8();
-    const char* pathspec = pathBytes.constData();
-    diffOptions.pathspec.strings = const_cast<char**>(&pathspec);
-    diffOptions.pathspec.count = 1;
-
-    if (git_diff_tree_to_tree(&diff, ctx->repo.get(), ctx->parentTree.get(),
-                              ctx->commitTree.get(), &diffOptions) != GIT_OK || !diff) {
-        result.errorMessage = QStringLiteral("Failed to generate diff");
-        return result;
-    }
-    std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
 
     size_t deltaCount = git_diff_num_deltas(diff);
     if (deltaCount == 0) {
@@ -133,6 +115,88 @@ FilePatchResult loadPatch(const QString& repoPath, const QString& commitSha,
     }
 
     return result;
+}
+
+FilePatchResult loadPatch(const QString& repoPath, const QString& commitSha,
+                          int parentIndex, const QString& filePath, int maxDiffLines)
+{
+    FilePatchResult result;
+
+    if (commitSha.isEmpty() || filePath.isEmpty()) {
+        return result;
+    }
+
+    auto ctx = CommitDiffContext::open(repoPath, commitSha, parentIndex, result.errorMessage);
+    if (!ctx) {
+        return result;
+    }
+
+    git_diff* diff = nullptr;
+    git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
+    QByteArray pathBytes = filePath.toUtf8();
+    const char* pathspec = pathBytes.constData();
+    setPathspec(diffOptions, &pathspec);
+
+    if (git_diff_tree_to_tree(&diff, ctx->repo.get(), ctx->parentTree.get(),
+                              ctx->commitTree.get(), &diffOptions) != GIT_OK || !diff) {
+        result.errorMessage = QStringLiteral("Failed to generate diff");
+        return result;
+    }
+    std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
+
+    return generatePatchLines(diff, filePath, maxDiffLines);
+}
+
+FilePatchResult loadWorkingTreePatch(const QString& repoPath, const QString& filePath, int maxDiffLines)
+{
+    FilePatchResult result;
+
+    if (filePath.isEmpty()) {
+        return result;
+    }
+
+    git_repository* rawRepo = nullptr;
+    if (git_repository_open(&rawRepo, repoPath.toLocal8Bit().constData()) != GIT_OK || !rawRepo) {
+        result.errorMessage = QStringLiteral("Failed to open repository");
+        return result;
+    }
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repo(rawRepo, &git_repository_free);
+
+    git_reference* headRef = nullptr;
+    if (git_repository_head(&headRef, rawRepo) != GIT_OK || !headRef) {
+        result.errorMessage = QStringLiteral("Failed to resolve HEAD");
+        return result;
+    }
+    std::unique_ptr<git_reference, decltype(&git_reference_free)> headHolder(headRef, &git_reference_free);
+
+    git_object* headObj = nullptr;
+    if (git_reference_peel(&headObj, headRef, GIT_OBJECT_COMMIT) != GIT_OK || !headObj) {
+        result.errorMessage = QStringLiteral("Failed to peel HEAD to commit");
+        return result;
+    }
+    std::unique_ptr<git_object, decltype(&git_object_free)> objHolder(headObj, &git_object_free);
+
+    git_tree* headTree = nullptr;
+    if (git_commit_tree(&headTree, reinterpret_cast<git_commit*>(headObj)) != GIT_OK || !headTree) {
+        result.errorMessage = QStringLiteral("Failed to get HEAD tree");
+        return result;
+    }
+    std::unique_ptr<git_tree, decltype(&git_tree_free)> treeHolder(headTree, &git_tree_free);
+
+    git_diff* diff = nullptr;
+    git_diff_options diffOptions = GIT_DIFF_OPTIONS_INIT;
+    QByteArray pathBytes = filePath.toUtf8();
+    const char* pathspec = pathBytes.constData();
+    setPathspec(diffOptions, &pathspec);
+    diffOptions.flags |= GIT_DIFF_INCLUDE_UNTRACKED | GIT_DIFF_SHOW_UNTRACKED_CONTENT;
+
+    if (git_diff_tree_to_workdir_with_index(&diff, rawRepo, headTree, &diffOptions) != GIT_OK || !diff) {
+        result.errorMessage = QStringLiteral("Failed to generate working tree diff");
+        return result;
+    }
+    std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
+
+    return generatePatchLines(diff, filePath, maxDiffLines);
 }
 
 } // anonymous namespace
@@ -265,16 +329,30 @@ void GitFilePatch::setMaxDiffLines(int max)
     load();
 }
 
+void GitFilePatch::setWorkingTree(bool workingTree)
+{
+    if (mWorkingTree == workingTree) {
+        return;
+    }
+
+    mWorkingTree = workingTree;
+    emit workingTreeChanged();
+    load();
+}
+
 void GitFilePatch::load()
 {
-    if (!mRepository || mCommitSha.isEmpty() || mFilePath.isEmpty()) {
+    if (!mRepository || mFilePath.isEmpty()) {
+        clear();
+        return;
+    }
+
+    if (!mWorkingTree && mCommitSha.isEmpty()) {
         clear();
         return;
     }
 
     QString repoPath = mRepository->directory().absolutePath();
-    QString sha = mCommitSha;
-    int parentIdx = mParentIndex;
     QString path = mFilePath;
     int maxLines = mMaxDiffLines;
 
@@ -283,11 +361,21 @@ void GitFilePatch::load()
         emit loadingChanged();
     }
 
-    mRestarter.restart([repoPath, sha, parentIdx, path, maxLines]() {
-        return GitConcurrent::run([repoPath, sha, parentIdx, path, maxLines]() {
-            return loadPatch(repoPath, sha, parentIdx, path, maxLines);
+    if (mWorkingTree) {
+        mRestarter.restart([repoPath, path, maxLines]() {
+            return GitConcurrent::run([repoPath, path, maxLines]() {
+                return loadWorkingTreePatch(repoPath, path, maxLines);
+            });
         });
-    });
+    } else {
+        QString sha = mCommitSha;
+        int parentIdx = mParentIndex;
+        mRestarter.restart([repoPath, sha, parentIdx, path, maxLines]() {
+            return GitConcurrent::run([repoPath, sha, parentIdx, path, maxLines]() {
+                return loadPatch(repoPath, sha, parentIdx, path, maxLines);
+            });
+        });
+    }
 }
 
 void GitFilePatch::applyResult(const FilePatchResult& result)

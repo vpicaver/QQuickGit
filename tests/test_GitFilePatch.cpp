@@ -303,6 +303,115 @@ TEST_CASE("GitFilePatch committed diffs", "[GitFilePatch]")
         CHECK(roles[GitFilePatch::NewLineNoRole] == "newLineNo");
     }
 
+    SECTION("Working tree modified file produces correct origins") {
+        TestUtilities::createFileAndCommit(repo, "file.txt", "line1\nline2\nline3\n", "Initial");
+
+        // Modify file in working directory without committing
+        QFile file(repo.directory().filePath("file.txt"));
+        REQUIRE(file.open(QFile::WriteOnly));
+        file.write("line1\nmodified\nline3\n");
+        file.close();
+
+        GitFilePatch patch;
+        patch.setWorkingTree(true);
+        patch.setRepository(&repo);
+        patch.setFilePath("file.txt");
+
+        waitForLoading(patch);
+
+        REQUIRE(patch.rowCount() > 0);
+        CHECK_FALSE(patch.isBinary());
+        CHECK_FALSE(patch.tooLarge());
+        CHECK(patch.errorMessage().isEmpty());
+
+        bool hasContext = false;
+        bool hasAdded = false;
+        bool hasDeleted = false;
+        bool hasHunk = false;
+
+        for (int i = 0; i < patch.rowCount(); i++) {
+            QModelIndex idx = patch.index(i);
+            QString origin = patch.data(idx, GitFilePatch::OriginRole).toString();
+            if (origin == " ") { hasContext = true; }
+            if (origin == "+") { hasAdded = true; }
+            if (origin == "-") { hasDeleted = true; }
+            if (origin == "H") { hasHunk = true; }
+        }
+
+        CHECK(hasContext);
+        CHECK(hasAdded);
+        CHECK(hasDeleted);
+        CHECK(hasHunk);
+    }
+
+    SECTION("Working tree new file shows all added lines") {
+        TestUtilities::createFileAndCommit(repo, "existing.txt", "hello\n", "Initial");
+
+        // Create a new untracked file
+        QFile file(repo.directory().filePath("new.txt"));
+        REQUIRE(file.open(QFile::WriteOnly));
+        file.write("line1\nline2\n");
+        file.close();
+
+        GitFilePatch patch;
+        patch.setWorkingTree(true);
+        patch.setRepository(&repo);
+        patch.setFilePath("new.txt");
+
+        waitForLoading(patch);
+
+        REQUIRE(patch.rowCount() > 0);
+
+        for (int i = 0; i < patch.rowCount(); i++) {
+            QModelIndex idx = patch.index(i);
+            QString origin = patch.data(idx, GitFilePatch::OriginRole).toString();
+            CHECK((origin == "+" || origin == "H"));
+        }
+    }
+
+    SECTION("Working tree deleted file shows all deleted lines") {
+        TestUtilities::createFileAndCommit(repo, "doomed.txt", "line1\nline2\n", "Add file");
+
+        // Delete the file from working directory
+        QFile::remove(repo.directory().filePath("doomed.txt"));
+
+        GitFilePatch patch;
+        patch.setWorkingTree(true);
+        patch.setRepository(&repo);
+        patch.setFilePath("doomed.txt");
+
+        waitForLoading(patch);
+
+        REQUIRE(patch.rowCount() > 0);
+
+        for (int i = 0; i < patch.rowCount(); i++) {
+            QModelIndex idx = patch.index(i);
+            QString origin = patch.data(idx, GitFilePatch::OriginRole).toString();
+            CHECK((origin == "-" || origin == "H"));
+        }
+    }
+
+    SECTION("Working tree mode ignores commitSha") {
+        TestUtilities::createFileAndCommit(repo, "file.txt", "line1\n", "Initial");
+
+        QFile file(repo.directory().filePath("file.txt"));
+        REQUIRE(file.open(QFile::WriteOnly));
+        file.write("line1\nline2\n");
+        file.close();
+
+        GitFilePatch patch;
+        patch.setWorkingTree(true);
+        patch.setCommitSha("0000000000000000000000000000000000000000"); // Invalid SHA
+        patch.setRepository(&repo);
+        patch.setFilePath("file.txt");
+
+        waitForLoading(patch);
+
+        // Should still produce a diff despite invalid commitSha (it's ignored)
+        REQUIRE(patch.rowCount() > 0);
+        CHECK(patch.errorMessage().isEmpty());
+    }
+
     SECTION("Setting null repository clears model") {
         TestUtilities::createFileAndCommit(repo, "file.txt", "hello", "Initial");
         QString sha = TestUtilities::getHeadSha(repo.directory());

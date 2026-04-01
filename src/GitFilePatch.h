@@ -38,6 +38,7 @@ class QQUICKGIT_EXPORT GitFilePatch : public QAbstractListModel
     Q_PROPERTY(int parentIndex READ parentIndex WRITE setParentIndex NOTIFY parentIndexChanged)
     Q_PROPERTY(QString filePath READ filePath WRITE setFilePath NOTIFY filePathChanged)
     Q_PROPERTY(int maxDiffLines READ maxDiffLines WRITE setMaxDiffLines NOTIFY maxDiffLinesChanged)
+    Q_PROPERTY(bool workingTree READ workingTree WRITE setWorkingTree NOTIFY workingTreeChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool tooLarge READ tooLarge NOTIFY tooLargeChanged)
     Q_PROPERTY(bool isBinary READ isBinary NOTIFY isBinaryChanged)
@@ -74,6 +75,9 @@ public:
     int maxDiffLines() const;
     void setMaxDiffLines(int max);
 
+    bool workingTree() const;
+    void setWorkingTree(bool workingTree);
+
     bool loading() const;
     bool tooLarge() const;
     bool isBinary() const;
@@ -85,6 +89,7 @@ signals:
     void parentIndexChanged();
     void filePathChanged();
     void maxDiffLinesChanged();
+    void workingTreeChanged();
     void loadingChanged();
     void tooLargeChanged();
     void isBinaryChanged();
@@ -100,6 +105,7 @@ private:
     int mParentIndex = 0;
     QString mFilePath;
     int mMaxDiffLines = 5000;
+    bool mWorkingTree = false;
 
     QVector<FilePatchResult::DiffLine> mLines;
     bool mLoading = false;
@@ -115,6 +121,7 @@ inline QString GitFilePatch::commitSha() const { return mCommitSha; }
 inline int GitFilePatch::parentIndex() const { return mParentIndex; }
 inline QString GitFilePatch::filePath() const { return mFilePath; }
 inline int GitFilePatch::maxDiffLines() const { return mMaxDiffLines; }
+inline bool GitFilePatch::workingTree() const { return mWorkingTree; }
 inline bool GitFilePatch::loading() const { return mLoading; }
 inline bool GitFilePatch::tooLarge() const { return mTooLarge; }
 inline bool GitFilePatch::isBinary() const { return mIsBinary; }
