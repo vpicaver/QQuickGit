@@ -337,6 +337,100 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK_FALSE(model.hasUncommittedChanges());
     }
 
+    SECTION("Model auto-refreshes after commitAll") {
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 1);
+
+        // Dirty the repo and commit via the repository
+        QDir dir = repo.directory();
+        {
+            QFile file(dir.filePath("file2.txt"));
+            REQUIRE(file.open(QFile::WriteOnly | QFile::Text));
+            file.write("new content");
+        }
+
+        Account account;
+        account.setName("Test");
+        account.setEmail("test@test.com");
+        repo.setAccount(&account);
+        repo.commitAll("Second commit", QString());
+
+        // The model should auto-refresh without an explicit refresh() call.
+        // Wait for any async loading to complete.
+        loadingSpy.clear();
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 2);
+        CHECK(model.data(model.index(0), GitGraphModel::MessageRole).toString() == "Second commit");
+    }
+
+    SECTION("Model auto-refreshes after pull brings new commits") {
+        // Set up a bare repo as a local remote
+        QTemporaryDir bareDir;
+        REQUIRE(bareDir.isValid());
+
+        git_repository* bareRepo = nullptr;
+        REQUIRE(git_repository_init(&bareRepo, bareDir.path().toLocal8Bit().constData(), true) == GIT_OK);
+        git_repository_free(bareRepo);
+
+        // Add the bare repo as origin and push the initial commit
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+        repo.addRemote("origin", QUrl::fromLocalFile(bareDir.path()));
+
+        auto pushFuture = repo.push();
+        REQUIRE(AsyncFuture::waitForFinished(pushFuture, 10000));
+        REQUIRE(!pushFuture.result().hasError());
+
+        // Clone into a second working copy and add a new commit there
+        QTemporaryDir clone2Dir;
+        REQUIRE(clone2Dir.isValid());
+        QDir clone2Path(clone2Dir.path() + "/repo2");
+
+        GitRepository repo2;
+        repo2.setDirectory(clone2Path);
+        auto cloneFuture = repo2.clone(QUrl::fromLocalFile(bareDir.path()));
+        REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 10000));
+        REQUIRE(!cloneFuture.result().hasError());
+
+        repo2.initRepository();
+        TestUtilities::createFileAndCommit(repo2, "file2.txt", "from clone2", "Clone2 commit");
+
+        auto push2Future = repo2.push();
+        REQUIRE(AsyncFuture::waitForFinished(push2Future, 10000));
+        REQUIRE(!push2Future.result().hasError());
+
+        // Now set up the model on the original repo and verify initial state
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 1);
+
+        // Pull new commits from the bare remote
+        auto pullFuture = repo.pull();
+        REQUIRE(AsyncFuture::waitForFinished(pullFuture, 10000));
+        REQUIRE(!pullFuture.result().hasError());
+
+        // The model should auto-refresh without an explicit refresh() call.
+        loadingSpy.clear();
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.rowCount() == 2);
+    }
+
     SECTION("Synthetic row mirrors HEAD commit lane data") {
         TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
 

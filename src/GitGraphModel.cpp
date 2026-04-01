@@ -210,6 +210,7 @@ void GitGraphModel::setRepository(GitRepository* repository)
         connect(mRepository, &GitRepository::directoryChanged, this, &GitGraphModel::refresh);
         connect(mRepository, &GitRepository::remotesChanged, this, &GitGraphModel::refresh);
         connect(mRepository, &GitRepository::headBranchNameChanged, this, &GitGraphModel::refresh);
+        connect(mRepository, &GitRepository::refsChanged, this, &GitGraphModel::refresh);
         connect(mRepository, &GitRepository::modifiedFileCountChanged, this, &GitGraphModel::updateSyntheticRow);
         refresh();
     }

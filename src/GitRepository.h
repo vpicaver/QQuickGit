@@ -205,9 +205,16 @@ signals:
     void accountChanged();
     void headBranchNameChanged();
     void remotesChanged();
+    void refsChanged();
 
 
 private:
+    template<typename Future>
+    void emitRefsChangedOnSuccess(const Future& future) {
+        AsyncFuture::observe(future).context(this, [this, future]() {
+            if (!future.result().hasError()) emit refsChanged();
+        });
+    }
 
     //This template magic is from
     //https://stackoverflow.com/questions/27879815/c11-get-type-of-first-second-etc-argument-similar-to-result-of

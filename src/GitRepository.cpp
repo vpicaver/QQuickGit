@@ -2644,6 +2644,8 @@ void GitRepository::resetHard(const QString& refSpec)
     check(git_reset(d->repo, object, GIT_RESET_HARD, &checkoutOptions));
 
     git_object_free(object);
+
+    emit refsChanged();
 }
 
 void GitRepository::cleanUntracked()
@@ -2830,12 +2832,13 @@ void GitRepository::commitAll(const QString &subject,
     git_tree_free(parentTree);
     git_tree_free(tree);
 
+    emit refsChanged();
 }
 
 GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 {
     ensureStandardLfsFilterConfig(d->repo);
-    return progressFuture<ResultBase>(
+    auto future = progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
             auto fixRefSpec = refSpec;
@@ -2911,13 +2914,15 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                     });
                 }).future();
         });
+    emitRefsChangedOnSuccess(future);
+    return future;
 }
 
 GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 {
     ensureStandardLfsFilterConfig(d->repo);
     QString fixedRemote = fixUpRemote(remote);
-    return progressFuture<Result<MergeResult>>(
+    auto future = progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
         {
             auto fetchFuture = fetchRefsForDirectory(
@@ -2962,13 +2967,15 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                              return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this);
                          }).future(); //This strips the progress from fetchFuture
         });
+    emitRefsChangedOnSuccess(future);
+    return future;
 }
 
 GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remote)
 {
     ensureStandardLfsFilterConfig(d->repo);
     QString fixedRemote = fixUpRemote(remote);
-    return progressFuture<Result<MergeResult>>(
+    auto future = progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
         {
             auto fetchFuture = fetchRefsForDirectory(
@@ -3035,6 +3042,8 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                     return runMergeHydrationForDirectory(pullResult, d->mDirectory, this);
                 }).future();
         });
+    emitRefsChangedOnSuccess(future);
+    return future;
 }
 
 GitRepository::GitFuture GitRepository::pullPush(const QString &refSpec, const QString &remote)
@@ -3886,6 +3895,8 @@ void GitRepository::createBranch(const QString &branchName, const QString& refSp
     if(checkout) {
         d->checkout(git_annotated_commit_id(commit), QString("refs/heads/") + branchName);
     }
+
+    emit refsChanged();
 }
 
 void GitRepository::deleteBranch(const QString &branchName)
@@ -3907,7 +3918,7 @@ bool GitRepository::remoteBranchExists(const QString &refSpec) const
 
 GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, CheckoutMode mode)
 {
-    return progressFuture<ResultBase>(
+    auto future = progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase>)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
@@ -3949,11 +3960,13 @@ GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, Checkou
                     return runLfsHydrationPipeline(prepareResult.value(), this);
                 }).future();
         });
+    emitRefsChangedOnSuccess(future);
+    return future;
 }
 
 GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode mode)
 {
-    return progressFuture<ResultBase>(
+    auto future = progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase>)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
@@ -4005,6 +4018,8 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
                     return runLfsHydrationPipeline(prepareResult.value(), this);
                 }).future();
         });
+    emitRefsChangedOnSuccess(future);
+    return future;
 }
 
 
