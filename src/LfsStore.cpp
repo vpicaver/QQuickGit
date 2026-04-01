@@ -512,7 +512,7 @@ QObject* LfsStore::lfsContext() const
 bool LfsStore::shouldFallbackForFetchError(int errorCode)
 {
     const auto code = static_cast<LfsFetchErrorCode>(errorCode);
-    return code == LfsFetchErrorCode::NoRemote || code == LfsFetchErrorCode::Offline;
+    return code == LfsFetchErrorCode::NoRemote;
 }
 
 QString LfsStore::objectPath(const QString& gitDirPath, const QString& oid)

@@ -1609,7 +1609,8 @@ TEST_CASE("Lfs reset falls back to pointer when object is missing and no remote 
     INFO("Reset error:" << resetFuture.result().errorMessage().toStdString()
          << "code:" << resetFuture.result().errorCode());
 
-    // Expected behavior: no-remote/offline fetch errors should fall back to pointer text.
+    // Expected behavior: no-remote fetch errors should fall back to pointer text.
+    // Offline errors are hard failures and do not fall back.
     CHECK(!resetFuture.result().hasError());
 
     const QByteArray postResetBytes = readFileBytes(imagePath);
