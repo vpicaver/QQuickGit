@@ -4578,6 +4578,23 @@ Monad::Result<QByteArray> GitRepository::fileContentAtCommit(const QString& repo
     return Monad::Result<QByteArray>(QByteArray(raw, static_cast<int>(rawSize)));
 }
 
+QByteArray GitRepository::fileContentAtCommit(const QString& commitOid,
+                                               const QString& relativePath) const
+{
+    const QString repoPath = d->mDirectory.absolutePath();
+    if (repoPath.isEmpty()) {
+        qWarning("GitRepository::fileContentAtCommit: repository is not open");
+        return {};
+    }
+
+    auto result = fileContentAtCommit(repoPath, commitOid, relativePath);
+    if (result.hasError()) {
+        qWarning("GitRepository::fileContentAtCommit: %s", qPrintable(result.errorMessage()));
+        return {};
+    }
+    return result.value();
+}
+
 void GitRepository::setAccount(Account* account) {
     if(d->mAccount != account) {
         d->mAccount = account;

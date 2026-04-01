@@ -1017,6 +1017,25 @@ TEST_CASE("GitRepository static head and diff helpers should work", "[GitReposit
             CHECK(!mergeBaseResult.errorMessage().isEmpty());
         }
     }
+
+    SECTION("fileContentAtCommit wrapper delegates to static method")
+    {
+        QByteArray content = repo.fileContentAtCommit(firstHead, QStringLiteral("alpha.txt"));
+        CHECK(content == "alpha-1\n");
+    }
+
+    SECTION("fileContentAtCommit wrapper returns empty for non-existent file")
+    {
+        QByteArray content = repo.fileContentAtCommit(firstHead, QStringLiteral("missing.txt"));
+        CHECK(content.isEmpty());
+    }
+
+    SECTION("fileContentAtCommit wrapper returns empty when repo not open")
+    {
+        GitRepository emptyRepo;
+        QByteArray content = emptyRepo.fileContentAtCommit(firstHead, QStringLiteral("alpha.txt"));
+        CHECK(content.isEmpty());
+    }
 }
 
 TEST_CASE("GitRepository push should classify remote-advance rejection", "[GitRepository]")

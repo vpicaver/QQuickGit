@@ -185,6 +185,8 @@ public:
     static Monad::Result<QByteArray> fileContentAtCommit(const QString& repositoryPath,
                                                           const QString& commitOid,
                                                           const QString& relativePath);
+    Q_INVOKABLE QByteArray fileContentAtCommit(const QString& commitOid,
+                                                const QString& relativePath) const;
     static GitFuture hydrateLfsFiles(const QDir& repositoryDir, QObject* context = nullptr);
 
     static void initGitEngine();
