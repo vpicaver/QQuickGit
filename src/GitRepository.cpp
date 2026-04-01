@@ -131,17 +131,6 @@ QStringList uniqueSortedPaths(const QStringList& paths)
     return result;
 }
 
-QString oidToQString(const git_oid* oid)
-{
-    if (oid == nullptr) {
-        return QString();
-    }
-
-    char buffer[GIT_OID_HEXSZ + 1] = {};
-    git_oid_tostr(buffer, sizeof(buffer), oid);
-    return QString::fromLatin1(buffer);
-}
-
 QString entryPath(const git_status_entry* entry)
 {
     if (entry == nullptr) {

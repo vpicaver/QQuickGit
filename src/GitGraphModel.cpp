@@ -1,5 +1,6 @@
 //Our includes
 #include "GitGraphModel.h"
+#include "GitOidUtils.h"
 #include "GitRepository.h"
 #include "GitLanes.h"
 
@@ -41,13 +42,6 @@ git_oid bytesToOid(const QByteArray& bytes)
     if (bytes.size() >= GIT_OID_SHA1_SIZE)
         memcpy(oid.id, bytes.constData(), GIT_OID_SHA1_SIZE);
     return oid;
-}
-
-QString oidToString(const git_oid* oid)
-{
-    char buffer[GIT_OID_SHA1_HEXSIZE + 1];
-    git_oid_tostr(buffer, sizeof(buffer), oid);
-    return QString::fromLatin1(buffer);
 }
 
 QHash<QString, QStringList> buildRefMap(git_repository* repo)

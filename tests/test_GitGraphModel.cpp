@@ -2,9 +2,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 //Our includes
+#include "TestUtilities.h"
 #include "GitGraphModel.h"
 #include "GitRepository.h"
-#include "Account.h"
 
 //Async includes
 #include "asyncfuture.h"
@@ -13,35 +13,12 @@
 #include <QTemporaryDir>
 #include <QDir>
 #include <QSignalSpy>
-#include <QFile>
 #include <QAbstractItemModel>
 
 //libgit2
 #include "git2.h"
 
 using namespace QQuickGit;
-
-namespace {
-
-void createFileAndCommit(GitRepository& repo, const QString& filename,
-                          const QString& content, const QString& message)
-{
-    QDir dir = repo.directory();
-    QFile file(dir.filePath(filename));
-    REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
-    file.write(content.toUtf8());
-    file.close();
-
-    repo.checkStatus();
-
-    Account account;
-    account.setName("Test");
-    account.setEmail("test@test.com");
-    repo.setAccount(&account);
-    repo.commitAll(message, QString());
-}
-
-} // anonymous namespace
 
 TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 {
@@ -64,7 +41,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Single commit produces one row") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
 
         GitGraphModel model;
         model.setRepository(&repo);
@@ -78,7 +55,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         QModelIndex idx = model.index(0, 0);
         CHECK(!model.data(idx, GitGraphModel::ShaRole).toString().isEmpty());
         CHECK(model.data(idx, GitGraphModel::MessageRole).toString() == "Initial commit");
-        CHECK(model.data(idx, GitGraphModel::AuthorRole).toString() == "Test");
+        CHECK(model.data(idx, GitGraphModel::AuthorRole).toString() == "Test Author");
         CHECK(model.data(idx, GitGraphModel::TimestampRole).toDateTime().isValid());
 
         auto lanes = model.data(idx, GitGraphModel::LanesRole).value<QList<int>>();
@@ -88,9 +65,9 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Multiple commits produces correct rowCount") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
-        createFileAndCommit(repo, "file2.txt", "world", "Commit 2");
-        createFileAndCommit(repo, "file3.txt", "foo", "Commit 3");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
+        TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Commit 2");
+        TestUtilities::createFileAndCommit(repo, "file3.txt", "foo", "Commit 3");
 
         GitGraphModel model;
         model.setRepository(&repo);
@@ -106,7 +83,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Uses beginInsertRows, not modelReset") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
 
         GitGraphModel model;
 
@@ -124,7 +101,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Refresh after new commit adds new row") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
 
         GitGraphModel model;
         model.setRepository(&repo);
@@ -135,7 +112,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         CHECK(model.rowCount() == 1);
 
-        createFileAndCommit(repo, "file2.txt", "world", "Commit 2");
+        TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Commit 2");
         model.refresh();
 
         loadingSpy.clear();
@@ -149,7 +126,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Ref labels are populated") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
 
         GitGraphModel model;
         model.setRepository(&repo);
@@ -190,7 +167,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Symbolic refs like origin/HEAD are excluded from ref labels") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
 
         // Create origin/main (direct ref) and origin/HEAD (symbolic ref) using libgit2
         git_repository* rawRepo = nullptr;
@@ -228,7 +205,7 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
     }
 
     SECTION("Setting null repository clears model") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Commit 1");
 
         GitGraphModel model;
         model.setRepository(&repo);

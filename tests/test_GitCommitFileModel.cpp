@@ -2,13 +2,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 //Our includes
+#include "TestUtilities.h"
 #include "GitCommitFileModel.h"
 #include "GitCommitInfo.h"
 #include "GitRepository.h"
-#include "Account.h"
-
-//Async includes
-#include "asyncfuture.h"
 
 //Qt includes
 #include <QTemporaryDir>
@@ -24,66 +21,12 @@ using namespace QQuickGit;
 
 namespace {
 
-void createFileAndCommit(GitRepository& repo, const QString& filename,
-                          const QString& content, const QString& message)
-{
-    QDir dir = repo.directory();
-    QFile file(dir.filePath(filename));
-    REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
-    file.write(content.toUtf8());
-    file.close();
-
-    repo.checkStatus();
-
-    Account account;
-    account.setName("Test Author");
-    account.setEmail("test@example.com");
-    repo.setAccount(&account);
-    repo.commitAll(message, QString());
-}
-
-void deleteFileAndCommit(GitRepository& repo, const QString& filename,
-                          const QString& message)
-{
-    QDir dir = repo.directory();
-    QFile::remove(dir.filePath(filename));
-
-    repo.checkStatus();
-
-    Account account;
-    account.setName("Test Author");
-    account.setEmail("test@example.com");
-    repo.setAccount(&account);
-    repo.commitAll(message, QString());
-}
-
-QString getHeadSha(const QDir& dir)
-{
-    git_repository* repo = nullptr;
-    if (git_repository_open(&repo, dir.absolutePath().toLocal8Bit().constData()) != GIT_OK)
-        return {};
-    std::unique_ptr<git_repository, decltype(&git_repository_free)>
-        repoHolder(repo, &git_repository_free);
-
-    git_reference* headRef = nullptr;
-    if (git_repository_head(&headRef, repo) != GIT_OK)
-        return {};
-    std::unique_ptr<git_reference, decltype(&git_reference_free)>
-        refHolder(headRef, &git_reference_free);
-
-    const git_oid* oid = git_reference_target(headRef);
-    if (!oid)
-        return {};
-
-    char buffer[GIT_OID_SHA1_HEXSIZE + 1];
-    git_oid_tostr(buffer, sizeof(buffer), oid);
-    return QString::fromLatin1(buffer);
-}
-
 void waitForLoading(GitCommitInfo& info)
 {
     if (!info.loading())
+    {
         return;
+    }
     QSignalSpy spy(&info, &GitCommitInfo::loadingChanged);
     REQUIRE(spy.wait(5000));
 }
@@ -99,9 +42,9 @@ TEST_CASE("GitCommitFileModel populates from fileListReady", "[GitCommitFileMode
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-    createFileAndCommit(repo, "file1.txt", "modified", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "modified", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -131,8 +74,8 @@ TEST_CASE("GitCommitFileModel shows correct status for added files", "[GitCommit
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -158,9 +101,9 @@ TEST_CASE("GitCommitFileModel shows correct status for deleted files", "[GitComm
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Add file");
-    deleteFileAndCommit(repo, "file1.txt", "Delete file");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Add file");
+    TestUtilities::deleteFileAndCommit(repo, "file1.txt", "Delete file");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -187,9 +130,9 @@ TEST_CASE("GitCommitFileModel fetchLineStats updates via dataChanged", "[GitComm
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "line1\nline2\nline3\n", "Initial");
-    createFileAndCommit(repo, "file1.txt", "line1\nmodified\nline3\nnew line\n", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "line1\nline2\nline3\n", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "line1\nmodified\nline3\nnew line\n", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -223,10 +166,10 @@ TEST_CASE("GitCommitFileModel fetchLineStats returns correct counts", "[GitCommi
     repo.initRepository();
 
     // 3 lines initially
-    createFileAndCommit(repo, "file1.txt", "aaa\nbbb\nccc\n", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "aaa\nbbb\nccc\n", "Initial");
     // Replace 1 line, add 2 lines → 1 deleted, 3 added
-    createFileAndCommit(repo, "file1.txt", "aaa\nBBB\nccc\nDDD\nEEE\n", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "aaa\nBBB\nccc\nDDD\nEEE\n", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -257,9 +200,9 @@ TEST_CASE("GitCommitFileModel cached re-fetch is immediate", "[GitCommitFileMode
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-    createFileAndCommit(repo, "file1.txt", "modified", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "modified", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -288,10 +231,10 @@ TEST_CASE("GitCommitFileModel SHA change resets model and clears line stats cach
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "First");
-    QString sha1 = getHeadSha(repo.directory());
-    createFileAndCommit(repo, "file2.txt", "world", "Second");
-    QString sha2 = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "First");
+    QString sha1 = TestUtilities::getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Second");
+    QString sha2 = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -329,7 +272,7 @@ TEST_CASE("GitCommitFileModel empty commit has 0 rows", "[GitCommitFileModel]")
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
 
     // Create empty commit using libgit2 directly
     QDir dir = repo.directory();
@@ -421,8 +364,8 @@ TEST_CASE("GitCommitFileModel delegates loading and errorMessage to commitInfo",
         repo.setDirectory(QDir(tempDir.path()));
         repo.initRepository();
 
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-        QString sha = getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+        QString sha = TestUtilities::getHeadSha(repo.directory());
 
         GitCommitInfo info;
         info.setRepository(&repo);
@@ -463,9 +406,9 @@ TEST_CASE("GitCommitFileModel handles out-of-bounds fetchLineStats gracefully", 
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-    createFileAndCommit(repo, "file1.txt", "modified", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "modified", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -502,9 +445,9 @@ TEST_CASE("GitCommitFileModel setting commitInfo to null clears connection", "[G
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-    createFileAndCommit(repo, "file1.txt", "modified", "Change");
-    QString sha = getHeadSha(repo.directory());
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "modified", "Change");
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);
@@ -537,8 +480,8 @@ TEST_CASE("GitCommitFileModel multi-file commit shows all files", "[GitCommitFil
     repo.setDirectory(QDir(tempDir.path()));
     repo.initRepository();
 
-    createFileAndCommit(repo, "a.txt", "aaa", "First");
-    createFileAndCommit(repo, "b.txt", "bbb", "Second");
+    TestUtilities::createFileAndCommit(repo, "a.txt", "aaa", "First");
+    TestUtilities::createFileAndCommit(repo, "b.txt", "bbb", "Second");
 
     // Modify a.txt, add c.txt, delete b.txt in one commit
     QDir dir = repo.directory();
@@ -563,7 +506,7 @@ TEST_CASE("GitCommitFileModel multi-file commit shows all files", "[GitCommitFil
     repo.setAccount(&account);
     repo.commitAll("Multi-file change", QString());
 
-    QString sha = getHeadSha(repo.directory());
+    QString sha = TestUtilities::getHeadSha(repo.directory());
 
     GitCommitInfo info;
     info.setRepository(&repo);

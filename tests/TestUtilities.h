@@ -7,6 +7,8 @@
 #include <QModelIndex>
 #include <QHash>
 
+namespace QQuickGit { class GitRepository; }
+
 class TestUtilities
 {
 public:
@@ -17,6 +19,11 @@ public:
     static QDir moveToNewTempDirectory(const QDir& oldDirectory);
     static void copyAndReplaceFolderContents(const QString &fromDir, const QString &toDir, bool copyAndRemove = false);
 
+    static void createFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
+                                    const QString& content, const QString& message);
+    static void deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
+                                    const QString& message);
+    static QString getHeadSha(const QDir& dir);
 };
 
 std::ostream& operator<<(std::ostream& os, const QVariantMap& map);

@@ -26,11 +26,13 @@ GitCommitFileModel::~GitCommitFileModel()
 
 void GitCommitFileModel::setCommitInfo(GitCommitInfo* info)
 {
-    if (mCommitInfo == info)
+    if (mCommitInfo == info) {
         return;
+    }
 
-    if (mCommitInfo)
+    if (mCommitInfo) {
         disconnect(mCommitInfo, nullptr, this, nullptr);
+    }
 
     mCommitInfo = info;
 
@@ -59,15 +61,17 @@ QString GitCommitFileModel::errorMessage() const
 
 int GitCommitFileModel::rowCount(const QModelIndex& parent) const
 {
-    if (parent.isValid())
+    if (parent.isValid()) {
         return 0;
+    }
     return mFiles.size();
 }
 
 QVariant GitCommitFileModel::data(const QModelIndex& index, int role) const
 {
-    if (!index.isValid() || index.row() < 0 || index.row() >= mFiles.size())
+    if (!index.isValid() || index.row() < 0 || index.row() >= mFiles.size()) {
         return QVariant();
+    }
 
     const auto& entry = mFiles.at(index.row());
 
@@ -118,21 +122,26 @@ QHash<int, QByteArray> GitCommitFileModel::roleNames() const
 
 void GitCommitFileModel::fetchLineStats(int row)
 {
-    if (row < 0 || row >= mFiles.size())
+    if (row < 0 || row >= mFiles.size()) {
         return;
+    }
 
-    if (mLineStatsCache.contains(row))
+    if (mLineStatsCache.contains(row)) {
         return;
+    }
 
-    if (mLineStatFutures.contains(row))
+    if (mLineStatFutures.contains(row)) {
         return;
+    }
 
-    if (!mCommitInfo || !mCommitInfo->repository())
+    if (!mCommitInfo || !mCommitInfo->repository()) {
         return;
+    }
 
     QDir dir = mCommitInfo->repository()->directory();
-    if (!dir.exists())
+    if (!dir.exists()) {
         return;
+    }
 
     QString repoPath = dir.absolutePath();
     QString commitSha = mCommitInfo->commitSha();
@@ -143,24 +152,28 @@ void GitCommitFileModel::fetchLineStats(int row)
         LineStats stats;
 
         git_repository* repo = nullptr;
-        if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo)
+        if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo) {
             return stats;
+        }
         std::unique_ptr<git_repository, decltype(&git_repository_free)>
             repoHolder(repo, &git_repository_free);
 
         git_oid oid;
-        if (git_oid_fromstr(&oid, commitSha.toLatin1().constData()) != GIT_OK)
+        if (git_oid_fromstr(&oid, commitSha.toLatin1().constData()) != GIT_OK) {
             return stats;
+        }
 
         git_commit* commit = nullptr;
-        if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit)
+        if (git_commit_lookup(&commit, repo, &oid) != GIT_OK || !commit) {
             return stats;
+        }
         std::unique_ptr<git_commit, decltype(&git_commit_free)>
             commitHolder(commit, &git_commit_free);
 
         git_tree* commitTree = nullptr;
-        if (git_commit_tree(&commitTree, commit) != GIT_OK || !commitTree)
+        if (git_commit_tree(&commitTree, commit) != GIT_OK || !commitTree) {
             return stats;
+        }
         std::unique_ptr<git_tree, decltype(&git_tree_free)>
             commitTreeHolder(commitTree, &git_tree_free);
 
@@ -188,17 +201,20 @@ void GitCommitFileModel::fetchLineStats(int row)
         diffOptions.pathspec.strings = const_cast<char**>(&pathspec);
         diffOptions.pathspec.count = 1;
 
-        if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff)
+        if (git_diff_tree_to_tree(&diff, repo, parentTree, commitTree, &diffOptions) != GIT_OK || !diff) {
             return stats;
+        }
         std::unique_ptr<git_diff, decltype(&git_diff_free)> diffHolder(diff, &git_diff_free);
 
         size_t deltaCount = git_diff_num_deltas(diff);
-        if (deltaCount == 0)
+        if (deltaCount == 0) {
             return stats;
+        }
 
         git_patch* patch = nullptr;
-        if (git_patch_from_diff(&patch, diff, 0) != GIT_OK || !patch)
+        if (git_patch_from_diff(&patch, diff, 0) != GIT_OK || !patch) {
             return stats;
+        }
         std::unique_ptr<git_patch, decltype(&git_patch_free)> patchHolder(patch, &git_patch_free);
 
         size_t totalContext = 0, totalAdded = 0, totalDeleted = 0;
@@ -216,8 +232,9 @@ void GitCommitFileModel::fetchLineStats(int row)
     AsyncFuture::observe(future).context(this, [this, row, future]() {
         mLineStatFutures.remove(row);
 
-        if (future.isCanceled())
+        if (future.isCanceled()) {
             return;
+        }
 
         LineStats stats = future.result();
         mLineStatsCache.insert(row, stats);
@@ -239,11 +256,13 @@ void GitCommitFileModel::onFileListReady(const QVector<CommitLoadResult::FileEnt
 
 void GitCommitFileModel::cancelAllLineStatFutures()
 {
-    for (auto& future : mLineStatFutures)
+    for (auto& future : mLineStatFutures) {
         future.cancel();
+    }
 
-    for (auto& future : mLineStatFutures)
+    for (auto& future : mLineStatFutures) {
         AsyncFuture::waitForFinished(future);
+    }
 
     mLineStatFutures.clear();
 }

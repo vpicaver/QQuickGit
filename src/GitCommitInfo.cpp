@@ -1,6 +1,7 @@
 //Our includes
 #include "GitCommitInfo.h"
 #include "GitConcurrent.h"
+#include "GitOidUtils.h"
 #include "GitRepository.h"
 
 //Qt includes
@@ -15,13 +16,6 @@
 using namespace QQuickGit;
 
 namespace {
-
-QString oidToString(const git_oid* oid)
-{
-    char buffer[GIT_OID_SHA1_HEXSIZE + 1];
-    git_oid_tostr(buffer, sizeof(buffer), oid);
-    return QString::fromLatin1(buffer);
-}
 
 QString deltaStatusText(git_delta_t status)
 {
@@ -61,12 +55,14 @@ bool checkBinaryIsImage(git_repository* repo, const git_diff_delta* delta)
     }
 
     // For binary files without recognized extension, check blob header
-    if (git_oid_is_zero(&delta->new_file.id))
+    if (git_oid_is_zero(&delta->new_file.id)) {
         return false;
+    }
 
     git_blob* blob = nullptr;
-    if (git_blob_lookup(&blob, repo, &delta->new_file.id) != GIT_OK || !blob)
+    if (git_blob_lookup(&blob, repo, &delta->new_file.id) != GIT_OK || !blob) {
         return false;
+    }
 
     std::unique_ptr<git_blob, decltype(&git_blob_free)> blobHolder(blob, &git_blob_free);
 
@@ -80,15 +76,17 @@ bool checkBinaryIsImage(git_repository* repo, const git_diff_delta* delta)
 QString fetchParentSubject(git_repository* repo, const git_oid* parentOid)
 {
     git_commit* parent = nullptr;
-    if (git_commit_lookup(&parent, repo, parentOid) != GIT_OK || !parent)
+    if (git_commit_lookup(&parent, repo, parentOid) != GIT_OK || !parent) {
         return QString();
+    }
 
     std::unique_ptr<git_commit, decltype(&git_commit_free)>
         parentHolder(parent, &git_commit_free);
 
     const char* msg = git_commit_message(parent);
-    if (!msg)
+    if (!msg) {
         return QString();
+    }
 
     QString fullMessage = QString::fromUtf8(msg);
     int newline = fullMessage.indexOf(QLatin1Char('\n'));
@@ -99,8 +97,9 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
 {
     CommitLoadResult result;
 
-    if (commitSha.isEmpty())
+    if (commitSha.isEmpty()) {
         return result;
+    }
 
     git_repository* repo = nullptr;
     if (git_repository_open(&repo, repoPath.toLocal8Bit().constData()) != GIT_OK || !repo)
@@ -130,10 +129,12 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
     const git_signature* authorSig = git_commit_author(commit);
     if (authorSig)
     {
-        if (authorSig->name)
+        if (authorSig->name) {
             result.author = QString::fromUtf8(authorSig->name);
-        if (authorSig->email)
+        }
+        if (authorSig->email) {
             result.authorEmail = QString::fromUtf8(authorSig->email);
+        }
     }
 
     git_time_t time = git_commit_time(commit);
@@ -149,10 +150,12 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
         {
             result.subject = fullMessage.left(newline);
             int bodyStart = newline + 1;
-            while (bodyStart < fullMessage.size() && fullMessage[bodyStart] == QLatin1Char('\n'))
+            while (bodyStart < fullMessage.size() && fullMessage[bodyStart] == QLatin1Char('\n')) {
                 bodyStart++;
-            if (bodyStart < fullMessage.size())
+            }
+            if (bodyStart < fullMessage.size()) {
                 result.body = fullMessage.mid(bodyStart).trimmed();
+            }
         }
         else
         {
@@ -213,8 +216,9 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
     for (size_t i = 0; i < deltaCount; i++)
     {
         const git_diff_delta* delta = git_diff_get_delta(diff, i);
-        if (!delta)
+        if (!delta) {
             continue;
+        }
 
         CommitLoadResult::FileEntry entry;
         entry.filePath = delta->new_file.path
@@ -227,10 +231,11 @@ CommitLoadResult loadCommit(const QString& repoPath, const QString& commitSha, i
         entry.statusText = deltaStatusText(delta->status);
         entry.isBinary = (delta->flags & GIT_DIFF_FLAG_BINARY) != 0;
 
-        if (entry.isBinary)
+        if (entry.isBinary) {
             entry.isImage = checkBinaryIsImage(repo, delta);
-        else
+        } else {
             entry.isImage = isImageByExtension(entry.filePath);
+        }
 
         result.files.append(std::move(entry));
     }
@@ -247,8 +252,9 @@ GitCommitInfo::GitCommitInfo(QObject* parent)
     mRestarter.onFutureChanged([this]() {
         auto future = mRestarter.future();
         AsyncFuture::observe(future).context(this, [this, future]() {
-            if (future.isCanceled())
+            if (future.isCanceled()) {
                 return;
+            }
             applyResult(future.result());
         });
     });
@@ -262,8 +268,9 @@ GitCommitInfo::~GitCommitInfo()
 
 void GitCommitInfo::setRepository(GitRepository* repository)
 {
-    if (mRepository == repository)
+    if (mRepository == repository) {
         return;
+    }
 
     mRepository = repository;
     emit repositoryChanged();
@@ -272,8 +279,9 @@ void GitCommitInfo::setRepository(GitRepository* repository)
 
 void GitCommitInfo::setCommitSha(const QString& sha)
 {
-    if (mCommitSha == sha)
+    if (mCommitSha == sha) {
         return;
+    }
 
     mCommitSha = sha;
     emit commitShaChanged();
@@ -282,8 +290,9 @@ void GitCommitInfo::setCommitSha(const QString& sha)
 
 void GitCommitInfo::setParentIndex(int index)
 {
-    if (mParentIndex == index)
+    if (mParentIndex == index) {
         return;
+    }
 
     mParentIndex = index;
     emit parentIndexChanged();
@@ -359,8 +368,10 @@ void GitCommitInfo::clearMetadata()
     emit metadataChanged();
     emit fileListReady({});
 
-    if (wasLoading)
+    if (wasLoading) {
         emit loadingChanged();
-    if (hadError)
+    }
+    if (hadError) {
         emit errorMessageChanged();
+    }
 }

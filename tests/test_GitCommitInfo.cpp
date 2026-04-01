@@ -2,12 +2,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 //Our includes
+#include "TestUtilities.h"
 #include "GitCommitInfo.h"
 #include "GitRepository.h"
-#include "Account.h"
-
-//Async includes
-#include "asyncfuture.h"
 
 //Qt includes
 #include <QTemporaryDir>
@@ -22,51 +19,12 @@ using namespace QQuickGit;
 
 namespace {
 
-void createFileAndCommit(GitRepository& repo, const QString& filename,
-                          const QString& content, const QString& message)
-{
-    QDir dir = repo.directory();
-    QFile file(dir.filePath(filename));
-    REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
-    file.write(content.toUtf8());
-    file.close();
-
-    repo.checkStatus();
-
-    Account account;
-    account.setName("Test Author");
-    account.setEmail("test@example.com");
-    repo.setAccount(&account);
-    repo.commitAll(message, QString());
-}
-
-QString getHeadSha(const QDir& dir)
-{
-    git_repository* repo = nullptr;
-    if (git_repository_open(&repo, dir.absolutePath().toLocal8Bit().constData()) != GIT_OK)
-        return {};
-    std::unique_ptr<git_repository, decltype(&git_repository_free)>
-        repoHolder(repo, &git_repository_free);
-
-    git_reference* headRef = nullptr;
-    if (git_repository_head(&headRef, repo) != GIT_OK)
-        return {};
-    std::unique_ptr<git_reference, decltype(&git_reference_free)>
-        refHolder(headRef, &git_reference_free);
-
-    const git_oid* oid = git_reference_target(headRef);
-    if (!oid)
-        return {};
-
-    char buffer[GIT_OID_SHA1_HEXSIZE + 1];
-    git_oid_tostr(buffer, sizeof(buffer), oid);
-    return QString::fromLatin1(buffer);
-}
-
 void waitForLoading(GitCommitInfo& info)
 {
     if (!info.loading())
+    {
         return;
+    }
     QSignalSpy spy(&info, &GitCommitInfo::loadingChanged);
     REQUIRE(spy.wait(5000));
 }
@@ -83,8 +41,8 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
     repo.initRepository();
 
     SECTION("Valid SHA loads metadata") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
-        QString sha = getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         REQUIRE(!sha.isEmpty());
 
         GitCommitInfo info;
@@ -158,8 +116,8 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
     }
 
     SECTION("Root commit has empty parentShas and all files Added") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Root commit");
-        QString sha = getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Root commit");
+        QString sha = TestUtilities::getHeadSha(repo.directory());
 
         GitCommitInfo info;
         QSignalSpy fileSpy(&info, &GitCommitInfo::fileListReady);
@@ -180,8 +138,8 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
     }
 
     SECTION("Multi-file commit lists all changed files") {
-        createFileAndCommit(repo, "file1.txt", "hello", "First");
-        createFileAndCommit(repo, "file2.txt", "world", "Second");
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "First");
+        TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Second");
 
         // Now modify file1 and add file3 in one commit
         QDir dir = repo.directory();
@@ -204,7 +162,7 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
         repo.setAccount(&account);
         repo.commitAll("Multi-file change", QString());
 
-        QString sha = getHeadSha(repo.directory());
+        QString sha = TestUtilities::getHeadSha(repo.directory());
 
         GitCommitInfo info;
         QSignalSpy fileSpy(&info, &GitCommitInfo::fileListReady);
@@ -229,8 +187,8 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
     }
 
     SECTION("Empty SHA clears metadata") {
-        createFileAndCommit(repo, "file1.txt", "hello", "Initial");
-        QString sha = getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial");
+        QString sha = TestUtilities::getHeadSha(repo.directory());
 
         GitCommitInfo info;
         info.setRepository(&repo);
@@ -245,10 +203,10 @@ TEST_CASE("GitCommitInfo basic functionality", "[GitCommitInfo]")
     }
 
     SECTION("Changing SHA reloads") {
-        createFileAndCommit(repo, "file1.txt", "hello", "First commit");
-        QString sha1 = getHeadSha(repo.directory());
-        createFileAndCommit(repo, "file2.txt", "world", "Second commit");
-        QString sha2 = getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "First commit");
+        QString sha1 = TestUtilities::getHeadSha(repo.directory());
+        TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Second commit");
+        QString sha2 = TestUtilities::getHeadSha(repo.directory());
 
         GitCommitInfo info;
         info.setRepository(&repo);
