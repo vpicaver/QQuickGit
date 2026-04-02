@@ -944,6 +944,175 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
     }
 }
 
+TEST_CASE("Merge with multiple conflicting files should preserve all files", "[GitRepository]") {
+    // Regression test for https://github.com/Cavewhere/cavewhere/issues/370
+    //
+    // When both sides of a merge modify the same line in TWO different files,
+    // git creates two conflict entries. The resolveWithOurs lambda removes
+    // conflict entries from the index while iterating with
+    // git_index_conflict_iterator. Mutating the index during iteration can
+    // invalidate the iterator, causing the second conflict to be skipped.
+    // The skipped file's conflict entries are removed (no longer at stages
+    // 1/2/3) but never staged at stage 0, so it disappears from the commit.
+
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    CHECK_NOTHROW(repo.initRepository());
+
+    Account account;
+    account.setName("Tester");
+    account.setEmail("tester@example.com");
+    repo.setAccount(&account);
+
+    // --- Seed: create two files with a shared "station name" field ----------
+    // Both files must be large enough that the single-line change is a small
+    // fraction of the total content (keeps similarity high, avoids any
+    // accidental rename detection that could mask the real issue).
+
+    auto buildNoteContent = [](const QByteArray& stationName, const QByteArray& id) {
+        // ~30 lines of JSON boilerplate surrounding the mutable station name
+        QByteArray out;
+        out += "{\n";
+        out += " \"image\": {\n";
+        out += "  \"size\": { \"width\": 3195, \"height\": 2564 },\n";
+        out += "  \"dotPerMeter\": 3780,\n";
+        out += "  \"path\": \"" + id + ".jpeg\"\n";
+        out += " },\n";
+        out += " \"rotation\": 0,\n";
+        out += " \"scraps\": [\n";
+        out += "  {\n";
+        out += "   \"outlinePoints\": [\n";
+        out += "    { \"x\": 0.555, \"y\": 0.496 },\n";
+        out += "    { \"x\": 0.567, \"y\": 0.523 },\n";
+        out += "    { \"x\": 0.589, \"y\": 0.538 },\n";
+        out += "    { \"x\": 0.597, \"y\": 0.569 },\n";
+        out += "    { \"x\": 0.610, \"y\": 0.583 },\n";
+        out += "    { \"x\": 0.635, \"y\": 0.626 },\n";
+        out += "    { \"x\": 0.647, \"y\": 0.662 },\n";
+        out += "    { \"x\": 0.646, \"y\": 0.694 },\n";
+        out += "    { \"x\": 0.648, \"y\": 0.731 }\n";
+        out += "   ],\n";
+        out += "   \"noteStations\": [\n";
+        out += "    {\n";
+        out += "     \"positionOnNote\": { \"x\": 0.553, \"y\": 0.570 },\n";
+        out += "     \"name\": \"" + stationName + "\",\n";
+        out += "     \"id\": \"fbc85408-26ab-4865-b74c-" + id + "\"\n";
+        out += "    }\n";
+        out += "   ],\n";
+        out += "   \"type\": \"Plan\",\n";
+        out += "   \"id\": \"0ff83d05-648f-4ab2-9336-" + id + "\"\n";
+        out += "  }\n";
+        out += " ],\n";
+        out += " \"name\": \"" + id + "\",\n";
+        out += " \"fileVersion\": { \"version\": 8 },\n";
+        out += " \"id\": \"228fa0cc-2db5-45ed-b7ca-" + id + "\"\n";
+        out += "}\n";
+        return out;
+    };
+
+    auto buildTripContent = [](const QByteArray& stationName) {
+        QByteArray out;
+        out += "{\n";
+        out += " \"chunks\": [\n";
+        out += "  {\n";
+        out += "   \"leg\": [\n";
+        out += "    {\n";
+        out += "     \"id\": \"bcbfa8e3-0590-43c9-af2b-c74aa8098c0b\",\n";
+        out += "     \"name\": \"" + stationName + "\",\n";
+        out += "     \"left\": \"0\",\n";
+        out += "     \"right\": \"5\"\n";
+        out += "    }\n";
+        out += "   ]\n";
+        out += "  }\n";
+        out += " ],\n";
+        out += " \"fileVersion\": { \"version\": 8 },\n";
+        out += " \"id\": \"e8a1d251-20ce-4255-a14f-34f7f1fd099c\"\n";
+        out += "}\n";
+        return out;
+    };
+
+    // Create directory structure mimicking a CaveWhere project
+    REQUIRE(tempDir.mkpath(QStringLiteral("Cave/trips/Trip/notes")));
+
+    auto writeTripFile = [&](const QByteArray& stationName) {
+        QFile f(tempDir.absoluteFilePath("Cave/trips/Trip/Trip.cwtrip"));
+        REQUIRE(f.open(QFile::WriteOnly | QFile::Truncate));
+        f.write(buildTripContent(stationName));
+    };
+
+    auto writeNoteFile = [&](const QByteArray& stationName) {
+        QFile f(tempDir.absoluteFilePath("Cave/trips/Trip/notes/1.cwnote"));
+        REQUIRE(f.open(QFile::WriteOnly | QFile::Truncate));
+        f.write(buildNoteContent(stationName, "0001"));
+    };
+
+    // Base commit: station name is "a1" in both files
+    writeTripFile("a1");
+    writeNoteFile("a1");
+    CHECK_NOTHROW(repo.commitAll("seed", "base commit with station a1"));
+
+    // --- Create diverging branches ----------------------------------------
+    CHECK_NOTHROW(repo.createBranch("remoteBranch"));
+
+    // Remote branch: rename a1 -> c1 in both files
+    writeTripFile("c1");
+    writeNoteFile("c1");
+    CHECK_NOTHROW(repo.commitAll("remote", "remote renames station to c1"));
+
+    // Switch back to master and make a conflicting change: a1 -> b1
+    waitForGitFuture(repo.checkout("refs/heads/master"));
+    CHECK(repo.headBranchName().toStdString() == "master");
+
+    writeTripFile("b1");
+    writeNoteFile("b1");
+    CHECK_NOTHROW(repo.commitAll("local", "local renames station to b1"));
+
+    // --- Merge: this is where the bug triggers ----------------------------
+    const QString tripPath = QStringLiteral("Cave/trips/Trip/Trip.cwtrip");
+    const QString notePath = QStringLiteral("Cave/trips/Trip/notes/1.cwnote");
+
+    GitRepository::MergeResult result;
+    CHECK_NOTHROW(result = repo.merge({"remoteBranch"}));
+    CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
+
+    // --- Verify BOTH files survived the merge -----------------------------
+    // The .cwtrip file should exist and contain "b1" (ours wins)
+
+    // Also verify via the git tree that the committed tree contains the files
+    const auto headOid = GitRepository::headCommitOid(tempDir.absolutePath());
+    REQUIRE(!headOid.hasError());
+    REQUIRE(!headOid.value().isEmpty());
+
+    const auto tripInTree = GitRepository::fileContentAtCommit(
+        tempDir.absolutePath(), headOid.value(), tripPath);
+    INFO("Trip file in git tree error: " << tripInTree.errorMessage().toStdString());
+    REQUIRE_FALSE(tripInTree.hasError());
+    CHECK_FALSE(tripInTree.value().isEmpty());
+    CHECK(tripInTree.value().contains("\"name\": \"b1\""));
+
+    REQUIRE(QFile::exists(tempDir.absoluteFilePath(tripPath)));
+    {
+        QFile f(tempDir.absoluteFilePath(tripPath));
+        REQUIRE(f.open(QFile::ReadOnly));
+        const auto content = f.readAll();
+        CHECK(content.contains("\"name\": \"b1\""));
+        CHECK_FALSE(content.contains("<<<<<<<"));
+    }
+
+    // The 1.cwnote file MUST also exist — this is the file that was
+    // incorrectly deleted due to the iterator-invalidation bug.
+    REQUIRE(QFile::exists(tempDir.absoluteFilePath(notePath)));
+    {
+        QFile f(tempDir.absoluteFilePath(notePath));
+        REQUIRE(f.open(QFile::ReadOnly));
+        const auto content = f.readAll();
+        CHECK(content.contains("\"name\": \"b1\""));
+        CHECK_FALSE(content.contains("<<<<<<<"));
+    }
+
+}
+
 TEST_CASE("GitRepository static head and diff helpers should work", "[GitRepository]")
 {
     auto tempDir = TestUtilities::createUniqueTempDir();

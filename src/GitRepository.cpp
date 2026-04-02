@@ -3777,74 +3777,115 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                     return out;
                 };
 
-                git_index_conflict_iterator* iterator;
-                check(git_index_conflict_iterator_new(&iterator, index));
+                // Collect all conflict entries before processing. Calling
+                // git_index_conflict_remove while iterating with
+                // git_index_conflict_iterator invalidates the iterator and
+                // silently skips remaining conflicts (see issue #370).
+                struct ConflictEntry {
+                    QByteArray ancestorPath;
+                    QByteArray ourPath;
+                    QByteArray theirPath;
+                    git_oid ancestorOid;
+                    git_oid ourOid;
+                    git_oid theirOid;
+                    uint32_t ancestorMode = 0;
+                    uint32_t ourMode = 0;
+                    uint32_t theirMode = 0;
+                };
 
-                const git_index_entry *ancestor;
-                const git_index_entry *our;
-                const git_index_entry *their;
-                int err = 0;
+                QList<ConflictEntry> collectedConflicts;
+                {
+                    git_index_conflict_iterator* iterator;
+                    check(git_index_conflict_iterator_new(&iterator, index));
 
-                while ((err = git_index_conflict_next(&ancestor, &our, &their, iterator)) == 0) {
-                    auto pathFor = [](const git_index_entry* entry) -> const char*
-                    {
-                        return entry ? entry->path : nullptr;
+                    const git_index_entry *ancestor;
+                    const git_index_entry *our;
+                    const git_index_entry *their;
+
+                    auto copyEntryData = [](const git_index_entry* src, QByteArray& path,
+                                            git_oid& oid, uint32_t& mode) {
+                        if (src && src->path) {
+                            path = QByteArray(src->path);
+                            git_oid_cpy(&oid, &src->id);
+                            mode = src->mode;
+                        }
                     };
 
-                    const QByteArray ancestorPath = pathFor(ancestor) ? QByteArray(pathFor(ancestor)) : QByteArray();
-                    const QByteArray ourPath = pathFor(our) ? QByteArray(pathFor(our)) : QByteArray();
-                    const QByteArray theirPath = pathFor(their) ? QByteArray(pathFor(their)) : QByteArray();
-                    const QByteArray conflictPath = !ourPath.isEmpty()
-                        ? ourPath
-                        : (!ancestorPath.isEmpty() ? ancestorPath : theirPath);
+                    while (git_index_conflict_next(&ancestor, &our, &their, iterator) == 0) {
+                        ConflictEntry entry;
+                        copyEntryData(ancestor, entry.ancestorPath, entry.ancestorOid, entry.ancestorMode);
+                        copyEntryData(our, entry.ourPath, entry.ourOid, entry.ourMode);
+                        copyEntryData(their, entry.theirPath, entry.theirOid, entry.theirMode);
+                        collectedConflicts.append(std::move(entry));
+                    }
+                    git_index_conflict_iterator_free(iterator);
+                }
+
+                auto makeIndexEntry = [](const QByteArray& path, const git_oid& oid, uint32_t mode) -> git_index_entry {
+                    git_index_entry e = {};
+                    e.path = path.constData();
+                    git_oid_cpy(&e.id, &oid);
+                    e.mode = mode;
+                    return e;
+                };
+
+                for (const ConflictEntry& conflict : collectedConflicts) {
+                    const QByteArray conflictPath = !conflict.ourPath.isEmpty()
+                        ? conflict.ourPath
+                        : (!conflict.ancestorPath.isEmpty() ? conflict.ancestorPath : conflict.theirPath);
 
                     if (conflictPath.isEmpty()) {
                         continue;
                     }
 
                     QList<QByteArray> conflictPaths;
-                    if (!ancestorPath.isEmpty()) {
-                        conflictPaths.append(ancestorPath);
+                    if (!conflict.ancestorPath.isEmpty()) {
+                        conflictPaths.append(conflict.ancestorPath);
                     }
-                    if (!ourPath.isEmpty() && !conflictPaths.contains(ourPath)) {
-                        conflictPaths.append(ourPath);
+                    if (!conflict.ourPath.isEmpty() && !conflictPaths.contains(conflict.ourPath)) {
+                        conflictPaths.append(conflict.ourPath);
                     }
-                    if (!theirPath.isEmpty() && !conflictPaths.contains(theirPath)) {
-                        conflictPaths.append(theirPath);
+                    if (!conflict.theirPath.isEmpty() && !conflictPaths.contains(conflict.theirPath)) {
+                        conflictPaths.append(conflict.theirPath);
                     }
 
-                    const bool oursRenamed = !ancestorPath.isEmpty() && !ourPath.isEmpty() && ourPath != ancestorPath;
-                    const bool theirsRenamed = !ancestorPath.isEmpty() && !theirPath.isEmpty() && theirPath != ancestorPath;
+                    const bool oursRenamed = !conflict.ancestorPath.isEmpty() && !conflict.ourPath.isEmpty() && conflict.ourPath != conflict.ancestorPath;
+                    const bool theirsRenamed = !conflict.ancestorPath.isEmpty() && !conflict.theirPath.isEmpty() && conflict.theirPath != conflict.ancestorPath;
                     const bool renameModifyConflict =
-                        !ancestorPath.isEmpty() &&
-                        !ourPath.isEmpty() &&
-                        !theirPath.isEmpty() &&
+                        !conflict.ancestorPath.isEmpty() &&
+                        !conflict.ourPath.isEmpty() &&
+                        !conflict.theirPath.isEmpty() &&
                         (oursRenamed != theirsRenamed) &&
-                        ((oursRenamed && theirPath == ancestorPath) ||
-                         (theirsRenamed && ourPath == ancestorPath));
+                        ((oursRenamed && conflict.theirPath == conflict.ancestorPath) ||
+                         (theirsRenamed && conflict.ourPath == conflict.ancestorPath));
 
                     if (renameModifyConflict) {
-                        const git_index_entry* renamedEntry = oursRenamed ? our : their;
-                        const git_index_entry* modifiedEntry = oursRenamed ? their : our;
-                        const QByteArray targetPath = oursRenamed ? ourPath : theirPath;
+                        git_index_entry renamedEntry = oursRenamed
+                            ? makeIndexEntry(conflict.ourPath, conflict.ourOid, conflict.ourMode)
+                            : makeIndexEntry(conflict.theirPath, conflict.theirOid, conflict.theirMode);
+                        git_index_entry modifiedEntry = oursRenamed
+                            ? makeIndexEntry(conflict.theirPath, conflict.theirOid, conflict.theirMode)
+                            : makeIndexEntry(conflict.ourPath, conflict.ourOid, conflict.ourMode);
+                        git_index_entry ancestorEntry = makeIndexEntry(conflict.ancestorPath, conflict.ancestorOid, conflict.ancestorMode);
+                        const QByteArray targetPath = oursRenamed ? conflict.ourPath : conflict.theirPath;
 
                         QByteArray mergedBuffer;
-                        const bool renamedMatchesAncestor = entryMatches(renamedEntry, ancestor);
-                        const bool modifiedMatchesAncestor = entryMatches(modifiedEntry, ancestor);
+                        const bool renamedMatchesAncestor = entryMatches(&renamedEntry, &ancestorEntry);
+                        const bool modifiedMatchesAncestor = entryMatches(&modifiedEntry, &ancestorEntry);
 
                         if (renamedMatchesAncestor && !modifiedMatchesAncestor) {
-                            mergedBuffer = entryContent(modifiedEntry);
+                            mergedBuffer = entryContent(&modifiedEntry);
                         } else if (!renamedMatchesAncestor && modifiedMatchesAncestor) {
-                            mergedBuffer = entryContent(renamedEntry);
+                            mergedBuffer = entryContent(&renamedEntry);
                         } else if (renamedMatchesAncestor && modifiedMatchesAncestor) {
-                            mergedBuffer = entryContent(renamedEntry);
+                            mergedBuffer = entryContent(&renamedEntry);
                         } else {
                             git_merge_file_result mergeResult = {};
                             check(git_merge_file_from_index(&mergeResult,
                                                             repo,
-                                                            ancestor,
-                                                            renamedEntry,
-                                                            modifiedEntry,
+                                                            &ancestorEntry,
+                                                            &renamedEntry,
+                                                            &modifiedEntry,
                                                             nullptr));
                             mergedBuffer = mergeResult.ptr != nullptr && mergeResult.len > 0
                                 ? QByteArray(mergeResult.ptr, static_cast<int>(mergeResult.len))
@@ -3872,7 +3913,7 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 
                     // If "ours" deleted or renamed away from the conflicted path, keep that result
                     // by removing the conflicting worktree entry and not re-adding it to the index.
-                    if (ourPath.isEmpty()) {
+                    if (conflict.ourPath.isEmpty()) {
                         for (const auto& path : conflictPaths) {
                             QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(path)));
                         }
@@ -3880,19 +3921,18 @@ GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
                     }
 
                     for (const auto& path : conflictPaths) {
-                        if (path != ourPath) {
+                        if (path != conflict.ourPath) {
                             QFile::remove(repoDir.absoluteFilePath(QString::fromUtf8(path)));
                         }
                     }
 
                     // Remove the diff tags from the file
-                    auto buffer = useOurs(ourPath.constData(), repoDir);
-                    writeBuffer(ourPath.constData(), repoDir, buffer);
+                    auto buffer = useOurs(conflict.ourPath.constData(), repoDir);
+                    writeBuffer(conflict.ourPath.constData(), repoDir, buffer);
 
                     // Add the file back into the index
-                    stageBufferAtPath(index, ourPath, buffer);
+                    stageBufferAtPath(index, conflict.ourPath, buffer);
                 }
-                git_index_conflict_iterator_free(iterator);
                 check(git_index_write(index));
 
                 Q_ASSERT(!git_index_has_conflicts(index));
