@@ -7,6 +7,7 @@
 
 // Our includes
 #include "GitRepository.h"
+#include "TestUtilities.h"
 #include "Account.h"
 #include "LfsAuthProvider.h"
 #include "LfsBatchClient.h"
@@ -40,18 +41,6 @@
 using namespace QQuickGit;
 
 namespace {
-
-// Create a bare repository with "main" as the initial HEAD branch,
-// matching what GitRepository::initRepository() uses.
-void initBareRepo(git_repository** out, const QString& path) {
-    git_repository_init_options opts = GIT_REPOSITORY_INIT_OPTIONS_INIT;
-    opts.flags = GIT_REPOSITORY_INIT_BARE | GIT_REPOSITORY_INIT_MKPATH;
-    opts.initial_head = "main";
-    REQUIRE(git_repository_init_ext(out, path.toLocal8Bit().constData(), &opts) == GIT_OK);
-    REQUIRE(*out != nullptr);
-    git_repository_free(*out);
-    *out = nullptr;
-}
 
 bool writeTextFile(const QString& path, const QByteArray& contents)
 {
@@ -1746,8 +1735,7 @@ TEST_CASE("Lfs hydration skips pointer blobs missing from working tree", "[LFS][
     repository.initRepository();
 
     const QString bareRemotePath = QDir(tempDir.path()).filePath(QStringLiteral("strict-hydration-remote.git"));
-    git_repository* bareRemote = nullptr;
-    initBareRepo(&bareRemote, bareRemotePath);
+    TestUtilities::initBareRepo(bareRemotePath);
 
     REQUIRE(configureRemoteUrl(repoPath,
                                QStringLiteral("origin"),
@@ -2858,8 +2846,7 @@ TEST_CASE("Lfs pull delete ignores hydrated file modifications", "[LFS][regressi
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-reset-dirty.git"));
     const QString trackedFileName = QStringLiteral("reset-dirty.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -2956,8 +2943,7 @@ TEST_CASE("Lfs hydrated file state does not create spurious commit", "[LFS][regr
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-empty-commit.git"));
     const QString trackedFileName = QStringLiteral("empty-commit.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3063,8 +3049,7 @@ TEST_CASE("Lfs real hydrated file edit remains dirty and commitable", "[LFS][reg
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-real-edit.git"));
     const QString trackedFileName = QStringLiteral("real-edit.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3171,8 +3156,7 @@ TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression]
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push.git"));
     const QString trackedFileName = QStringLiteral("push-upload.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3227,8 +3211,7 @@ TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LF
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-new-branch.git"));
     const QString trackedFileName = QStringLiteral("baseline-lfs.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3323,8 +3306,7 @@ TEST_CASE("Lfs push merge ignores LFS pointers only present in non-first-parent 
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-merge-parent-scan.git"));
     const QString trackedFileName = QStringLiteral("merge-parent-lfs.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3419,8 +3401,7 @@ TEST_CASE("Lfs push does not trust stale remote-tracking refs over actual remote
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-stale-tracking.git"));
     const QString trackedFileName = QStringLiteral("stale-tracking-lfs.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3515,8 +3496,7 @@ TEST_CASE("Lfs push does not fall back to stale tracking refs when remote tips a
     const QString trackedFileName = QStringLiteral("advertised-tip-fallback-lfs.png");
     const QString topicBranch = QStringLiteral("topic-advertised-tip-fallback");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));
@@ -3760,8 +3740,7 @@ TEST_CASE("Lfs push rejects wildcard refspecs with explicit error", "[LFS][regre
     const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-wildcard-refspec.git"));
     const QString trackedFileName = QStringLiteral("wildcard-lfs.png");
 
-    git_repository* remoteRepo = nullptr;
-    initBareRepo(&remoteRepo, remotePath);
+    TestUtilities::initBareRepo(remotePath);
 
     GitRepository author;
     author.setDirectory(QDir(authorPath));

@@ -26,6 +26,7 @@ public:
     static void deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
                                     const QString& message);
     static QString getHeadSha(const QDir& dir);
+    static void initBareRepo(const QString& path);
 };
 
 std::ostream& operator<<(std::ostream& os, const QVariantMap& map);

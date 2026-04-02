@@ -82,24 +82,31 @@ Item {
 
                 TapHandler {
                     acceptedButtons: Qt.RightButton
-                    onTapped: fileContextMenu.popup()
+                    onTapped: {
+                        menuLoader.active = true
+                        menuLoader.item.popup()
+                    }
                 }
 
-                Menu {
-                    id: fileContextMenu
-                    MenuItem {
-                        text: qsTr("Copy File Path")
-                        onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
-                    }
-                    MenuItem {
-                        text: {
-                            if (Qt.platform.os === "osx")
-                                return qsTr("Show in Finder")
-                            else if (Qt.platform.os === "windows")
-                                return qsTr("Show in Explorer")
-                            return qsTr("Show in File Manager")
+                Loader {
+                    id: menuLoader
+                    active: false
+                    sourceComponent: Menu {
+                        MenuItem {
+                            text: qsTr("Copy File Path")
+                            onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
                         }
-                        onTriggered: GitUtilities.revealInFileManager(fileDelegate._absPath)
+                        MenuItem {
+                            text: {
+                                if (Qt.platform.os === "osx") {
+                                    return qsTr("Show in Finder")
+                                } else if (Qt.platform.os === "windows") {
+                                    return qsTr("Show in Explorer")
+                                }
+                                return qsTr("Show in File Manager")
+                            }
+                            onTriggered: GitUtilities.revealInFileManager(fileDelegate._absPath)
+                        }
                     }
                 }
 

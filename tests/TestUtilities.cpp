@@ -163,3 +163,14 @@ QString TestUtilities::getHeadSha(const QDir& dir)
     git_oid_tostr(buffer, sizeof(buffer), oid);
     return QString::fromLatin1(buffer);
 }
+
+void TestUtilities::initBareRepo(const QString& path)
+{
+    git_repository_init_options opts = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+    opts.flags = GIT_REPOSITORY_INIT_BARE | GIT_REPOSITORY_INIT_MKPATH;
+    opts.initial_head = "main";
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_init_ext(&repo, path.toLocal8Bit().constData(), &opts) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    git_repository_free(repo);
+}

@@ -233,14 +233,20 @@ Item {
 
                 TapHandler {
                     acceptedButtons: Qt.RightButton
-                    onTapped: fileContextMenu.popup()
+                    onTapped: {
+                        menuLoader.active = true
+                        menuLoader.item.popup()
+                    }
                 }
 
-                Menu {
-                    id: fileContextMenu
-                    MenuItem {
-                        text: qsTr("Copy File Path")
-                        onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
+                Loader {
+                    id: menuLoader
+                    active: false
+                    sourceComponent: Menu {
+                        MenuItem {
+                            text: qsTr("Copy File Path")
+                            onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
+                        }
                     }
                 }
 

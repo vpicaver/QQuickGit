@@ -3,6 +3,7 @@
 
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QProcess>
@@ -83,20 +84,18 @@ void GitUtilities::revealInFileManager(const QString& path)
     QFileInfo info(path);
 #if defined(Q_OS_WIN)
     QStringList args;
-    if (!info.isDir())
+    if (!info.isDir()) {
         args << "/select,";
+    }
     args << QDir::toNativeSeparators(path);
-    if (QProcess::startDetached("explorer", args))
+    if (QProcess::startDetached("explorer", args)) {
         return;
+    }
 #elif defined(Q_OS_MAC) && QT_CONFIG(process)
-    QStringList args;
-    args << "-e" << "tell application \"Finder\""
-         << "-e" << "activate"
-         << "-e" << "select POSIX file \"" + QString(path).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-         << "-e" << "end tell"
-         << "-e" << "return";
-    if (QProcess::startDetached("/usr/bin/osascript", args))
+    // open -R reveals and selects the file in Finder without injection risk.
+    if (QProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-R"), path})) {
         return;
+    }
 #endif
     QDesktopServices::openUrl(QUrl::fromLocalFile(info.isDir() ? path : info.path()));
 }
