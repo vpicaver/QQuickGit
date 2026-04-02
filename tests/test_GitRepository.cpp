@@ -1543,6 +1543,95 @@ TEST_CASE("GitRepository clone should report progress", "[GitRepository]") {
     CHECK(ProgressState::fromJson(future.progressText()).progress() == 1.0);
 }
 
+TEST_CASE("GitRepository checkStatusAsync returns accurate file count", "[GitRepository]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+    SECTION("Clean repo returns zero count and false")
+    {
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+
+        CHECK(future.result() == false);
+        CHECK(repo.modifiedFileCount() == 0);
+    }
+
+    SECTION("Single modified file returns count of 1 and true")
+    {
+        QFile file(QDir(tempDir.path()).filePath("file1.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("modified");
+        file.close();
+
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+
+        CHECK(future.result() == true);
+        CHECK(repo.modifiedFileCount() == 1);
+    }
+
+    SECTION("Multiple dirty files returns accurate count")
+    {
+        QDir dir(tempDir.path());
+
+        QFile f1(dir.filePath("file1.txt"));
+        REQUIRE(f1.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        f1.write("modified");
+        f1.close();
+
+        QFile f2(dir.filePath("newfile.txt"));
+        REQUIRE(f2.open(QFile::WriteOnly | QFile::Text));
+        f2.write("new content");
+        f2.close();
+
+        QFile f3(dir.filePath("another.txt"));
+        REQUIRE(f3.open(QFile::WriteOnly | QFile::Text));
+        f3.write("more content");
+        f3.close();
+
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+
+        CHECK(future.result() == true);
+        CHECK(repo.modifiedFileCount() == 3);
+    }
+
+    SECTION("checkStatusAsync and checkStatus agree on count")
+    {
+        QDir dir(tempDir.path());
+
+        QFile f1(dir.filePath("file1.txt"));
+        REQUIRE(f1.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        f1.write("modified");
+        f1.close();
+
+        QFile f2(dir.filePath("newfile.txt"));
+        REQUIRE(f2.open(QFile::WriteOnly | QFile::Text));
+        f2.write("new");
+        f2.close();
+
+        repo.checkStatus();
+        int syncCount = repo.modifiedFileCount();
+
+        // Reset to 0 so we can verify async sets it independently
+        auto cleanFuture = repo.checkStatusAsync();
+        // First set a known different state by committing
+        // Instead, just verify sync and async produce the same result
+        // by running async after sync
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+
+        CHECK(repo.modifiedFileCount() == syncCount);
+    }
+}
+
 TEST_CASE("GitRepository::hasMissingLfsFiles", "[GitRepository][lfs]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

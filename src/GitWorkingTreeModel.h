@@ -43,6 +43,7 @@ class QQUICKGIT_EXPORT GitWorkingTreeModel : public QAbstractListModel
     QML_ELEMENT
 
     Q_PROPERTY(QQuickGit::GitRepository* repository READ repository WRITE setRepository NOTIFY repositoryChanged)
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorMessageChanged)
 
@@ -67,6 +68,7 @@ public:
     GitRepository* repository() const;
     void setRepository(GitRepository* repository);
 
+    int count() const;
     bool loading() const;
     QString errorMessage() const;
 
@@ -78,6 +80,7 @@ public:
 
 signals:
     void repositoryChanged();
+    void countChanged();
     void loadingChanged();
     void errorMessageChanged();
 
@@ -103,6 +106,10 @@ private:
 
 inline GitRepository* GitWorkingTreeModel::repository() const {
     return mRepository;
+}
+
+inline int GitWorkingTreeModel::count() const {
+    return mRows.size();
 }
 
 inline bool GitWorkingTreeModel::loading() const {

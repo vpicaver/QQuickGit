@@ -138,7 +138,7 @@ public:
     bool hasCommits() const;
 
     Q_INVOKABLE void checkStatus();
-    QFuture<bool> checkStatusAsync();
+    Q_INVOKABLE QFuture<bool> checkStatusAsync();
     Q_INVOKABLE void resetHard(const QString& refSpec);
     Q_INVOKABLE void cleanUntracked();
 

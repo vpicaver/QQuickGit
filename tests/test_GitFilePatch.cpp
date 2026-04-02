@@ -414,6 +414,34 @@ TEST_CASE("GitFilePatch committed diffs", "[GitFilePatch]")
         CHECK(patch.errorMessage().isEmpty());
     }
 
+    SECTION("Working tree new file in subdirectory shows all added lines") {
+        TestUtilities::createFileAndCommit(repo, "existing.txt", "hello\n", "Initial");
+
+        // Create a new untracked file in a subdirectory (like CaveWhere project structure)
+        QDir dir = repo.directory();
+        REQUIRE(dir.mkpath("caves/MyCave"));
+        QFile file(dir.filePath("caves/MyCave/trip.pb"));
+        REQUIRE(file.open(QFile::WriteOnly));
+        file.write("line1\nline2\nline3\n");
+        file.close();
+
+        GitFilePatch patch;
+        patch.setWorkingTree(true);
+        patch.setRepository(&repo);
+        patch.setFilePath("caves/MyCave/trip.pb");
+
+        waitForLoading(patch);
+
+        INFO("errorMessage: " << patch.errorMessage().toStdString());
+        REQUIRE(patch.rowCount() > 0);
+
+        for (int i = 0; i < patch.rowCount(); i++) {
+            QModelIndex idx = patch.index(i);
+            QString origin = patch.data(idx, GitFilePatch::OriginRole).toString();
+            CHECK((origin == "+" || origin == "H"));
+        }
+    }
+
     SECTION("LFS-tracked file in committed diff sets isLfsPointer") {
         // Set up LFS policy so *.png goes through LFS filter
         LfsPolicy policy;

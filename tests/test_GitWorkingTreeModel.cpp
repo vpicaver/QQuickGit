@@ -303,6 +303,62 @@ TEST_CASE("GitWorkingTreeModel basic functionality", "[GitWorkingTreeModel]")
         CHECK(model.rowCount() == 0);
     }
 
+    SECTION("count property matches rowCount")
+    {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        writeFile(repo.directory(), "file1.txt", "modified");
+        writeFile(repo.directory(), "file2.txt", "new file");
+        repo.checkStatus();
+
+        GitWorkingTreeModel model;
+        model.setRepository(&repo);
+        waitForLoading(model);
+
+        CHECK(model.count() == model.rowCount());
+        CHECK(model.count() == 2);
+    }
+
+    SECTION("count property emits countChanged on refresh")
+    {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        GitWorkingTreeModel model;
+        model.setRepository(&repo);
+        waitForLoading(model);
+
+        CHECK(model.count() == 0);
+
+        QSignalSpy countSpy(&model, &GitWorkingTreeModel::countChanged);
+
+        writeFile(repo.directory(), "file1.txt", "modified");
+        repo.checkStatus();
+        waitForLoading(model);
+
+        CHECK(countSpy.count() >= 1);
+        CHECK(model.count() == 1);
+    }
+
+    SECTION("count property is zero after setting null repository")
+    {
+        createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        writeFile(repo.directory(), "file1.txt", "modified");
+        repo.checkStatus();
+
+        GitWorkingTreeModel model;
+        model.setRepository(&repo);
+        waitForLoading(model);
+
+        REQUIRE(model.count() == 1);
+
+        QSignalSpy countSpy(&model, &GitWorkingTreeModel::countChanged);
+        model.setRepository(nullptr);
+
+        CHECK(model.count() == 0);
+        CHECK(countSpy.count() >= 1);
+    }
+
     SECTION("Uses incremental insert/remove, not modelReset")
     {
         createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");

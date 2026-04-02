@@ -476,6 +476,50 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(model.rowCount() == 2); // 2 real commits now, no synthetic row
     }
 
+    SECTION("Synthetic row appears for new file in subdirectory") {
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        // Add a new file in a subdirectory (like CaveWhere adding a trip)
+        QDir dir = repo.directory();
+        REQUIRE(dir.mkpath("caves/MyCave"));
+        QFile newFile(dir.filePath("caves/MyCave/trip.pb"));
+        REQUIRE(newFile.open(QFile::WriteOnly));
+        newFile.write("new trip data");
+        newFile.close();
+
+        repo.checkStatus();
+        INFO("modifiedFileCount after checkStatus: " << repo.modifiedFileCount());
+        REQUIRE(repo.modifiedFileCount() > 0);
+
+        GitGraphModel model;
+        model.setRepository(&repo);
+
+        QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+        if (model.loading())
+            REQUIRE(loadingSpy.wait(5000));
+
+        CHECK(model.hasUncommittedChanges());
+        CHECK(model.rowCount() == 2); // synthetic + 1 real commit
+    }
+
+    SECTION("checkStatusAsync detects new file in subdirectory") {
+        TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+        QDir dir = repo.directory();
+        REQUIRE(dir.mkpath("caves/MyCave"));
+        QFile newFile(dir.filePath("caves/MyCave/trip.pb"));
+        REQUIRE(newFile.open(QFile::WriteOnly));
+        newFile.write("new trip data");
+        newFile.close();
+
+        auto future = repo.checkStatusAsync();
+        QSignalSpy modifiedSpy(&repo, &GitRepository::modifiedFileCountChanged);
+        if (repo.modifiedFileCount() == 0)
+            REQUIRE(modifiedSpy.wait(5000));
+
+        CHECK(repo.modifiedFileCount() > 0);
+    }
+
     SECTION("Synthetic row mirrors HEAD commit lane data") {
         TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
 

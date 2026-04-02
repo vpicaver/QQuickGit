@@ -2612,29 +2612,33 @@ QFuture<bool> GitRepository::checkStatusAsync()
         return QtConcurrent::run([]() { return false; });
     }
     const QString dirPath = d->mDirectory.absolutePath();
-    auto future = QtConcurrent::run([dirPath]() -> bool {
+    auto countFuture = QtConcurrent::run([dirPath]() -> int {
         git_repository* repo = nullptr;
         if (git_repository_open(&repo, dirPath.toLocal8Bit().constData()) != GIT_OK) {
-            return false;
+            return 0;
         }
         auto repoGuard = qScopeGuard([&repo]() { git_repository_free(repo); });
+
+        ensureStandardLfsFilterConfig(repo);
 
         git_status_options opt = GIT_STATUS_OPTIONS_INIT;
         opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
         opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
         git_status_list* list = nullptr;
         if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
-            return false;
+            return 0;
         }
         auto listGuard = qScopeGuard([&list]() { git_status_list_free(list); });
-        return git_status_list_entrycount(list) > 0;
+        return filteredStatusEntryCount(repo, dirPath, list);
     });
 
-    AsyncFuture::observe(future).context(this, [this, future]() {
-        setModifiedFileCount(future.result() ? 1 : 0);
-    });
+    auto boolFuture = AsyncFuture::observe(countFuture).context(this, [this, countFuture]() {
+        int count = countFuture.result();
+        setModifiedFileCount(count);
+        return count > 0;
+    }).future();
 
-    return future;
+    return boolFuture;
 }
 
 void GitRepository::resetHard(const QString& refSpec)

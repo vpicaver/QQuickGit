@@ -211,7 +211,7 @@ FilePatchResult loadWorkingTreePatch(const QString& repoPath, const QString& fil
     QByteArray pathBytes = filePath.toUtf8();
     const char* pathspec = pathBytes.constData();
     setPathspec(diffOptions, &pathspec);
-    diffOptions.flags |= GIT_DIFF_INCLUDE_UNTRACKED | GIT_DIFF_SHOW_UNTRACKED_CONTENT;
+    diffOptions.flags |= GIT_DIFF_INCLUDE_UNTRACKED | GIT_DIFF_RECURSE_UNTRACKED_DIRS | GIT_DIFF_SHOW_UNTRACKED_CONTENT;
 
     if (git_diff_tree_to_workdir_with_index(&diff, rawRepo, headTree, &diffOptions) != GIT_OK || !diff) {
         result.errorMessage = QStringLiteral("Failed to generate working tree diff");

@@ -305,6 +305,7 @@ GitWorkingTreeModel::GitWorkingTreeModel(QObject* parent)
                 return;
 
             auto result = future.result();
+            const int oldCount = mRows.size();
 
             if (!mRows.isEmpty())
             {
@@ -329,6 +330,9 @@ GitWorkingTreeModel::GitWorkingTreeModel(QObject* parent)
                 }
                 endInsertRows();
             }
+
+            if (mRows.size() != oldCount)
+                emit countChanged();
 
             if (mLoading)
             {
@@ -373,6 +377,7 @@ void GitWorkingTreeModel::setRepository(GitRepository* repository)
             beginRemoveRows(QModelIndex(), 0, mRows.size() - 1);
             mRows.clear();
             endRemoveRows();
+            emit countChanged();
         }
         return;
     }
