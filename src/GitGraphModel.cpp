@@ -15,6 +15,44 @@ using namespace QQuickGit;
 
 namespace {
 
+// Build simplified lanes for the synthetic "Uncommitted Changes" row.
+// Instead of copying HEAD's lane types verbatim (which includes merge curves
+// and other topology-specific types), reduce each lane to Active, NotActive,
+// or Empty so only straight pass-through lines are drawn.
+QList<int> buildSyntheticLanes(const GitRowGraph& headGraph)
+{
+    using LaneType = GitLaneType::Type;
+    QList<int> lanes;
+    lanes.reserve(headGraph.lanes.size());
+    for (int i = 0; i < headGraph.lanes.size(); ++i)
+    {
+        if (i == headGraph.activeLane)
+        {
+            lanes.append(static_cast<int>(LaneType::Active));
+            continue;
+        }
+
+        // Types without a top line start at the HEAD commit and don't
+        // extend upward into the synthetic row.
+        LaneType type = headGraph.lanes[i].type();
+        switch (type)
+        {
+        case LaneType::Empty:
+        case LaneType::CrossEmpty:
+        case LaneType::Head:
+        case LaneType::HeadLeft:
+        case LaneType::HeadRight:
+        case LaneType::Branch:
+            lanes.append(static_cast<int>(LaneType::Empty));
+            break;
+        default:
+            lanes.append(static_cast<int>(LaneType::NotActive));
+            break;
+        }
+    }
+    return lanes;
+}
+
 QByteArray oidToBytes(const git_oid* oid)
 {
     return QByteArray(reinterpret_cast<const char*>(oid->id), GIT_OID_SHA1_SIZE);
@@ -253,9 +291,8 @@ QVariant GitGraphModel::data(const QModelIndex& index, int role) const
         case TimestampRole:
             return QDateTime::currentDateTime();
         case LanesRole:
-            // Mirror HEAD commit's lanes if available
             if (!mGraph.isEmpty())
-                return QVariant::fromValue(lanesToIntList(mGraph.at(0).lanes));
+                return QVariant::fromValue(buildSyntheticLanes(mGraph.at(0)));
             return QVariant::fromValue(QList<int>());
         case ActiveLaneRole:
             return mGraph.isEmpty() ? 0 : mGraph.at(0).activeLane;
