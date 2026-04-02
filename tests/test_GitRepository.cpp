@@ -1720,3 +1720,37 @@ TEST_CASE("GitRepository::hasMissingLfsFiles", "[GitRepository][lfs]") {
         CHECK(future.result() == false);
     }
 }
+
+TEST_CASE("GitRepository directoryPath property", "[GitRepository]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    GitRepository repo;
+
+    SECTION("directoryPath returns the directory path as a string")
+    {
+        repo.setDirectory(QDir(tempDir.path()));
+        CHECK(repo.directoryPath().toStdString() == QDir(tempDir.path()).path().toStdString());
+    }
+
+    SECTION("directoryPath updates when directory changes")
+    {
+        QSignalSpy spy(&repo, &GitRepository::directoryChanged);
+
+        repo.setDirectory(QDir(tempDir.path()));
+        REQUIRE(spy.count() == 1);
+        CHECK(repo.directoryPath().toStdString() == QDir(tempDir.path()).path().toStdString());
+
+        QTemporaryDir tempDir2;
+        REQUIRE(tempDir2.isValid());
+        repo.setDirectory(QDir(tempDir2.path()));
+        REQUIRE(spy.count() == 2);
+        CHECK(repo.directoryPath().toStdString() == QDir(tempDir2.path()).path().toStdString());
+    }
+
+    SECTION("directoryPath is empty for default-constructed repository")
+    {
+        CHECK(repo.directoryPath().toStdString() == QDir().path().toStdString());
+    }
+}

@@ -1987,6 +1987,11 @@ QDir GitRepository::directory()
     return d->mDirectory;
 }
 
+QString GitRepository::directoryPath() const
+{
+    return d->mDirectory.path();
+}
+
 void GitRepository::initRepository()
 {
     if (d->mLfsStore) {

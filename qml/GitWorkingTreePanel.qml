@@ -71,6 +71,7 @@ Item {
                 required property bool lineStatsFetched
 
                 readonly property color _statusColor: root._statusColor(statusText)
+                readonly property string _absPath: root.repository.directoryPath + "/" + filePath
 
                 width: fileListView.width
                 implicitHeight: 28
@@ -78,6 +79,29 @@ Item {
                 Component.onCompleted: workingTreeModel.fetchLineStats(index)
 
                 onClicked: root.fileClicked(filePath, isBinary, isImage, statusText)
+
+                TapHandler {
+                    acceptedButtons: Qt.RightButton
+                    onTapped: fileContextMenu.popup()
+                }
+
+                Menu {
+                    id: fileContextMenu
+                    MenuItem {
+                        text: qsTr("Copy File Path")
+                        onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
+                    }
+                    MenuItem {
+                        text: {
+                            if (Qt.platform.os === "osx")
+                                return qsTr("Show in Finder")
+                            else if (Qt.platform.os === "windows")
+                                return qsTr("Show in Explorer")
+                            return qsTr("Show in File Manager")
+                        }
+                        onTriggered: GitUtilities.revealInFileManager(fileDelegate._absPath)
+                    }
+                }
 
                 contentItem: RowLayout {
                     spacing: 6

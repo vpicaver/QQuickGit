@@ -35,6 +35,7 @@ class QQUICKGIT_EXPORT GitRepository : public QObject
     QML_ELEMENT
 
     Q_PROPERTY(QDir directory READ directory WRITE setDirectory NOTIFY directoryChanged)
+    Q_PROPERTY(QString directoryPath READ directoryPath NOTIFY directoryChanged)
     Q_PROPERTY(int modifiedFileCount READ modifiedFileCount NOTIFY modifiedFileCountChanged)
     Q_PROPERTY(Account* account READ account WRITE setAccount NOTIFY accountChanged)
     Q_PROPERTY(QString headBranchName READ headBranchName NOTIFY headBranchNameChanged)
@@ -111,6 +112,7 @@ public:
 
     void setDirectory(const QDir& dir);
     QDir directory();
+    QString directoryPath() const;
 
     Account* account() const;
     void setAccount(Account* account);

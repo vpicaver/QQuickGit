@@ -2,7 +2,10 @@
 #include "git2.h"
 
 #include <QClipboard>
+#include <QDesktopServices>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QProcess>
 
 using namespace QQuickGit;
 
@@ -73,4 +76,27 @@ void GitUtilities::copyToClipboard(const QString& text)
     {
         clipboard->setText(text);
     }
+}
+
+void GitUtilities::revealInFileManager(const QString& path)
+{
+    QFileInfo info(path);
+#if defined(Q_OS_WIN)
+    QStringList args;
+    if (!info.isDir())
+        args << "/select,";
+    args << QDir::toNativeSeparators(path);
+    if (QProcess::startDetached("explorer", args))
+        return;
+#elif defined(Q_OS_MAC) && QT_CONFIG(process)
+    QStringList args;
+    args << "-e" << "tell application \"Finder\""
+         << "-e" << "activate"
+         << "-e" << "select POSIX file \"" + path + "\""
+         << "-e" << "end tell"
+         << "-e" << "return";
+    if (!QProcess::execute("/usr/bin/osascript", args))
+        return;
+#endif
+    QDesktopServices::openUrl(QUrl::fromLocalFile(info.isDir() ? path : info.path()));
 }

@@ -236,6 +236,19 @@ Item {
 
                 onClicked: root.fileClicked(filePath, isBinary, isImage, statusText)
 
+                TapHandler {
+                    acceptedButtons: Qt.RightButton
+                    onTapped: fileContextMenu.popup()
+                }
+
+                Menu {
+                    id: fileContextMenu
+                    MenuItem {
+                        text: qsTr("Copy File Path")
+                        onTriggered: GitUtilities.copyToClipboard(root.repository.directoryPath + "/" + fileDelegate.filePath)
+                    }
+                }
+
                 Component.onCompleted: {
                     fileModelLoader.fetchLineStats(index)
                 }

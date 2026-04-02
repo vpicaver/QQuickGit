@@ -5,8 +5,11 @@
 #include "GitUtilities.h"
 
 //Qt includes
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QList>
 #include <QString>
+#include <QTemporaryDir>
 #include <QUrl>
 
 using namespace QQuickGit;
@@ -58,4 +61,39 @@ TEST_CASE("GitUtilities rejects unsupported LFS endpoint remote urls", "[GitUtil
 {
     CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QString()).isEmpty());
     CHECK(GitUtilities::lfsEndpointFromRemoteUrl(QStringLiteral("file:///tmp/repo.git")).isEmpty());
+}
+
+TEST_CASE("GitUtilities copyToClipboard sets clipboard text", "[GitUtilities]")
+{
+    auto* clipboard = QGuiApplication::clipboard();
+    REQUIRE(clipboard != nullptr);
+
+    clipboard->clear();
+    GitUtilities::copyToClipboard(QStringLiteral("/some/absolute/path.txt"));
+    CHECK(clipboard->text().toStdString() == "/some/absolute/path.txt");
+
+    GitUtilities::copyToClipboard(QStringLiteral(""));
+    CHECK(clipboard->text().toStdString() == "");
+}
+
+TEST_CASE("GitUtilities revealInFileManager does not crash on valid path", "[GitUtilities]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    // Should not crash when given a valid directory
+    GitUtilities::revealInFileManager(tempDir.path());
+
+    // Should not crash when given a valid file
+    QFile file(QDir(tempDir.path()).filePath("test.txt"));
+    REQUIRE(file.open(QFile::WriteOnly));
+    file.write("test");
+    file.close();
+    GitUtilities::revealInFileManager(file.fileName());
+}
+
+TEST_CASE("GitUtilities revealInFileManager does not crash on nonexistent path", "[GitUtilities]")
+{
+    // Should not crash when given a nonexistent path
+    GitUtilities::revealInFileManager(QStringLiteral("/nonexistent/path/to/file.txt"));
 }
