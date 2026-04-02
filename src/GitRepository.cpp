@@ -2031,6 +2031,18 @@ void GitRepository::initRepository()
         opts.flags = GIT_REPOSITORY_INIT_MKPATH;
         opts.initial_head = "main";
         check(git_repository_init_ext(&(d->repo), path, &opts));
+
+        // Set init.defaultBranch so that git_repository_is_empty() recognises
+        // refs/heads/main as the initial (unborn) branch.  Without this,
+        // libgit2 compares HEAD against the global/system default ("master")
+        // and incorrectly reports the repo as non-empty.
+        if (d->repo) {
+            git_config* cfg = nullptr;
+            if (git_repository_config(&cfg, d->repo) == GIT_OK && cfg) {
+                git_config_set_string(cfg, "init.defaultBranch", "main");
+                git_config_free(cfg);
+            }
+        }
     }
 
     if (d->repo) {

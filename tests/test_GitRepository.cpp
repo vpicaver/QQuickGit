@@ -36,6 +36,18 @@ const int defaultTimeout = 10000;
 
 using namespace QQuickGit;
 
+// Create a bare repository with "main" as the initial HEAD branch,
+// matching what GitRepository::initRepository() uses.
+void initBareRepo(git_repository** out, const QString& path) {
+    git_repository_init_options opts = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+    opts.flags = GIT_REPOSITORY_INIT_BARE | GIT_REPOSITORY_INIT_MKPATH;
+    opts.initial_head = "main";
+    REQUIRE(git_repository_init_ext(out, path.toLocal8Bit().constData(), &opts) == GIT_OK);
+    REQUIRE(*out != nullptr);
+    git_repository_free(*out);
+    *out = nullptr;
+}
+
 auto waitForClone(QFuture<ResultBase> future, int timeout = defaultTimeout) {
     REQUIRE(AsyncFuture::waitForFinished(future, timeout));
     INFO("Clone error:" << future.result().errorMessage().toStdString() << "code:" << future.result().errorCode());
@@ -1047,9 +1059,7 @@ TEST_CASE("GitRepository push should classify remote-advance rejection", "[GitRe
     const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
 
     git_repository* remoteRepo = nullptr;
-    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
-    REQUIRE(remoteRepo != nullptr);
-    git_repository_free(remoteRepo);
+    initBareRepo(&remoteRepo, remotePath);
 
     REQUIRE(QDir().mkpath(authorPath));
 
@@ -1105,9 +1115,7 @@ TEST_CASE("GitRepository remoteAheadBehindCommitCounts should read advertised re
     const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
 
     git_repository* remoteRepo = nullptr;
-    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
-    REQUIRE(remoteRepo != nullptr);
-    git_repository_free(remoteRepo);
+    initBareRepo(&remoteRepo, remotePath);
 
     REQUIRE(QDir().mkpath(authorPath));
 
@@ -1238,9 +1246,7 @@ TEST_CASE("GitRepository pullRebaseOrMerge should prefer rebase and fallback to 
     const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
 
     git_repository* remoteRepo = nullptr;
-    REQUIRE(git_repository_init(&remoteRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
-    REQUIRE(remoteRepo != nullptr);
-    git_repository_free(remoteRepo);
+    initBareRepo(&remoteRepo, remotePath);
 
     REQUIRE(QDir().mkpath(authorPath));
 
@@ -1464,8 +1470,7 @@ TEST_CASE("GitRepository addRemote raw-string overload should work correctly", "
         const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote.git"));
 
         git_repository* bareRepo = nullptr;
-        REQUIRE(git_repository_init(&bareRepo, remotePath.toLocal8Bit().constData(), 1) == GIT_OK);
-        git_repository_free(bareRepo);
+        initBareRepo(&bareRepo, remotePath);
 
         QSignalSpy remotesChangedSpy(&repo, &GitRepository::remotesChanged);
         const QString error = repo.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString());
