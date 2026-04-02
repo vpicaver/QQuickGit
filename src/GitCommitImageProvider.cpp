@@ -9,9 +9,12 @@
 
 using namespace QQuickGit;
 
+GitCommitImageProvider* GitCommitImageProvider::sInstance = nullptr;
+
 GitCommitImageProvider::GitCommitImageProvider()
     : QQuickImageProvider(QQuickImageProvider::Image)
 {
+    sInstance = this;
 }
 
 /**
@@ -69,6 +72,8 @@ QImage GitCommitImageProvider::requestImage(const QString& id, QSize* size, cons
         LfsStore store(gitDir);
         auto lfsResult = store.readObject(pointer.oid);
         if (lfsResult.hasError()) {
+            qWarning("GitCommitImageProvider: LFS object not found for %s (oid=%s)",
+                     qPrintable(filePath), qPrintable(pointer.oid));
             return {};
         }
         content = lfsResult.value();
@@ -108,4 +113,9 @@ GitCommitImageProvider* GitCommitImageProvider::registerOn(QQmlEngine* engine)
     auto* provider = new GitCommitImageProvider;
     engine->addImageProvider(QStringLiteral("gitcommit"), provider);
     return provider;
+}
+
+GitCommitImageProvider* GitCommitImageProvider::instance()
+{
+    return sInstance;
 }

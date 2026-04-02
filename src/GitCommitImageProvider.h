@@ -22,8 +22,10 @@ public:
     void unregisterRepository(int id);
 
     static GitCommitImageProvider* registerOn(QQmlEngine* engine);
+    static GitCommitImageProvider* instance();
 
 private:
+    static GitCommitImageProvider* sInstance;
     QReadWriteLock mLock;
     QHash<int, QString> mRepos;
     int mNextId = 1;

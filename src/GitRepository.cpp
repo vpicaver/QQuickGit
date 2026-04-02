@@ -5,6 +5,7 @@
 
 //Our includes
 #include "GitRepository.h"
+#include "GitCommitImageProvider.h"
 #include "GitOidUtils.h"
 #include "RSAKeyGenerator.h"
 #include "Account.h"
@@ -1714,14 +1715,25 @@ public:
     QDir mDirectory;
     git_repository *repo = nullptr;
     int mModifiedFilesCount = 0;
+    int mImageProviderId = -1;
     QPointer<Account> mAccount; //!<
     LfsPolicy mLfsPolicy;
     std::shared_ptr<LfsStore> mLfsStore;
     GitCredentials m_credentials;
 
     ~GitRepositoryData() {
+        unregisterImageProvider();
         if(repo) {
             git_repository_free(repo);
+        }
+    }
+
+    void unregisterImageProvider() {
+        if (mImageProviderId >= 0) {
+            if (auto* provider = GitCommitImageProvider::instance()) {
+                provider->unregisterRepository(mImageProviderId);
+            }
+            mImageProviderId = -1;
         }
     }
 
@@ -1977,8 +1989,17 @@ GitRepository::~GitRepository()
 void GitRepository::setDirectory(const QDir &dir)
 {
     if(d->mDirectory != dir) {
+        d->unregisterImageProvider();
         d->mDirectory = dir;
+
+        if (auto* provider = GitCommitImageProvider::instance()) {
+            if (!dir.path().isEmpty() && dir.path() != ".") {
+                d->mImageProviderId = provider->registerRepository(dir.path());
+            }
+        }
+
         emit directoryChanged();
+        emit imageProviderIdChanged();
     }
 }
 
@@ -2573,6 +2594,10 @@ QFuture<bool> GitRepository::hasMissingLfsFiles(const QDir& repositoryDir, QObje
 */
 int GitRepository::modifiedFileCount() const {
     return d->mModifiedFilesCount;
+}
+
+int GitRepository::imageProviderId() const {
+    return d->mImageProviderId;
 }
 
 bool GitRepository::hasCommits() const

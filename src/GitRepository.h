@@ -40,6 +40,7 @@ class QQUICKGIT_EXPORT GitRepository : public QObject
     Q_PROPERTY(Account* account READ account WRITE setAccount NOTIFY accountChanged)
     Q_PROPERTY(QString headBranchName READ headBranchName NOTIFY headBranchNameChanged)
     Q_PROPERTY(QVector<GitRemoteInfo> remotes READ remotes NOTIFY remotesChanged)
+    Q_PROPERTY(int imageProviderId READ imageProviderId NOTIFY imageProviderIdChanged)
 
 public:
     struct AheadBehindCounts {
@@ -137,6 +138,7 @@ public:
     static QString repositoryNameFromUrl(const QUrl& url);
 
     int modifiedFileCount() const;
+    int imageProviderId() const;
     bool hasCommits() const;
 
     Q_INVOKABLE void checkStatus();
@@ -208,6 +210,7 @@ signals:
     void headBranchNameChanged();
     void remotesChanged();
     void refsChanged();
+    void imageProviderIdChanged();
 
 
 private:

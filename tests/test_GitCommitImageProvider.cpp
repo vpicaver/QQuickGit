@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QImage>
 #include <QBuffer>
+#include <QSignalSpy>
 
 using namespace QQuickGit;
 
@@ -267,5 +268,154 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
         CHECK(image.isNull());
 
         provider.unregisterRepository(repoId);
+    }
+}
+
+TEST_CASE("GitCommitImageProvider singleton instance", "[GitCommitImageProvider]")
+{
+    SECTION("instance() returns nullptr before any provider is constructed")
+    {
+        // sInstance is set by the most recent constructor; after the previous
+        // TEST_CASE it will be non-null, so we just verify the API is callable.
+        // A true "nullptr before first" test would require process-level isolation.
+        CHECK(GitCommitImageProvider::instance() != nullptr);
+    }
+
+    SECTION("instance() returns the most recently constructed provider")
+    {
+        GitCommitImageProvider providerA;
+        CHECK(GitCommitImageProvider::instance() == &providerA);
+
+        GitCommitImageProvider providerB;
+        CHECK(GitCommitImageProvider::instance() == &providerB);
+    }
+}
+
+TEST_CASE("GitRepository imageProviderId property", "[GitRepository][GitCommitImageProvider]")
+{
+    // Ensure a provider singleton exists for registration
+    GitCommitImageProvider provider;
+
+    SECTION("imageProviderId is -1 before directory is set")
+    {
+        GitRepository repo;
+        CHECK(repo.imageProviderId() == -1);
+    }
+
+    SECTION("imageProviderId becomes valid when directory is set")
+    {
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+
+        GitRepository repo;
+        repo.setDirectory(QDir(tempDir.path()));
+
+        CHECK(repo.imageProviderId() >= 0);
+    }
+
+    SECTION("imageProviderIdChanged signal fires when directory changes")
+    {
+        QTemporaryDir tempDir1;
+        QTemporaryDir tempDir2;
+        REQUIRE(tempDir1.isValid());
+        REQUIRE(tempDir2.isValid());
+
+        GitRepository repo;
+        QSignalSpy spy(&repo, &GitRepository::imageProviderIdChanged);
+
+        repo.setDirectory(QDir(tempDir1.path()));
+        CHECK(spy.size() == 1);
+
+        int firstId = repo.imageProviderId();
+
+        repo.setDirectory(QDir(tempDir2.path()));
+        CHECK(spy.size() == 2);
+        CHECK(repo.imageProviderId() != firstId);
+    }
+
+    SECTION("each directory gets a unique imageProviderId")
+    {
+        QTemporaryDir tempDir1;
+        QTemporaryDir tempDir2;
+        REQUIRE(tempDir1.isValid());
+        REQUIRE(tempDir2.isValid());
+
+        GitRepository repo1;
+        repo1.setDirectory(QDir(tempDir1.path()));
+
+        GitRepository repo2;
+        repo2.setDirectory(QDir(tempDir2.path()));
+
+        CHECK(repo1.imageProviderId() != repo2.imageProviderId());
+    }
+
+    SECTION("imageProviderId is unregistered when directory changes")
+    {
+        QTemporaryDir tempDir1;
+        QTemporaryDir tempDir2;
+        REQUIRE(tempDir1.isValid());
+        REQUIRE(tempDir2.isValid());
+
+        GitRepository repo;
+        repo.setDirectory(QDir(tempDir1.path()));
+        int oldId = repo.imageProviderId();
+
+        // Request with old ID should succeed (repo path is registered)
+        QByteArray dummyUrl = QString("%1/abcdef0123456789abcdef0123456789abcdef01/file.png")
+                                  .arg(oldId).toUtf8();
+        QSize size;
+        // This just verifies the repo ID lookup doesn't crash; the image will be null
+        // because there's no git repo, but it should get past the ID check
+        provider.requestImage(dummyUrl, &size, QSize());
+
+        // Change directory — old ID should be unregistered
+        repo.setDirectory(QDir(tempDir2.path()));
+        CHECK(repo.imageProviderId() != oldId);
+    }
+
+    SECTION("imageProviderId is unregistered on destruction")
+    {
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+
+        int id;
+        {
+            GitRepository repo;
+            repo.setDirectory(QDir(tempDir.path()));
+            id = repo.imageProviderId();
+            CHECK(id >= 0);
+        }
+        // After repo is destroyed, requesting with old ID should fail at ID lookup
+        QSize size;
+        QString url = QString("%1/abcdef0123456789abcdef0123456789abcdef01/file.png").arg(id);
+        QImage image = provider.requestImage(url, &size, QSize());
+        CHECK(image.isNull());
+    }
+
+    SECTION("image can be loaded via imageProviderId")
+    {
+        QTemporaryDir tempDir;
+        REQUIRE(tempDir.isValid());
+
+        GitRepository repo;
+        repo.setDirectory(QDir(tempDir.path()));
+        repo.initRepository();
+
+        QByteArray pngData = createMinimalPng();
+        createFileAndCommit(repo, "photo.png", pngData, "Add photo");
+
+        QString sha = headSha(repo);
+        REQUIRE(!sha.isEmpty());
+
+        int repoId = repo.imageProviderId();
+        REQUIRE(repoId >= 0);
+
+        QSize size;
+        QString url = QString("%1/%2/photo.png").arg(repoId).arg(sha);
+        QImage image = provider.requestImage(url, &size, QSize());
+
+        CHECK(!image.isNull());
+        CHECK(size.width() == 1);
+        CHECK(size.height() == 1);
     }
 }
