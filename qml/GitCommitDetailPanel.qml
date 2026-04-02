@@ -231,6 +231,8 @@ Item {
                 required property int deletedLines
                 required property bool lineStatsFetched
 
+                readonly property string _absPath: root.repository.directoryPath + "/" + filePath
+
                 width: fileListView.width
                 implicitHeight: 28
 
@@ -245,7 +247,7 @@ Item {
                     id: fileContextMenu
                     MenuItem {
                         text: qsTr("Copy File Path")
-                        onTriggered: GitUtilities.copyToClipboard(root.repository.directoryPath + "/" + fileDelegate.filePath)
+                        onTriggered: GitUtilities.copyToClipboard(fileDelegate._absPath)
                     }
                 }
 

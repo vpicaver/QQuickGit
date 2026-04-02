@@ -92,10 +92,10 @@ void GitUtilities::revealInFileManager(const QString& path)
     QStringList args;
     args << "-e" << "tell application \"Finder\""
          << "-e" << "activate"
-         << "-e" << "select POSIX file \"" + path + "\""
+         << "-e" << "select POSIX file \"" + QString(path).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
          << "-e" << "end tell"
          << "-e" << "return";
-    if (!QProcess::execute("/usr/bin/osascript", args))
+    if (QProcess::startDetached("/usr/bin/osascript", args))
         return;
 #endif
     QDesktopServices::openUrl(QUrl::fromLocalFile(info.isDir() ? path : info.path()));
