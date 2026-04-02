@@ -88,8 +88,7 @@ private:
     float mLaneWidth = 12.0f;
     float mNodeRadius = 4.0f;
     float mLineWidth = 2.0f;
-    bool mIsFirstRow = false;
-    bool mIsLastRow = false;
+    GitGraphLaneItem::RowPosition mRowPosition = GitGraphLaneItem::Middle;
 };
 
 void GitGraphLaneRenderer::synchronize(QCanvasPainterItem* item)
@@ -101,8 +100,7 @@ void GitGraphLaneRenderer::synchronize(QCanvasPainterItem* item)
     mLaneWidth = static_cast<float>(laneItem->laneWidth());
     mNodeRadius = static_cast<float>(laneItem->nodeRadius());
     mLineWidth = static_cast<float>(laneItem->lineWidth());
-    mIsFirstRow = laneItem->isFirstRow();
-    mIsLastRow = laneItem->isLastRow();
+    mRowPosition = laneItem->rowPosition();
 }
 
 void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
@@ -122,6 +120,10 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
 
     const float activeCX = mActiveLane * lw + lw / 2.0f;
     const int colorCount = mColors.size();
+
+    using RP = GitGraphLaneItem::RowPosition;
+    const bool suppressTop = (mRowPosition == RP::First || mRowPosition == RP::Only);
+    const bool suppressBottom = (mRowPosition == RP::Last || mRowPosition == RP::Only);
 
     for (int i = 0; i < laneCount; ++i)
     {
@@ -144,8 +146,8 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             painter->beginPath();
             if (isHeadType(type))
             {
-                // Head lanes come from below — skip entirely on the last row
-                if (!mIsLastRow)
+                // Head lanes curve downward from the commit — suppress on last/only row
+                if (!suppressBottom)
                 {
                     painter->moveTo(activeCX, midY);
                     painter->quadraticCurveTo(cx, midY, cx, h);
@@ -154,8 +156,8 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             }
             else // isTailType || isJoinType
             {
-                // Tail lanes come from above — skip entirely on the first row
-                if (!mIsFirstRow)
+                // Tail/Join lanes curve upward into the commit — suppress on first/only row
+                if (!suppressTop)
                 {
                     painter->moveTo(cx, 0);
                     painter->quadraticCurveTo(cx, midY, activeCX, midY);
@@ -164,7 +166,7 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             }
 
             // Join lanes also continue below the commit row — draw that segment.
-            if (isJoinType(type) && !mIsLastRow)
+            if (isJoinType(type) && !suppressBottom)
             {
                 painter->beginPath();
                 painter->moveTo(cx, midY);
@@ -174,7 +176,7 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
         }
         else
         {
-            if (hasTopLine(type) && !mIsFirstRow)
+            if (hasTopLine(type) && !suppressTop)
             {
                 painter->beginPath();
                 painter->moveTo(cx, 0);
@@ -182,7 +184,7 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
                 painter->stroke();
             }
 
-            if (hasBottomLine(type) && !mIsLastRow)
+            if (hasBottomLine(type) && !suppressBottom)
             {
                 painter->beginPath();
                 painter->moveTo(cx, midY);
@@ -274,21 +276,12 @@ void GitGraphLaneItem::setLineWidth(qreal width)
     update();
 }
 
-void GitGraphLaneItem::setIsFirstRow(bool isFirstRow)
+void GitGraphLaneItem::setRowPosition(RowPosition position)
 {
-    if (mIsFirstRow == isFirstRow)
+    if (mRowPosition == position)
         return;
-    mIsFirstRow = isFirstRow;
-    emit isFirstRowChanged();
-    update();
-}
-
-void GitGraphLaneItem::setIsLastRow(bool isLastRow)
-{
-    if (mIsLastRow == isLastRow)
-        return;
-    mIsLastRow = isLastRow;
-    emit isLastRowChanged();
+    mRowPosition = position;
+    emit rowPositionChanged();
     update();
 }
 

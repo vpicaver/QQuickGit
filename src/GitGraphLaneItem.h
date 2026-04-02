@@ -21,10 +21,18 @@ class QQUICKGIT_EXPORT GitGraphLaneItem : public QCanvasPainterItem
     Q_PROPERTY(qreal laneWidth READ laneWidth WRITE setLaneWidth NOTIFY laneWidthChanged)
     Q_PROPERTY(qreal nodeRadius READ nodeRadius WRITE setNodeRadius NOTIFY nodeRadiusChanged)
     Q_PROPERTY(qreal lineWidth READ lineWidth WRITE setLineWidth NOTIFY lineWidthChanged)
-    Q_PROPERTY(bool isFirstRow READ isFirstRow WRITE setIsFirstRow NOTIFY isFirstRowChanged)
-    Q_PROPERTY(bool isLastRow READ isLastRow WRITE setIsLastRow NOTIFY isLastRowChanged)
+    Q_PROPERTY(RowPosition rowPosition READ rowPosition WRITE setRowPosition NOTIFY rowPositionChanged)
 
 public:
+    enum RowPosition
+    {
+        Middle,
+        First,
+        Last,
+        Only
+    };
+    Q_ENUM(RowPosition)
+
     explicit GitGraphLaneItem(QQuickItem* parent = nullptr);
 
     QList<int> lanes() const;
@@ -45,11 +53,8 @@ public:
     qreal lineWidth() const;
     void setLineWidth(qreal width);
 
-    bool isFirstRow() const;
-    void setIsFirstRow(bool isFirstRow);
-
-    bool isLastRow() const;
-    void setIsLastRow(bool isLastRow);
+    RowPosition rowPosition() const;
+    void setRowPosition(RowPosition position);
 
 protected:
     QCanvasPainterItemRenderer* createItemRenderer() const override;
@@ -61,8 +66,7 @@ signals:
     void laneWidthChanged();
     void nodeRadiusChanged();
     void lineWidthChanged();
-    void isFirstRowChanged();
-    void isLastRowChanged();
+    void rowPositionChanged();
 
 private:
     QList<int> mLanes;
@@ -71,8 +75,7 @@ private:
     qreal mLaneWidth = 20.0;
     qreal mNodeRadius = 4.0;
     qreal mLineWidth = 2.0;
-    bool mIsFirstRow = false;
-    bool mIsLastRow = false;
+    RowPosition mRowPosition = Middle;
 };
 
 inline QList<int> GitGraphLaneItem::lanes() const {
@@ -99,12 +102,8 @@ inline qreal GitGraphLaneItem::lineWidth() const {
     return mLineWidth;
 }
 
-inline bool GitGraphLaneItem::isFirstRow() const {
-    return mIsFirstRow;
-}
-
-inline bool GitGraphLaneItem::isLastRow() const {
-    return mIsLastRow;
+inline GitGraphLaneItem::RowPosition GitGraphLaneItem::rowPosition() const {
+    return mRowPosition;
 }
 
 }

@@ -17,8 +17,7 @@ Item {
     property real laneWidth: 12
     property bool selected: false
     property color highlightColor: palette.highlight
-    property bool isFirstRow: false
-    property bool isLastRow: false
+    property int rowPosition: GitGraphLaneItem.Middle
     property color syntheticBackground: palette.mid
     property color syntheticBorderColor: palette.dark
     property url syntheticIconSource
@@ -57,8 +56,7 @@ Item {
             activeLane: row.activeLaneIndex
             colors: row.laneColors
             laneWidth: row.laneWidth
-            isFirstRow: row.isFirstRow
-            isLastRow: row.isLastRow
+            rowPosition: row.rowPosition
         }
 
         Loader {

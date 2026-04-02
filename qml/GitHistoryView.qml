@@ -85,8 +85,14 @@ Item {
             syntheticBackground: root.syntheticBackground
             syntheticBorderColor: root.syntheticBorderColor
             syntheticIconSource: root.syntheticIconSource
-            isFirstRow: index === 0
-            isLastRow: index === listView.count - 1
+            rowPosition: {
+                let first = (index === 0)
+                let last = (index === listView.count - 1)
+                if (first && last) return GitGraphLaneItem.Only
+                if (first) return GitGraphLaneItem.First
+                if (last) return GitGraphLaneItem.Last
+                return GitGraphLaneItem.Middle
+            }
 
             TapHandler {
                 onTapped: root._selectIndex(index)
