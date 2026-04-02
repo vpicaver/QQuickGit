@@ -100,6 +100,25 @@ void TestUtilities::createFileAndCommit(QQuickGit::GitRepository& repo, const QS
     repo.checkStatus();
 }
 
+void TestUtilities::createBinaryFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
+                                              const QByteArray& content, const QString& message)
+{
+    QDir dir = repo.directory();
+    QFile file(dir.filePath(filename));
+    REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+    file.write(content);
+    file.close();
+
+    repo.checkStatus();
+
+    QQuickGit::Account account;
+    account.setName("Test Author");
+    account.setEmail("test@example.com");
+    repo.setAccount(&account);
+    repo.commitAll(message, QString());
+    repo.checkStatus();
+}
+
 void TestUtilities::deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
                                         const QString& message)
 {

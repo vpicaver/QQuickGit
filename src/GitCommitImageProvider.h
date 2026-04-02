@@ -15,6 +15,7 @@ class QQUICKGIT_EXPORT GitCommitImageProvider : public QQuickImageProvider
 {
 public:
     GitCommitImageProvider();
+    ~GitCommitImageProvider() override;
 
     QImage requestImage(const QString& id, QSize* size, const QSize& requestedSize) override;
 

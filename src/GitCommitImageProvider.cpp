@@ -17,6 +17,13 @@ GitCommitImageProvider::GitCommitImageProvider()
     sInstance = this;
 }
 
+GitCommitImageProvider::~GitCommitImageProvider()
+{
+    if (sInstance == this) {
+        sInstance = nullptr;
+    }
+}
+
 /**
  * URL format: "<repo-id>/<40-char-sha>/<file-path>"
  *

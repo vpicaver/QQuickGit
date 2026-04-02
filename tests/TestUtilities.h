@@ -21,6 +21,8 @@ public:
 
     static void createFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
                                     const QString& content, const QString& message);
+    static void createBinaryFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
+                                          const QByteArray& content, const QString& message);
     static void deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
                                     const QString& message);
     static QString getHeadSha(const QDir& dir);

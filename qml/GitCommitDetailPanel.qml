@@ -6,6 +6,14 @@ import QQuickGit
 Item {
     id: root
 
+    component SelectableText: TextEdit {
+        color: root.palette.text
+        selectionColor: root.palette.highlight
+        selectedTextColor: root.palette.highlightedText
+        readOnly: true
+        selectByMouse: true
+    }
+
     required property GitRepository repository
     property string commitSha: ""
     property int parentIndex: 0
@@ -96,15 +104,10 @@ Item {
                 opacity: 0.6
             }
 
-            TextEdit {
+            SelectableText {
                 Layout.fillWidth: true
                 text: commitInfoLoader.author + " <" + commitInfoLoader.authorEmail + ">"
                 font.pixelSize: 12
-                color: root.palette.text
-                selectionColor: root.palette.highlight
-                selectedTextColor: root.palette.highlightedText
-                readOnly: true
-                selectByMouse: true
             }
 
             Label {
@@ -113,15 +116,10 @@ Item {
                 opacity: 0.6
             }
 
-            TextEdit {
+            SelectableText {
                 Layout.fillWidth: true
                 text: Qt.formatDateTime(commitInfoLoader.timestamp, "yyyy-MM-dd hh:mm:ss")
                 font.pixelSize: 12
-                color: root.palette.text
-                selectionColor: root.palette.highlight
-                selectedTextColor: root.palette.highlightedText
-                readOnly: true
-                selectByMouse: true
             }
 
             Label {
@@ -130,16 +128,11 @@ Item {
                 opacity: 0.6
             }
 
-            TextEdit {
+            SelectableText {
                 Layout.fillWidth: true
                 text: root.commitSha
                 font.pixelSize: 12
                 font.family: "monospace"
-                color: root.palette.text
-                selectionColor: root.palette.highlight
-                selectedTextColor: root.palette.highlightedText
-                readOnly: true
-                selectByMouse: true
             }
         }
 

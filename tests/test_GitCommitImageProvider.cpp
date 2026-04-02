@@ -5,7 +5,7 @@
 #include "GitCommitImageProvider.h"
 #include "GitRepository.h"
 #include "LfsStore.h"
-#include "Account.h"
+#include "TestUtilities.h"
 
 //Qt includes
 #include <QTemporaryDir>
@@ -22,7 +22,6 @@ namespace {
 // 1x1 red PNG (68 bytes)
 QByteArray createMinimalPng()
 {
-    // Generate a 1x1 red image and save to PNG
     QImage img(1, 1, QImage::Format_ARGB32);
     img.setPixelColor(0, 0, QColor(Qt::red));
     QByteArray data;
@@ -30,31 +29,6 @@ QByteArray createMinimalPng()
     buf.open(QIODevice::WriteOnly);
     img.save(&buf, "PNG");
     return data;
-}
-
-void createFileAndCommit(GitRepository& repo, const QString& filename,
-                         const QByteArray& content, const QString& message)
-{
-    QDir dir = repo.directory();
-    QFile file(dir.filePath(filename));
-    REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
-    file.write(content);
-    file.close();
-
-    repo.checkStatus();
-
-    Account account;
-    account.setName("Test");
-    account.setEmail("test@test.com");
-    repo.setAccount(&account);
-    repo.commitAll(message, QString());
-    repo.checkStatus();
-}
-
-QString headSha(GitRepository& repo)
-{
-    auto result = GitRepository::headCommitOid(repo.directory().absolutePath());
-    return result.hasError() ? QString() : result.value();
 }
 
 } // anonymous namespace
@@ -90,9 +64,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
         repo.initRepository();
 
         QByteArray pngData = createMinimalPng();
-        createFileAndCommit(repo, "image.png", pngData, "Add image");
+        TestUtilities::createBinaryFileAndCommit(repo,"image.png", pngData, "Add image");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         REQUIRE(!sha.isEmpty());
 
         int repoId = provider.registerRepository(tempDir.path());
@@ -117,9 +91,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
         repo.setDirectory(QDir(tempDir.path()));
         repo.initRepository();
 
-        createFileAndCommit(repo, "file.txt", "hello", "Init");
+        TestUtilities::createFileAndCommit(repo, "file.txt", "hello", "Init");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         int repoId = provider.registerRepository(tempDir.path());
 
         QSize size;
@@ -166,9 +140,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
         repo.setDirectory(QDir(tempDir.path()));
         repo.initRepository();
 
-        createFileAndCommit(repo, "readme.txt", "just text", "Add text");
+        TestUtilities::createFileAndCommit(repo, "readme.txt", "just text", "Add text");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         int repoId = provider.registerRepository(tempDir.path());
 
         QSize size;
@@ -191,9 +165,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
 
         QDir(tempDir.path()).mkpath("sub/dir");
         QByteArray pngData = createMinimalPng();
-        createFileAndCommit(repo, "sub/dir/deep.png", pngData, "Add deep image");
+        TestUtilities::createBinaryFileAndCommit(repo,"sub/dir/deep.png", pngData, "Add deep image");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         int repoId = provider.registerRepository(tempDir.path());
 
         QSize size;
@@ -225,9 +199,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
         LfsPointer pointer = storeResult.value();
 
         // Commit the LFS pointer text instead of the real content
-        createFileAndCommit(repo, "image.png", pointer.toPointerText(), "Add LFS image");
+        TestUtilities::createBinaryFileAndCommit(repo,"image.png", pointer.toPointerText(), "Add LFS image");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         int repoId = provider.registerRepository(tempDir.path());
 
         QSize size;
@@ -256,9 +230,9 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
             "oid sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n"
             "size 12345\n";
 
-        createFileAndCommit(repo, "image.png", fakePointer, "Add missing LFS");
+        TestUtilities::createBinaryFileAndCommit(repo,"image.png", fakePointer, "Add missing LFS");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         int repoId = provider.registerRepository(tempDir.path());
 
         QSize size;
@@ -273,12 +247,11 @@ TEST_CASE("GitCommitImageProvider basic functionality", "[GitCommitImageProvider
 
 TEST_CASE("GitCommitImageProvider singleton instance", "[GitCommitImageProvider]")
 {
-    SECTION("instance() returns nullptr before any provider is constructed")
+    SECTION("instance() returns nullptr after provider is destroyed")
     {
-        // sInstance is set by the most recent constructor; after the previous
-        // TEST_CASE it will be non-null, so we just verify the API is callable.
-        // A true "nullptr before first" test would require process-level isolation.
-        CHECK(GitCommitImageProvider::instance() != nullptr);
+        // The previous TEST_CASE's provider is out of scope, so the
+        // destructor should have cleared sInstance.
+        CHECK(GitCommitImageProvider::instance() == nullptr);
     }
 
     SECTION("instance() returns the most recently constructed provider")
@@ -402,9 +375,9 @@ TEST_CASE("GitRepository imageProviderId property", "[GitRepository][GitCommitIm
         repo.initRepository();
 
         QByteArray pngData = createMinimalPng();
-        createFileAndCommit(repo, "photo.png", pngData, "Add photo");
+        TestUtilities::createBinaryFileAndCommit(repo,"photo.png", pngData, "Add photo");
 
-        QString sha = headSha(repo);
+        QString sha = TestUtilities::getHeadSha(repo.directory());
         REQUIRE(!sha.isEmpty());
 
         int repoId = repo.imageProviderId();
