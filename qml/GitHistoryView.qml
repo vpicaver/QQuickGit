@@ -85,6 +85,8 @@ Item {
             syntheticBackground: root.syntheticBackground
             syntheticBorderColor: root.syntheticBorderColor
             syntheticIconSource: root.syntheticIconSource
+            isFirstRow: index === 0
+            isLastRow: index === listView.count - 1
 
             TapHandler {
                 onTapped: root._selectIndex(index)
