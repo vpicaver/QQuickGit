@@ -23,7 +23,7 @@ Item {
 
     readonly property bool _isSynthetic: commitSha === ""
 
-    implicitHeight: 28
+    implicitHeight: 32
 
     Rectangle {
         anchors.fill: parent
@@ -44,6 +44,8 @@ Item {
 
     RowLayout {
         anchors.fill: parent
+        anchors.leftMargin: 4
+        anchors.rightMargin: 4
         spacing: 6
 
         GitGraphLaneItem {
