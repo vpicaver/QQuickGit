@@ -278,6 +278,22 @@ int filteredStatusEntryCount(git_repository* repo,
     return count;
 }
 
+int computeModifiedFileCount(git_repository* repo, const QString& workTreeRoot)
+{
+    ensureStandardLfsFilterConfig(repo);
+
+    git_status_options opt = GIT_STATUS_OPTIONS_INIT;
+    opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+
+    git_status_list* list = nullptr;
+    if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
+        return 0;
+    }
+    auto listGuard = qScopeGuard([list]() { git_status_list_free(list); });
+    return filteredStatusEntryCount(repo, workTreeRoot, list);
+}
+
 int stageFilteredStatusEntries(git_repository* repo,
                                const QString& workTreeRoot,
                                git_index* index,
@@ -2632,19 +2648,8 @@ bool GitRepository::hasCommits() const
 
 void GitRepository::checkStatus()
 {
-    if(d->repo) {
-        ensureStandardLfsFilterConfig(d->repo);
-        git_status_list* list;
-
-        //Shouldn't include ignored files
-        git_status_options opt = GIT_STATUS_OPTIONS_INIT;
-        opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-        opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
-
-        git_status_list_new(&list, d->repo, &opt);
-        const int count = filteredStatusEntryCount(d->repo, d->mDirectory.absolutePath(), list);
-        setModifiedFileCount(count);
-        git_status_list_free(list);
+    if (d->repo) {
+        setModifiedFileCount(computeModifiedFileCount(d->repo, d->mDirectory.absolutePath()));
     }
 }
 
@@ -2660,18 +2665,7 @@ QFuture<bool> GitRepository::checkStatusAsync()
             return 0;
         }
         auto repoGuard = qScopeGuard([&repo]() { git_repository_free(repo); });
-
-        ensureStandardLfsFilterConfig(repo);
-
-        git_status_options opt = GIT_STATUS_OPTIONS_INIT;
-        opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-        opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
-        git_status_list* list = nullptr;
-        if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
-            return 0;
-        }
-        auto listGuard = qScopeGuard([&list]() { git_status_list_free(list); });
-        return filteredStatusEntryCount(repo, dirPath, list);
+        return computeModifiedFileCount(repo, dirPath);
     });
 
     auto boolFuture = AsyncFuture::observe(countFuture).context(this, [this, countFuture]() {
