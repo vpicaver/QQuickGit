@@ -6,6 +6,7 @@
 #include "TestUtilities.h"
 #include "GitGraphModel.h"
 #include "GitRepository.h"
+#include "GitLaneType.h"
 
 //Async includes
 #include "asyncfuture.h"
@@ -21,6 +22,72 @@
 #include "git2.h"
 
 using namespace QQuickGit;
+
+namespace {
+
+struct CommitResult {
+    git_oid oid;
+    QString sha;
+};
+
+QString oidStr(const git_oid* oid)
+{
+    char buf[GIT_OID_SHA1_HEXSIZE + 1];
+    git_oid_tostr(buf, sizeof(buf), oid);
+    return QString::fromLatin1(buf);
+}
+
+CommitResult createRawCommit(git_repository* repo,
+                             const QString& message,
+                             const QVector<git_oid>& parentOids,
+                             const QString& branchRef = QStringLiteral("refs/heads/main"))
+{
+    git_oid blobOid;
+    QByteArray content = message.toUtf8();
+    REQUIRE(git_blob_create_from_buffer(&blobOid, repo, content.constData(), content.size()) == GIT_OK);
+
+    git_treebuilder* tb = nullptr;
+    REQUIRE(git_treebuilder_new(&tb, repo, nullptr) == GIT_OK);
+    REQUIRE(git_treebuilder_insert(nullptr, tb, "file.txt", &blobOid, GIT_FILEMODE_BLOB) == GIT_OK);
+
+    git_oid treeOid;
+    REQUIRE(git_treebuilder_write(&treeOid, tb) == GIT_OK);
+    git_treebuilder_free(tb);
+
+    git_tree* tree = nullptr;
+    REQUIRE(git_tree_lookup(&tree, repo, &treeOid) == GIT_OK);
+
+    git_signature* sig = nullptr;
+    REQUIRE(git_signature_now(&sig, "Test", "test@test.com") == GIT_OK);
+
+    QVector<const git_commit*> constParents;
+    QVector<git_commit*> parentPtrs;
+    for (const auto& pid : parentOids)
+    {
+        git_commit* parent = nullptr;
+        REQUIRE(git_commit_lookup(&parent, repo, &pid) == GIT_OK);
+        parentPtrs.append(parent);
+        constParents.append(parent);
+    }
+
+    git_oid commitOid;
+    QByteArray refBytes = branchRef.toUtf8();
+    const char* updateRef = branchRef.isEmpty() ? nullptr : refBytes.constData();
+    REQUIRE(git_commit_create(
+        &commitOid, repo, updateRef, sig, sig, nullptr,
+        message.toUtf8().constData(), tree,
+        static_cast<size_t>(constParents.size()),
+        constParents.isEmpty() ? nullptr : constParents.data()) == GIT_OK);
+
+    for (auto* p : parentPtrs)
+        git_commit_free(p);
+    git_tree_free(tree);
+    git_signature_free(sig);
+
+    return {commitOid, oidStr(&commitOid)};
+}
+
+} // anonymous namespace
 
 TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 {
@@ -520,7 +587,9 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
         CHECK(repo.modifiedFileCount() > 0);
     }
 
-    SECTION("Synthetic row mirrors HEAD commit lane data") {
+    SECTION("Synthetic row uses simplified lane types") {
+        using LT = GitLaneType::Type;
+
         TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
 
         // Dirty the repo
@@ -540,13 +609,88 @@ TEST_CASE("GitGraphModel basic functionality", "[GitGraphModel]")
 
         REQUIRE(model.rowCount() >= 2);
 
-        // Synthetic row lanes should match HEAD commit lanes
+        // Synthetic row lanes use simplified types (Active/NotActive/Empty)
+        // instead of copying HEAD's topology-specific types verbatim.
         auto syntheticLanes = model.data(model.index(0), GitGraphModel::LanesRole).value<QList<int>>();
         auto headLanes = model.data(model.index(1), GitGraphModel::LanesRole).value<QList<int>>();
-        CHECK(syntheticLanes == headLanes);
+        CHECK(syntheticLanes.size() == headLanes.size());
 
+        // Active lane should be Active type
         auto syntheticActiveLane = model.data(model.index(0), GitGraphModel::ActiveLaneRole).toInt();
         auto headActiveLane = model.data(model.index(1), GitGraphModel::ActiveLaneRole).toInt();
         CHECK(syntheticActiveLane == headActiveLane);
+        CHECK(syntheticLanes[syntheticActiveLane] == static_cast<int>(LT::Active));
     }
+}
+
+TEST_CASE("GitGraphModel discontinuity merge has no top line on active lane", "[GitGraphModel]")
+{
+    // Topology matching PhakeCave3000 bug:
+    //   main:    C1 -> C2 -> C4
+    //   feature: C1 -> C3 -> M1(C3, C2)
+    //
+    // The revwalk visits C4 first (tip of main), then M1 (tip of feature).
+    // M1 starts a new lane. Its active lane must NOT have a top line since
+    // nothing exists above it on that lane.
+    // Bug: setMerge() overwrites Branch with MergeFork, adding a dangling top line.
+
+    using LT = GitLaneType::Type;
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* rawRepo = nullptr;
+    REQUIRE(git_repository_init(&rawRepo, tempDir.path().toLocal8Bit().constData(), false) == GIT_OK);
+
+    auto c1 = createRawCommit(rawRepo, "C1", {});
+    auto c2 = createRawCommit(rawRepo, "C2", {c1.oid});
+    auto c3 = createRawCommit(rawRepo, "C3", {c1.oid}, QStringLiteral("refs/heads/feature"));
+    auto m1 = createRawCommit(rawRepo, "Merge", {c3.oid, c2.oid}, QStringLiteral("refs/heads/feature"));
+    auto c4 = createRawCommit(rawRepo, "C4", {c2.oid});
+
+    git_repository_free(rawRepo);
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+
+    GitGraphModel model;
+    model.setRepository(&repo);
+
+    QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+    if (model.loading())
+        REQUIRE(loadingSpy.wait(5000));
+
+    REQUIRE(model.rowCount() == 5);
+
+    // Find the merge commit row by SHA
+    int mergeRowIdx = -1;
+    for (int i = 0; i < model.rowCount(); ++i)
+    {
+        auto sha = model.data(model.index(i), GitGraphModel::ShaRole).toString();
+        if (sha == m1.sha)
+        {
+            mergeRowIdx = i;
+            break;
+        }
+    }
+    REQUIRE(mergeRowIdx >= 0);
+
+    auto lanes = model.data(model.index(mergeRowIdx), GitGraphModel::LanesRole).value<QList<int>>();
+    int activeLane = model.data(model.index(mergeRowIdx), GitGraphModel::ActiveLaneRole).toInt();
+
+    REQUIRE(activeLane >= 0);
+    REQUIRE(activeLane < lanes.size());
+
+    int activeLaneType = lanes[activeLane];
+
+    // The active lane should NOT be a MergeFork type (which has a top line).
+    // It should be a Head type (no top line) since nothing is above it.
+    CHECK(activeLaneType != static_cast<int>(LT::MergeFork));
+    CHECK(activeLaneType != static_cast<int>(LT::MergeForkLeft));
+    CHECK(activeLaneType != static_cast<int>(LT::MergeForkRight));
+
+    bool isHeadType = activeLaneType == static_cast<int>(LT::Head)
+                   || activeLaneType == static_cast<int>(LT::HeadLeft)
+                   || activeLaneType == static_cast<int>(LT::HeadRight);
+    CHECK(isHeadType);
 }

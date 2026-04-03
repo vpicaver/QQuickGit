@@ -73,6 +73,11 @@ bool isJoinType(int type)
     return type == LT::Join || type == LT::JoinLeft || type == LT::JoinRight;
 }
 
+bool isMergeForkSide(int type)
+{
+    return type == LT::MergeForkLeft || type == LT::MergeForkRight;
+}
+
 } // anonymous namespace
 
 class GitGraphLaneRenderer : public QCanvasPainterItemRenderer
@@ -141,37 +146,50 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
 
         if (isCurvedLane)
         {
-            // Smooth S-curve connecting this lane to the active lane.
-            // Skip the straight vertical segments — the curve covers them.
-            painter->beginPath();
             if (isHeadType(type))
             {
-                // Head lanes curve downward from the commit — suppress on last/only row
+                // Head lanes: S-curve downward from the commit dot to
+                // this lane. No straight segments — the curve IS the line.
                 if (!suppressBottom)
                 {
+                    const float halfBot = midY + (h - midY) * 0.5f;
+                    painter->beginPath();
                     painter->moveTo(activeCX, midY);
-                    painter->quadraticCurveTo(cx, midY, cx, h);
+                    painter->bezierCurveTo(activeCX, halfBot, cx, halfBot, cx, h);
                     painter->stroke();
                 }
             }
             else // isTailType || isJoinType
             {
-                // Tail/Join lanes curve upward into the commit — suppress on first/only row
+                // Tail/Join lanes: draw straight pass-through lines on
+                // this lane (top and/or bottom), then a separate S-curve
+                // forking from this lane to the commit dot on the active
+                // lane. This keeps the lane's vertical line unbroken while
+                // clearly showing the merge/fork connection.
+
+                // Straight top line (lane continues from above)
                 if (!suppressTop)
                 {
+                    painter->beginPath();
                     painter->moveTo(cx, 0);
-                    painter->quadraticCurveTo(cx, midY, activeCX, midY);
+                    painter->lineTo(cx, midY);
                     painter->stroke();
                 }
-            }
 
-            // Join lanes also continue below the commit row — draw that segment.
-            if (isJoinType(type) && !suppressBottom)
-            {
+                // Horizontal line from this lane to the commit dot
                 painter->beginPath();
                 painter->moveTo(cx, midY);
-                painter->lineTo(cx, h);
+                painter->lineTo(activeCX, midY);
                 painter->stroke();
+
+                // Join lanes also continue below the commit row.
+                if (isJoinType(type) && !suppressBottom)
+                {
+                    painter->beginPath();
+                    painter->moveTo(cx, midY);
+                    painter->lineTo(cx, h);
+                    painter->stroke();
+                }
             }
         }
         else
@@ -189,6 +207,15 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
                 painter->beginPath();
                 painter->moveTo(cx, midY);
                 painter->lineTo(cx, h);
+                painter->stroke();
+            }
+
+            // MergeFork side lanes draw a horizontal connection to the active lane
+            if (isMergeForkSide(type) && i != mActiveLane)
+            {
+                painter->beginPath();
+                painter->moveTo(cx, midY);
+                painter->lineTo(activeCX, midY);
                 painter->stroke();
             }
         }

@@ -117,6 +117,17 @@ Item {
         }
 
         Text {
+            text: row.commitSha.substring(0, 7)
+            color: row.palette.text
+            opacity: 0.4
+            font.pixelSize: 12
+            font.family: "monospace"
+            Layout.preferredWidth: 56
+            horizontalAlignment: Text.AlignRight
+            visible: !row._isSynthetic
+        }
+
+        Text {
             text: Qt.formatDateTime(row.commitTimestamp, "yyyy-MM-dd")
             color: row.palette.text
             opacity: 0.4

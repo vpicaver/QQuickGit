@@ -195,8 +195,12 @@ IndexPassResult runIndexPass(const QString& repoPath)
         if (fork)
             lanes.setFork(sha);
 
+        bool wasBranchBeforeMerge = false;
         if (parentCount > 1)
+        {
+            wasBranchBeforeMerge = lanes.isBranch();
             lanes.setMerge(parentShas);
+        }
 
         if (parentCount == 0)
             lanes.setInitial();
@@ -205,6 +209,24 @@ IndexPassResult runIndexPass(const QString& repoPath)
         rowGraph.sha = sha;
         rowGraph.lanes = lanes.getLanes();
         rowGraph.activeLane = lanes.activeLaneIndex();
+
+        // When a merge commit starts a new lane, setMerge() overwrites
+        // Branch (no top line) with MergeFork (has top line), creating a
+        // dangling line going up to nothing. Replace with Head type.
+        if (wasBranchBeforeMerge)
+        {
+            int al = rowGraph.activeLane;
+            if (al >= 0 && al < rowGraph.lanes.size())
+            {
+                auto type = rowGraph.lanes[al].type();
+                if (type == GitLaneType::MergeFork)
+                    rowGraph.lanes[al].setType(GitLaneType::Head);
+                else if (type == GitLaneType::MergeForkLeft)
+                    rowGraph.lanes[al].setType(GitLaneType::HeadLeft);
+                else if (type == GitLaneType::MergeForkRight)
+                    rowGraph.lanes[al].setType(GitLaneType::HeadRight);
+            }
+        }
 
         result.oids.append(oidToBytes(&oid));
         result.graph.append(std::move(rowGraph));
