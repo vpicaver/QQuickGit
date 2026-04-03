@@ -842,8 +842,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             // conflict markers with path labels (e.g. "<<<<<<< Cave 3006/notes/1.cwnote")
             // rather than "<<<<<<< HEAD". These markers were staged and committed as-is.
             // The file must be long enough for libgit2's rename detection (similarity > 50%).
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             // Build a realistic-length JSON note file (~30 lines) so libgit2's rename
             // detection sees high similarity despite the one-field change.
@@ -911,8 +911,8 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             CHECK_NOTHROW(repo.commitAll("rename and modify", "rename Cave dir and update version"));
 
             // Theirs (master): modify same field, no rename
-            waitForGitFuture(repo.checkout("refs/heads/master"));
-            CHECK(repo.headBranchName().toStdString() == "master");
+            waitForGitFuture(repo.checkout("refs/heads/main"));
+            CHECK(repo.headBranchName().toStdString() == "main");
 
             {
                 QFile noteFile(tempDir.absoluteFilePath("Cave 3000/notes/1.cwnote"));
@@ -928,7 +928,7 @@ TEST_CASE("Merge should work correctly", "[GitRepository]") {
             CHECK(repo.headBranchName().toStdString() == "renameAndModifyBranch");
 
             GitRepository::MergeResult result;
-            CHECK_NOTHROW(result = repo.merge({"master"}));
+            CHECK_NOTHROW(result = repo.merge({"main"}));
             CHECK(result.state() == GitRepository::MergeResult::MergeCommitCreated);
 
             // The merged file must not contain raw conflict markers
@@ -1061,8 +1061,8 @@ TEST_CASE("Merge with multiple conflicting files should preserve all files", "[G
     CHECK_NOTHROW(repo.commitAll("remote", "remote renames station to c1"));
 
     // Switch back to master and make a conflicting change: a1 -> b1
-    waitForGitFuture(repo.checkout("refs/heads/master"));
-    CHECK(repo.headBranchName().toStdString() == "master");
+    waitForGitFuture(repo.checkout("refs/heads/main"));
+    CHECK(repo.headBranchName().toStdString() == "main");
 
     writeTripFile("b1");
     writeNoteFile("b1");
