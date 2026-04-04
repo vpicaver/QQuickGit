@@ -21,6 +21,7 @@ Item {
     property color syntheticBackground: palette.mid
     property color syntheticBorderColor: palette.dark
     property url syntheticIconSource
+    property string headBranchName: ""
 
     readonly property bool _isSynthetic: commitSha === ""
 
@@ -82,6 +83,7 @@ Item {
                     accentColor: row.laneColors.length > 0
                         ? row.laneColors[row.activeLaneIndex % row.laneColors.length]
                         : "#4dc9f6"
+                    checked: modelData === row.headBranchName
                     tooltipText: modelData.includes("/")
                         ? qsTr("Remote branch – the latest commits pushed to the server")
                         : qsTr("Local branch – commits saved on your device")

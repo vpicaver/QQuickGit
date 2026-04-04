@@ -98,6 +98,7 @@ Item {
             syntheticBackground: root.syntheticBackground
             syntheticBorderColor: root.syntheticBorderColor
             syntheticIconSource: root.syntheticIconSource
+            headBranchName: root.repository.headBranchName
             rowPosition: {
                 let first = (index === 0)
                 let last = (index === listView.count - 1)

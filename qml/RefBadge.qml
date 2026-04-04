@@ -9,8 +9,9 @@ Item {
     property color textColor: "#f5f5f5"
     property color accentColor: "#4dc9f6"
     property string tooltipText: ""
+    property bool checked: false
 
-    implicitWidth: labelText.implicitWidth + 12
+    implicitWidth: (root.checked ? checkText.implicitWidth + 4 : 0) + labelText.implicitWidth + 12
     implicitHeight: labelText.implicitHeight + 4
 
     Rectangle {
@@ -28,13 +29,26 @@ Item {
         }
     }
 
-    Text {
-        id: labelText
+    Row {
         anchors.centerIn: parent
-        text: root.text
-        color: root.textColor
-        font.pixelSize: 11
-        font.weight: Font.Medium
+        spacing: 3
+
+        Text {
+            id: checkText
+            visible: root.checked
+            text: "\u2713"
+            color: root.accentColor
+            font.pixelSize: 11
+            font.weight: Font.Bold
+        }
+
+        Text {
+            id: labelText
+            text: root.text
+            color: root.textColor
+            font.pixelSize: 11
+            font.weight: root.checked ? Font.Bold : Font.Medium
+        }
     }
 
     HoverHandler {
