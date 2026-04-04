@@ -18,7 +18,6 @@
 #include <QByteArray>
 
 //Std includes
-#include <optional>
 
 namespace QQuickGit {
 
@@ -37,7 +36,6 @@ struct IndexPassResult
     QVector<GitRowGraph> graph;
     QHash<QString, QStringList> refMap;
     QString headSha;
-    std::optional<int> modifiedFileCount;
 };
 
 class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel

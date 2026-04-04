@@ -242,24 +242,6 @@ IndexPassResult runIndexPass(const QString& repoPath)
             lanes.afterBranch();
     }
 
-    // Piggyback a working-tree status check on the same background thread
-    // so the model can update the synthetic "Uncommitted Changes" row
-    // without spawning a separate thread pool task.
-    {
-        git_status_options statusOpt = GIT_STATUS_OPTIONS_INIT;
-        statusOpt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-        statusOpt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED
-                        | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
-
-        git_status_list* statusList = nullptr;
-        if (git_status_list_new(&statusList, repo, &statusOpt) == GIT_OK && statusList)
-        {
-            result.modifiedFileCount = static_cast<int>(
-                git_status_list_entrycount(statusList));
-            git_status_list_free(statusList);
-        }
-    }
-
     return result;
 }
 
@@ -435,11 +417,7 @@ void GitGraphModel::refresh()
                 endInsertRows();
             }
 
-            // Use piggybacked status to avoid a separate thread-pool task.
-            if (result.modifiedFileCount.has_value())
-                setSyntheticRowVisible(*result.modifiedFileCount > 0);
-            else
-                updateSyntheticRow();
+            updateSyntheticRow();
 
             mLoading = false;
             emit loadingChanged();
