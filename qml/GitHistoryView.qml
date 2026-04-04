@@ -29,6 +29,9 @@ Item {
                                   GitGraphModel.ShaRole)
         _selectedSha = sha ?? ""
         _hasSelection = true
+        listView.currentIndex = index
+        listView.positionViewAtIndex(index, ListView.Contain)
+        listView.forceActiveFocus()
     }
 
     GitGraphModel {
@@ -53,6 +56,16 @@ Item {
         model: graphModel
         clip: true
         reuseItems: true
+        focus: true
+
+        Keys.onUpPressed: {
+            if (currentIndex > 0)
+                root._selectIndex(currentIndex - 1)
+        }
+        Keys.onDownPressed: {
+            if (currentIndex < count - 1)
+                root._selectIndex(currentIndex + 1)
+        }
 
         ScrollBar.vertical: ScrollBar {
             id: verticalScrollBar
