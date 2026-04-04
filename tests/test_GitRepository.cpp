@@ -2334,3 +2334,18 @@ TEST_CASE("GitRepository restoreToCommit with empty repo returns error", "[Resto
     REQUIRE(AsyncFuture::waitForFinished(future, defaultTimeout));
     CHECK(future.result().hasError());
 }
+
+TEST_CASE("GitRepository hasCommits returns false for new repo and true after first commit", "[GitRepository][hasCommits]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    repo.initRepository();
+
+    CHECK(!repo.hasCommits());
+
+    TestUtilities::createFileAndCommit(repo, "init.txt", "hello", "Initial commit");
+
+    CHECK(repo.hasCommits());
+}

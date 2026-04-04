@@ -41,6 +41,7 @@ class QQUICKGIT_EXPORT GitRepository : public QObject
     Q_PROPERTY(QString headBranchName READ headBranchName NOTIFY headBranchNameChanged)
     Q_PROPERTY(QVector<GitRemoteInfo> remotes READ remotes NOTIFY remotesChanged)
     Q_PROPERTY(int imageProviderId READ imageProviderId NOTIFY imageProviderIdChanged)
+    Q_PROPERTY(bool hasCommits READ hasCommits NOTIFY refsChanged)
 
 public:
     struct AheadBehindCounts {

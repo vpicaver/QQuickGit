@@ -23,6 +23,7 @@ Item {
     property color syntheticBorderColor: palette.dark
     property url syntheticIconSource
     property string headBranchName: ""
+    property bool hasCommits: true
 
     signal restoreRequested(string sha, string subject)
     signal discardAllRequested()
@@ -44,6 +45,7 @@ Item {
         id: syntheticContextMenu
         QC.MenuItem {
             text: qsTr("Discard All")
+            enabled: row.hasCommits
             onTriggered: row.discardAllRequested()
         }
     }
