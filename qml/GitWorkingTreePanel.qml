@@ -241,39 +241,9 @@ Item {
         }
     }
 
-    Dialog {
+    GitDiscardDialog {
         id: discardDialog
-        anchors.centerIn: parent
-        modal: true
-        title: qsTr("Discard All Changes?")
-
-        contentItem: ColumnLayout {
-            spacing: 8
-
-            Label {
-                Layout.fillWidth: true
-                text: qsTr("This will permanently delete all uncommitted changes including untracked files. This cannot be undone.")
-                wrapMode: Text.WordWrap
-            }
-        }
-
-        footer: DialogButtonBox {
-            alignment: Qt.AlignRight
-
-            Button {
-                text: qsTr("Cancel")
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-            }
-
-            Button {
-                text: qsTr("Discard All Changes")
-                palette.buttonText: root.deletedColor
-                DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
-            }
-        }
-
-        onDiscarded: {
-            root.discardRequested()
-        }
+        dangerColor: root.deletedColor
+        onDiscardConfirmed: root.discardRequested()
     }
 }

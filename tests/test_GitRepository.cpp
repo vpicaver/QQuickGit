@@ -2051,3 +2051,286 @@ TEST_CASE("GitRepository directoryPath property", "[GitRepository]")
         CHECK(repo.directoryPath().toStdString() == QDir().path().toStdString());
     }
 }
+
+TEST_CASE("GitRepository restoreToCommit should create a forward commit with the target tree", "[RestoreToCommit]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    repo.initRepository();
+
+    Account account;
+    account.setName("Test Author");
+    account.setEmail("test@example.com");
+    repo.setAccount(&account);
+
+    // Commit A: file1 = "hello"
+    {
+        QFile file(tempDir.absoluteFilePath("file1.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("hello\n");
+    }
+    repo.commitAll("Add file1", QString());
+    const QString shaA = TestUtilities::getHeadSha(tempDir);
+    REQUIRE(!shaA.isEmpty());
+
+    // Commit B: file1 = "world"
+    {
+        QFile file(tempDir.absoluteFilePath("file1.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("world\n");
+    }
+    repo.commitAll("Modify file1", QString());
+    const QString shaB = TestUtilities::getHeadSha(tempDir);
+    REQUIRE(!shaB.isEmpty());
+    REQUIRE(shaA != shaB);
+
+    // Commit C: add file2
+    {
+        QFile file(tempDir.absoluteFilePath("file2.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("extra\n");
+    }
+    repo.commitAll("Add file2", QString());
+    const QString shaC = TestUtilities::getHeadSha(tempDir);
+    REQUIRE(!shaC.isEmpty());
+
+    SECTION("Basic restore creates a new forward commit with the target tree")
+    {
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        const QString shaD = TestUtilities::getHeadSha(tempDir);
+        REQUIRE(!shaD.isEmpty());
+        CHECK(shaD != shaA);
+        CHECK(shaD != shaB);
+        CHECK(shaD != shaC);
+
+        // Verify the tree matches commit A: file1 = "hello", no file2
+        {
+            QFile file(tempDir.absoluteFilePath("file1.txt"));
+            REQUIRE(file.open(QFile::ReadOnly | QFile::Text));
+            CHECK(file.readAll() == QByteArray("hello\n"));
+        }
+        CHECK(!QFile::exists(tempDir.absoluteFilePath("file2.txt")));
+
+        // Verify D's parent is C
+        auto parentResult = GitRepository::commitParentOids(tempDir.absolutePath(), shaD);
+        REQUIRE(!parentResult.hasError());
+        REQUIRE(parentResult.value().size() == 1);
+        CHECK(parentResult.value().first() == shaC);
+    }
+
+    SECTION("Commit message contains audit trail")
+    {
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        auto msgResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!msgResult.hasError());
+        const QString message = msgResult.value().trimmed();
+
+        // Subject
+        CHECK(message.startsWith(QStringLiteral("Restored to: Add file1")));
+
+        // Body contains target SHA prefix
+        CHECK(message.contains(shaA.left(10)));
+
+        // Body contains previous HEAD SHA prefix
+        CHECK(message.contains(shaC.left(10)));
+
+        // Body lists rolled-back commits
+        CHECK(message.contains(QStringLiteral("Rolled back")));
+        CHECK(message.contains(QStringLiteral("Add file2")));
+        CHECK(message.contains(QStringLiteral("Modify file1")));
+    }
+
+    SECTION("Restore to HEAD creates a new commit with same tree")
+    {
+        auto future = repo.restoreToCommit(shaC);
+        waitForGitFuture(future);
+
+        const QString shaD = TestUtilities::getHeadSha(tempDir);
+        REQUIRE(!shaD.isEmpty());
+        CHECK(shaD != shaC);
+
+        // Working directory still has both files
+        CHECK(QFile::exists(tempDir.absoluteFilePath("file1.txt")));
+        CHECK(QFile::exists(tempDir.absoluteFilePath("file2.txt")));
+    }
+
+    SECTION("Invalid SHA returns error and HEAD is unchanged")
+    {
+        auto future = repo.restoreToCommit(QStringLiteral("badc0ffeebadc0ffeebadc0ffeebadc0ffeebadc"));
+        REQUIRE(AsyncFuture::waitForFinished(future, defaultTimeout));
+        CHECK(future.result().hasError());
+
+        // HEAD unchanged
+        CHECK(TestUtilities::getHeadSha(tempDir) == shaC);
+    }
+
+    SECTION("Working directory is updated after restore")
+    {
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        // file1.txt should have commit A's content
+        {
+            QFile file(tempDir.absoluteFilePath("file1.txt"));
+            REQUIRE(file.open(QFile::ReadOnly | QFile::Text));
+            CHECK(file.readAll() == QByteArray("hello\n"));
+        }
+
+        // file2.txt should be removed (it didn't exist at commit A)
+        CHECK(!QFile::exists(tempDir.absoluteFilePath("file2.txt")));
+    }
+
+    SECTION("Index is clean after restore")
+    {
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        repo.checkStatus();
+        CHECK(repo.modifiedFileCount() == 0);
+    }
+
+    SECTION("Large rollback lists first 10 commits then summarizes")
+    {
+        // Build 12 more commits (total 15 from A)
+        for (int i = 0; i < 12; ++i) {
+            QFile file(tempDir.absoluteFilePath(QStringLiteral("bulk%1.txt").arg(i)));
+            REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+            file.write(QStringLiteral("bulk %1\n").arg(i).toUtf8());
+            file.close();
+            repo.commitAll(QStringLiteral("Bulk commit %1").arg(i), QString());
+        }
+
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        auto msgResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!msgResult.hasError());
+        const QString message = msgResult.value();
+
+        CHECK(message.contains(QStringLiteral("... and")));
+        CHECK(message.contains(QStringLiteral("more")));
+    }
+}
+
+TEST_CASE("GitRepository restoreToCommit across merge", "[RestoreToCommit]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    repo.initRepository();
+
+    Account account;
+    account.setName("Test Author");
+    account.setEmail("test@example.com");
+    repo.setAccount(&account);
+
+    // Commit A on main
+    {
+        QFile file(tempDir.absoluteFilePath("base.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("base\n");
+    }
+    repo.commitAll("Commit A", QString());
+    const QString shaA = TestUtilities::getHeadSha(tempDir);
+    REQUIRE(!shaA.isEmpty());
+
+    // Commit B on main
+    {
+        QFile file(tempDir.absoluteFilePath("main-file.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("main work\n");
+    }
+    repo.commitAll("Commit B", QString());
+    const QString shaB = TestUtilities::getHeadSha(tempDir);
+
+    // Create branch from A, add commit C
+    repo.createBranch("feature", shaA, true);
+    CHECK(repo.headBranchName().toStdString() == "feature");
+    {
+        QFile file(tempDir.absoluteFilePath("feature-file.txt"));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        file.write("feature work\n");
+    }
+    repo.commitAll("Commit C", QString());
+    const QString shaC = TestUtilities::getHeadSha(tempDir);
+
+    // Merge feature into main → merge commit D
+    waitForGitFuture(repo.checkout("refs/heads/main"));
+    CHECK(repo.headBranchName().toStdString() == "main");
+    auto mergeResult = repo.merge({"feature"});
+    CHECK(mergeResult.state() == GitRepository::MergeResult::MergeCommitCreated);
+    const QString shaD = TestUtilities::getHeadSha(tempDir);
+    REQUIRE(!shaD.isEmpty());
+
+    SECTION("Restore to A across a merge creates forward commit with A's tree")
+    {
+        auto future = repo.restoreToCommit(shaA);
+        waitForGitFuture(future);
+
+        const QString shaE = TestUtilities::getHeadSha(tempDir);
+        CHECK(shaE != shaD);
+
+        // E's tree = A's tree: only base.txt exists
+        CHECK(QFile::exists(tempDir.absoluteFilePath("base.txt")));
+        CHECK(!QFile::exists(tempDir.absoluteFilePath("main-file.txt")));
+        CHECK(!QFile::exists(tempDir.absoluteFilePath("feature-file.txt")));
+
+        // E's parent is D
+        auto parentResult = GitRepository::commitParentOids(tempDir.absolutePath(), shaE);
+        REQUIRE(!parentResult.hasError());
+        REQUIRE(parentResult.value().size() == 1);
+        CHECK(parentResult.value().first() == shaD);
+
+        // Audit trail lists commits from both branches
+        auto msgResult = GitRepository::headCommitMessage(tempDir.absolutePath());
+        REQUIRE(!msgResult.hasError());
+        const QString message = msgResult.value();
+        CHECK(message.contains(QStringLiteral("Commit B")));
+        CHECK(message.contains(QStringLiteral("Commit C")));
+    }
+
+    SECTION("Restore to pre-merge commit B restores B's tree")
+    {
+        auto future = repo.restoreToCommit(shaB);
+        waitForGitFuture(future);
+
+        const QString shaE = TestUtilities::getHeadSha(tempDir);
+        CHECK(shaE != shaD);
+
+        // E's tree = B's tree: base.txt + main-file.txt, no feature-file.txt
+        CHECK(QFile::exists(tempDir.absoluteFilePath("base.txt")));
+        CHECK(QFile::exists(tempDir.absoluteFilePath("main-file.txt")));
+        CHECK(!QFile::exists(tempDir.absoluteFilePath("feature-file.txt")));
+
+        // Parent is D
+        auto parentResult = GitRepository::commitParentOids(tempDir.absolutePath(), shaE);
+        REQUIRE(!parentResult.hasError());
+        REQUIRE(parentResult.value().size() == 1);
+        CHECK(parentResult.value().first() == shaD);
+    }
+}
+
+TEST_CASE("GitRepository restoreToCommit with empty repo returns error", "[RestoreToCommit]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+
+    GitRepository repo;
+    repo.setDirectory(tempDir);
+    repo.initRepository();
+
+    Account account;
+    account.setName("Test Author");
+    account.setEmail("test@example.com");
+    repo.setAccount(&account);
+
+    auto future = repo.restoreToCommit(QStringLiteral("abcdef1234567890abcdef1234567890abcdef12"));
+    REQUIRE(AsyncFuture::waitForFinished(future, defaultTimeout));
+    CHECK(future.result().hasError());
+}

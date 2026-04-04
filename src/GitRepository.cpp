@@ -4123,6 +4123,189 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
 }
 
 
+static QString buildRestoreCommitMessage(git_repository* repo,
+                                         git_commit* targetCommit,
+                                         git_commit* headCommit)
+{
+    const char* targetSummary = git_commit_summary(targetCommit);
+    QString subject = QStringLiteral("Restored to: %1")
+                          .arg(QString::fromUtf8(targetSummary ? targetSummary : "unknown"));
+
+    const git_oid* targetOid = git_commit_id(targetCommit);
+    const git_oid* headOid = git_commit_id(headCommit);
+
+    git_time_t targetTime = git_commit_time(targetCommit);
+    int targetOffset = git_commit_time_offset(targetCommit);
+    QDateTime targetDateTime = QDateTime::fromSecsSinceEpoch(targetTime,
+                                   QTimeZone::fromSecondsAheadOfUtc(targetOffset * 60));
+
+    QString body = QStringLiteral("Target: %1 — \"%2\" (%3)\n")
+                       .arg(oidToString(targetOid).left(10),
+                            QString::fromUtf8(targetSummary ? targetSummary : ""),
+                            targetDateTime.toString(Qt::ISODate));
+
+    body += QStringLiteral("Previous HEAD: %1 — \"%2\"\n")
+                .arg(oidToString(headOid).left(10),
+                     QString::fromUtf8(git_commit_summary(headCommit)));
+
+    // Walk from HEAD to target to enumerate rolled-back commits
+    bool isAncestor = git_graph_descendant_of(repo, headOid, targetOid) == 1;
+    if (isAncestor)
+    {
+        git_revwalk* revwalk = nullptr;
+        if (git_revwalk_new(&revwalk, repo) == GIT_OK && revwalk)
+        {
+            std::unique_ptr<git_revwalk, decltype(&git_revwalk_free)>
+                revwalkHolder(revwalk, &git_revwalk_free);
+
+            git_revwalk_sorting(revwalk, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
+            git_revwalk_push(revwalk, headOid);
+            git_revwalk_hide(revwalk, targetOid);
+
+            QStringList rolledBack;
+            git_oid walkOid;
+            while (git_revwalk_next(&walkOid, revwalk) == GIT_OK)
+            {
+                git_commit* walkCommit = nullptr;
+                if (git_commit_lookup(&walkCommit, repo, &walkOid) == GIT_OK)
+                {
+                    rolledBack.append(QStringLiteral("  %1 %2")
+                                          .arg(oidToString(&walkOid).left(10),
+                                               QString::fromUtf8(git_commit_summary(walkCommit))));
+                    git_commit_free(walkCommit);
+                }
+
+                if (rolledBack.size() >= 10)
+                {
+                    break;
+                }
+            }
+
+            // Count remaining commits (capped to avoid full graph traversal)
+            constexpr int kMaxRemaining = 1000;
+            int remaining = 0;
+            while (remaining < kMaxRemaining && git_revwalk_next(&walkOid, revwalk) == GIT_OK)
+            {
+                remaining++;
+            }
+
+            if (!rolledBack.isEmpty())
+            {
+                int total = rolledBack.size() + remaining;
+                bool capped = (remaining == kMaxRemaining);
+                body += QStringLiteral("\nRolled back %1%2 commits:\n")
+                            .arg(total)
+                            .arg(capped ? QStringLiteral("+") : QString());
+                body += rolledBack.join(QLatin1Char('\n'));
+                if (remaining > 0)
+                {
+                    body += QStringLiteral("\n  ... and %1%2 more")
+                                .arg(remaining)
+                                .arg(capped ? QStringLiteral("+") : QString());
+                }
+            }
+        }
+    }
+
+    return subject + QStringLiteral("\n\n") + body;
+}
+
+GitRepository::GitFuture GitRepository::restoreToCommit(const QString& targetSha)
+{
+    Q_ASSERT(account());
+
+    auto accountName = account()->name().toLocal8Bit();
+    auto accountEmail = account()->email().toLocal8Bit();
+
+    auto future = progressFuture<ResultBase>(
+        [=](QFutureInterface<ResultBase>)
+        {
+            auto path = d->mDirectory.absolutePath().toLocal8Bit();
+            auto localTargetSha = targetSha.toLocal8Bit();
+
+            auto prepareFuture = QtConcurrent::run([=]() mutable {
+                return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    auto repo = makeScopedPtr(git_repository_free);
+                    check(git_repository_open(&repo, path));
+
+                    // Look up target commit
+                    git_oid targetOid;
+                    check(git_oid_fromstr(&targetOid, localTargetSha.constData()));
+
+                    git_commit* targetCommit = nullptr;
+                    check(git_commit_lookup(&targetCommit, repo, &targetOid));
+                    std::unique_ptr<git_commit, decltype(&git_commit_free)>
+                        targetHolder(targetCommit, &git_commit_free);
+
+                    // Get target's tree
+                    git_tree* targetTree = nullptr;
+                    check(git_commit_tree(&targetTree, targetCommit));
+                    std::unique_ptr<git_tree, decltype(&git_tree_free)>
+                        treeHolder(targetTree, &git_tree_free);
+
+                    // Look up HEAD as parent
+                    git_object* parentObj = nullptr;
+                    git_reference* headRef = nullptr;
+                    check(git_revparse_ext(&parentObj, &headRef, repo, "HEAD"));
+                    std::unique_ptr<git_object, decltype(&git_object_free)>
+                        parentHolder(parentObj, &git_object_free);
+                    std::unique_ptr<git_reference, decltype(&git_reference_free)>
+                        headRefHolder(headRef, &git_reference_free);
+
+                    auto* headCommit = reinterpret_cast<git_commit*>(parentObj);
+
+                    // Build commit message
+                    QString message = buildRestoreCommitMessage(repo, targetCommit, headCommit);
+
+                    // Create signature
+                    git_signature* sig = nullptr;
+                    check(git_signature_now(&sig, accountName.constData(), accountEmail.constData()));
+                    std::unique_ptr<git_signature, decltype(&git_signature_free)>
+                        sigHolder(sig, &git_signature_free);
+
+                    // Create forward commit with target's tree
+                    git_oid commitOid;
+                    check(git_commit_create_v(
+                        &commitOid,
+                        repo,
+                        "HEAD",
+                        sig,
+                        sig,
+                        NULL,
+                        message.toUtf8().constData(),
+                        targetTree,
+                        1, parentObj));
+
+                    // Force-checkout target tree to working directory
+                    git_checkout_options checkoutOpts = GIT_CHECKOUT_OPTIONS_INIT;
+                    checkoutOpts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_REMOVE_UNTRACKED;
+                    check(git_checkout_tree(repo, reinterpret_cast<git_object*>(targetTree), &checkoutOpts));
+
+                    // Update index to match target tree
+                    git_index* index = nullptr;
+                    check(git_repository_index(&index, repo));
+                    std::unique_ptr<git_index, decltype(&git_index_free)>
+                        indexHolder(index, &git_index_free);
+                    check(git_index_read_tree(index, targetTree));
+                    check(git_index_write(index));
+
+                    return buildLfsHydrationPlan(repo);
+                });
+            });
+
+            return AsyncFuture::observe(prepareFuture)
+                .context(this, [=]() {
+                    const auto prepareResult = prepareFuture.result();
+                    if (prepareResult.hasError()) {
+                        return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
+                    }
+                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                }).future();
+        });
+    emitRefsChangedOnSuccess(future);
+    return future;
+}
+
 void GitRepository::setModifiedFileCount(int count) {
     if(d->mModifiedFilesCount != count) {
         d->mModifiedFilesCount = count;

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls as QC
 import QQuickGit
 
 Item {
@@ -23,9 +24,40 @@ Item {
     property url syntheticIconSource
     property string headBranchName: ""
 
+    signal restoreRequested(string sha, string subject)
+    signal discardAllRequested()
+
     readonly property bool _isSynthetic: commitSha === ""
 
     implicitHeight: 32
+
+    QC.Menu {
+        id: commitContextMenu
+        QC.MenuItem {
+            text: qsTr("Restore to here")
+            enabled: !row.isHeadCommit
+            onTriggered: row.restoreRequested(row.commitSha, row.commitMessage)
+        }
+    }
+
+    QC.Menu {
+        id: syntheticContextMenu
+        QC.MenuItem {
+            text: qsTr("Discard All")
+            onTriggered: row.discardAllRequested()
+        }
+    }
+
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        onTapped: {
+            if (row._isSynthetic) {
+                syntheticContextMenu.popup()
+            } else {
+                commitContextMenu.popup()
+            }
+        }
+    }
 
     Rectangle {
         anchors.fill: parent

@@ -21,6 +21,9 @@ Item {
     readonly property bool selectedIsUncommitted: _selectedSha === ""
                                                   && _hasSelection
 
+    signal restoreRequested(string sha, string subject)
+    signal discardAllRequested()
+
     property string _selectedSha
     property bool _hasSelection: false
 
@@ -107,6 +110,9 @@ Item {
                 if (last) return GitGraphLaneItem.Last
                 return GitGraphLaneItem.Middle
             }
+
+            onRestoreRequested: (sha, subject) => root.restoreRequested(sha, subject)
+            onDiscardAllRequested: root.discardAllRequested()
 
             TapHandler {
                 onTapped: root._selectIndex(index)

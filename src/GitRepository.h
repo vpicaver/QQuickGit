@@ -170,6 +170,7 @@ public:
                                    CheckoutMode mode = CheckoutMode::Safe);
     Q_INVOKABLE GitFuture reset(const QString& refSpec,
                                 ResetMode mode = ResetMode::Hard);
+    Q_INVOKABLE GitFuture restoreToCommit(const QString& targetSha);
 
     QString headBranchName() const;
     Q_INVOKABLE AheadBehindFuture remoteAheadBehindCommitCounts(const QString& remote = QString(),
