@@ -694,3 +694,131 @@ TEST_CASE("GitGraphModel discontinuity merge has no top line on active lane", "[
                    || activeLaneType == static_cast<int>(LT::HeadRight);
     CHECK(isHeadType);
 }
+
+TEST_CASE("GitGraphModel synthetic row appears in repo with merge history", "[GitGraphModel]")
+{
+    // Reproduces Cavewhere/cavewhere#377:
+    // When the Git history contains a merge commit, uncommitted changes
+    // should still produce a synthetic "Uncommitted Changes" row.
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* rawRepo = nullptr;
+    REQUIRE(git_repository_init(&rawRepo, tempDir.path().toLocal8Bit().constData(), false) == GIT_OK);
+
+    // Build a merge topology:
+    //   main:    C1 -> C2 -> M(C2, C3)
+    //   feature: C1 -> C3
+    auto c1 = createRawCommit(rawRepo, "C1", {});
+    auto c2 = createRawCommit(rawRepo, "C2", {c1.oid});
+    auto c3 = createRawCommit(rawRepo, "C3", {c1.oid}, QStringLiteral("refs/heads/feature"));
+    auto merge = createRawCommit(rawRepo, "Merge C2 and C3", {c2.oid, c3.oid});
+
+    git_repository_free(rawRepo);
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+    // Dirty the working tree
+    QDir dir = repo.directory();
+    QFile dirtyFile(dir.filePath("dirty.txt"));
+    REQUIRE(dirtyFile.open(QFile::WriteOnly | QFile::Text));
+    dirtyFile.write("uncommitted change");
+    dirtyFile.close();
+    repo.checkStatus();
+    REQUIRE(repo.modifiedFileCount() > 0);
+
+    GitGraphModel model;
+    model.setRepository(&repo);
+
+    QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+    if (model.loading())
+        REQUIRE(loadingSpy.wait(5000));
+
+    // Should have synthetic row + 4 real commits (M, C3, C2, C1)
+    INFO("rowCount: " << model.rowCount());
+    CHECK(model.hasUncommittedChanges());
+    CHECK(model.rowCount() == 5); // 1 synthetic + 4 real
+
+    // Synthetic row at index 0 has empty SHA
+    auto idx0 = model.index(0);
+    CHECK(model.data(idx0, GitGraphModel::ShaRole).toString().isEmpty());
+    CHECK(model.data(idx0, GitGraphModel::MessageRole).toString() == "Uncommitted Changes");
+
+    // Real merge commit at index 1
+    auto idx1 = model.index(1);
+    CHECK(!model.data(idx1, GitGraphModel::ShaRole).toString().isEmpty());
+}
+
+TEST_CASE("GitGraphModel synthetic row appears after checkStatusAsync in repo with merge history", "[GitGraphModel]")
+{
+    // Tests the scenario from Cavewhere/cavewhere#377:
+    // Model is loaded with a clean repo that has merge history, then the
+    // working tree becomes dirty and checkStatusAsync is used to detect it.
+    // This mimics navigating to the history page after modifying a scrap.
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    git_repository* rawRepo = nullptr;
+    REQUIRE(git_repository_init(&rawRepo, tempDir.path().toLocal8Bit().constData(), false) == GIT_OK);
+
+    auto c1 = createRawCommit(rawRepo, "C1", {});
+    auto c2 = createRawCommit(rawRepo, "C2", {c1.oid});
+    auto c3 = createRawCommit(rawRepo, "C3", {c1.oid}, QStringLiteral("refs/heads/feature"));
+    auto merge = createRawCommit(rawRepo, "Merge", {c2.oid, c3.oid});
+
+    git_repository_free(rawRepo);
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+    // Start with a clean repo
+    repo.checkStatus();
+    REQUIRE(repo.modifiedFileCount() == 0);
+
+    GitGraphModel model;
+    model.setRepository(&repo);
+
+    QSignalSpy loadingSpy(&model, &GitGraphModel::loadingChanged);
+    if (model.loading())
+        REQUIRE(loadingSpy.wait(5000));
+
+    CHECK(model.rowCount() == 4);
+    CHECK_FALSE(model.hasUncommittedChanges());
+
+    // Now dirty the working tree (simulating a scrap modification)
+    QDir dir = repo.directory();
+    QFile dirtyFile(dir.filePath("dirty.txt"));
+    REQUIRE(dirtyFile.open(QFile::WriteOnly | QFile::Text));
+    dirtyFile.write("uncommitted change");
+    dirtyFile.close();
+
+    // Use checkStatusAsync (as the history page does on onVisibleChanged)
+    auto future = repo.checkStatusAsync();
+    QSignalSpy modifiedSpy(&repo, &GitRepository::modifiedFileCountChanged);
+    if (repo.modifiedFileCount() == 0)
+        REQUIRE(modifiedSpy.wait(5000));
+
+    CHECK(repo.modifiedFileCount() > 0);
+    CHECK(model.hasUncommittedChanges());
+    CHECK(model.rowCount() == 5); // 1 synthetic + 4 real
+
+    auto idx0 = model.index(0);
+    CHECK(model.data(idx0, GitGraphModel::ShaRole).toString().isEmpty());
+    CHECK(model.data(idx0, GitGraphModel::MessageRole).toString() == "Uncommitted Changes");
+
+    // Verify that refresh() preserves the synthetic row (simulates the
+    // GitGraphModel being refreshed while uncommitted changes exist).
+    model.refresh();
+
+    loadingSpy.clear();
+    if (model.loading())
+        REQUIRE(loadingSpy.wait(5000));
+
+    CHECK(model.hasUncommittedChanges());
+    CHECK(model.rowCount() == 5); // Still 1 synthetic + 4 real
+}

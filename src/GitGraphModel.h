@@ -17,6 +17,9 @@
 #include <QStringList>
 #include <QByteArray>
 
+//Std includes
+#include <optional>
+
 namespace QQuickGit {
 
 class GitRepository;
@@ -34,6 +37,7 @@ struct IndexPassResult
     QVector<GitRowGraph> graph;
     QHash<QString, QStringList> refMap;
     QString headSha;
+    std::optional<int> modifiedFileCount;
 };
 
 class QQUICKGIT_EXPORT GitGraphModel : public QAbstractListModel
@@ -81,6 +85,7 @@ signals:
 private:
     void clearModel();
     void updateSyntheticRow();
+    void setSyntheticRowVisible(bool visible);
     void insertSyntheticRow();
     void removeSyntheticRow();
     int syntheticOffset() const;
