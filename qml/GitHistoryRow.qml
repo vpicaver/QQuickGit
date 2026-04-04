@@ -69,16 +69,6 @@ Item {
             }
         }
 
-        Loader {
-            active: row.isHeadCommit
-            sourceComponent: RefBadge {
-                text: qsTr("Current")
-                backgroundColor: row.palette.highlight
-                textColor: row.palette.highlightedText
-                accentColor: row.palette.highlight
-            }
-        }
-
         Row {
             spacing: 4
             visible: row.commitRefs.length > 0
@@ -92,6 +82,9 @@ Item {
                     accentColor: row.laneColors.length > 0
                         ? row.laneColors[row.activeLaneIndex % row.laneColors.length]
                         : "#4dc9f6"
+                    tooltipText: modelData.includes("/")
+                        ? qsTr("Remote branch – the latest commits pushed to the server")
+                        : qsTr("Local branch – commits saved on your device")
                 }
             }
         }

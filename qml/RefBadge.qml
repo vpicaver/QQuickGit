@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 
 Item {
     id: root
@@ -7,6 +8,7 @@ Item {
     property color backgroundColor: "#656565"
     property color textColor: "#f5f5f5"
     property color accentColor: "#4dc9f6"
+    property string tooltipText: ""
 
     implicitWidth: labelText.implicitWidth + 12
     implicitHeight: labelText.implicitHeight + 4
@@ -33,5 +35,15 @@ Item {
         color: root.textColor
         font.pixelSize: 11
         font.weight: Font.Medium
+    }
+
+    HoverHandler {
+        id: hoverHandler
+    }
+
+    ToolTip {
+        visible: hoverHandler.hovered && root.tooltipText !== ""
+        text: root.tooltipText
+        delay: 500
     }
 }
