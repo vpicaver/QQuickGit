@@ -96,34 +96,6 @@ private:
     GitGraphLaneItem::RowPosition mRowPosition = GitGraphLaneItem::Middle;
 };
 
-static const char* laneTypeName(int type)
-{
-    using LaneType = GitLaneType::Type;
-    switch (type)
-    {
-    case LaneType::Empty:          return "Empty";
-    case LaneType::Active:         return "Active";
-    case LaneType::NotActive:      return "NotActive";
-    case LaneType::MergeFork:      return "MergeFork";
-    case LaneType::MergeForkRight: return "MergeForkRight";
-    case LaneType::MergeForkLeft:  return "MergeForkLeft";
-    case LaneType::Join:           return "Join";
-    case LaneType::JoinRight:      return "JoinRight";
-    case LaneType::JoinLeft:       return "JoinLeft";
-    case LaneType::Head:           return "Head";
-    case LaneType::HeadRight:      return "HeadRight";
-    case LaneType::HeadLeft:       return "HeadLeft";
-    case LaneType::Tail:           return "Tail";
-    case LaneType::TailRight:      return "TailRight";
-    case LaneType::TailLeft:       return "TailLeft";
-    case LaneType::Cross:          return "Cross";
-    case LaneType::CrossEmpty:     return "CrossEmpty";
-    case LaneType::Initial:        return "Initial";
-    case LaneType::Branch:         return "Branch";
-    default:                       return "Unknown";
-    }
-}
-
 void GitGraphLaneRenderer::synchronize(QCanvasPainterItem* item)
 {
     auto* laneItem = static_cast<GitGraphLaneItem*>(item);
@@ -134,14 +106,6 @@ void GitGraphLaneRenderer::synchronize(QCanvasPainterItem* item)
     mNodeRadius = static_cast<float>(laneItem->nodeRadius());
     mLineWidth = static_cast<float>(laneItem->lineWidth());
     mRowPosition = laneItem->rowPosition();
-
-    QStringList laneNames;
-    for (int l : mLanes)
-        laneNames << laneTypeName(l);
-    qDebug() << "LaneRenderer activeLane=" << mActiveLane
-             << "rowPos=" << static_cast<int>(mRowPosition)
-             << "laneWidth=" << mLaneWidth
-             << "lanes=" << laneNames.join(", ");
 }
 
 void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
@@ -211,21 +175,6 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
                 // Curve from the bottom of the lane up to the dot
                 if (!suppressBottom)
                 {
-                    // painter->setFillStyle(Qt::red);
-                    // painter->beginPath();
-                    // painter->circle(cx, h, mNodeRadius+1.0);
-                    // painter->fill();
-
-                    // painter->setFillStyle(Qt::green);
-                    // painter->beginPath();
-                    // painter->circle(activeCX, midY, mNodeRadius+1.0);
-                    // painter->fill();
-
-                    // painter->setFillStyle(Qt::blue);
-                    // painter->beginPath();
-                    // painter->circle(cx, midY, mNodeRadius+1.0);
-                    // painter->fill();
-
                     painter->beginPath();
                     painter->moveTo(cx, h);
                     painter->bezierCurveTo(cx, midY, activeCX, h, activeCX, midY);
@@ -244,35 +193,9 @@ void GitGraphLaneRenderer::paint(QCanvasPainter* painter)
             else // isTailType
             {
                 // Tail lanes: the lane only comes from above and terminates here.
-                // Draw a top line plus a curve from the top down to the dot.
-
-                // // Straight top line
-                // if (!suppressTop)
-                // {
-                //     painter->beginPath();
-                //     painter->moveTo(cx, 0);
-                //     painter->lineTo(cx, midY);
-                //     painter->stroke();
-                // }
-
-                // Curve from the top of the lane down to the dot
+                // Draw a curve from the top down to the dot.
                 if (!suppressTop)
                 {
-                    // painter->setFillStyle(QColor(180, 0, 0)); // dark red
-                    // painter->beginPath();
-                    // painter->circle(cx, 0, mNodeRadius+1.0);
-                    // painter->fill();
-
-                    // painter->setFillStyle(QColor(0, 180, 0)); // dark green
-                    // painter->beginPath();
-                    // painter->circle(activeCX, midY, mNodeRadius+1.0);
-                    // painter->fill();
-
-                    // painter->setFillStyle(QColor(0, 0, 180)); // dark blue
-                    // painter->beginPath();
-                    // painter->circle(cx, midY, mNodeRadius+1.0);
-                    // painter->fill();
-
                     painter->beginPath();
                     painter->moveTo(cx, 0);
                     painter->bezierCurveTo(cx, midY, activeCX, 0, activeCX, midY);
