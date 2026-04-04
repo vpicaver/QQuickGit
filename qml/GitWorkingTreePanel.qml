@@ -17,6 +17,7 @@ Item {
 
     signal fileClicked(string filePath, bool isBinary, bool isImage, string statusText)
     signal commitRequested(string subject, string description)
+    signal discardRequested()
 
     function _statusColor(statusText: string): color {
         switch (statusText) {
@@ -272,9 +273,7 @@ Item {
         }
 
         onDiscarded: {
-            root.repository.resetHard("HEAD")
-            root.repository.cleanUntracked()
-            root.repository.checkStatus()
+            root.discardRequested()
         }
     }
 }
