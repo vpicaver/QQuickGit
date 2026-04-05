@@ -6,12 +6,15 @@ import QQuickGit
 Item {
     id: root
 
-    component SelectableText: TextEdit {
+    component SelectableText: TextArea {
         color: root.palette.text
         selectionColor: root.palette.highlight
         selectedTextColor: root.palette.highlightedText
         readOnly: true
         selectByMouse: true
+        background: null
+        padding: 0
+        wrapMode: TextEdit.NoWrap
     }
 
     required property GitRepository repository
@@ -79,7 +82,6 @@ Item {
         Label {
             Layout.fillWidth: true
             text: commitInfoLoader.body
-            font.pixelSize: GitFontScale.fontSizeBase
             wrapMode: Text.Wrap
             visible: commitInfoLoader.body !== ""
             opacity: 0.85
@@ -100,39 +102,34 @@ Item {
 
             Label {
                 text: qsTr("Author")
-                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: commitInfoLoader.author + " <" + commitInfoLoader.authorEmail + ">"
-                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             Label {
                 text: qsTr("Date")
-                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: Qt.formatDateTime(commitInfoLoader.timestamp, "yyyy-MM-dd hh:mm:ss")
-                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             Label {
                 text: qsTr("SHA")
-                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: root.commitSha
-                font.pixelSize: GitFontScale.fontSizeBase
                 font.family: "monospace"
+                font.pixelSize: GitFontScale.fontSizeSmall
             }
         }
 
@@ -143,7 +140,6 @@ Item {
 
             Label {
                 text: qsTr("Parent")
-                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
@@ -152,7 +148,6 @@ Item {
                 Layout.fillWidth: true
                 model: commitInfoLoader.parentShas
                 currentIndex: root.parentIndex
-                font.pixelSize: GitFontScale.fontSizeBase
 
                 delegate: ItemDelegate {
                     required property string modelData
@@ -160,8 +155,8 @@ Item {
                     width: parentCombo.width
                     contentItem: Label {
                         text: root.formatParentEntry(index)
-                        font.pixelSize: GitFontScale.fontSizeBase
                         font.family: "monospace"
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         elide: Text.ElideRight
                     }
                     highlighted: parentCombo.highlightedIndex === index
@@ -169,8 +164,8 @@ Item {
 
                 contentItem: Label {
                     text: root.formatParentEntry(parentCombo.currentIndex)
-                    font.pixelSize: GitFontScale.fontSizeBase
                     font.family: "monospace"
+                    font.pixelSize: GitFontScale.fontSizeSmall
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
                 }
@@ -200,7 +195,6 @@ Item {
 
         Label {
             text: qsTr("%1 changed file(s)").arg(fileListView.count)
-            font.pixelSize: GitFontScale.fontSizeBase
             font.weight: Font.DemiBold
             visible: fileListView.count > 0
         }
@@ -270,7 +264,6 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         text: fileDelegate.filePath
-                        font.pixelSize: GitFontScale.fontSizeBase
                         elide: Text.ElideLeft
                     }
 
@@ -332,7 +325,6 @@ Item {
             anchors.margins: 8
             text: commitInfoLoader.errorMessage
             color: root.errorColor
-            font.pixelSize: GitFontScale.fontSizeBase
             wrapMode: Text.Wrap
             verticalAlignment: Text.AlignVCenter
         }

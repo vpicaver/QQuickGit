@@ -127,7 +127,6 @@ Item {
                         text: fileDelegate.filePath
                         Layout.fillWidth: true
                         elide: Text.ElideLeft
-                        font.pixelSize: GitFontScale.fontSizeBase
                     }
 
                     Label {
@@ -188,7 +187,6 @@ Item {
                 objectName: "subjectField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("Commit subject (required)")
-                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             TextArea {
@@ -197,7 +195,6 @@ Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 60
                 placeholderText: qsTr("Description (optional)")
-                font.pixelSize: GitFontScale.fontSizeBase
                 wrapMode: TextEdit.Wrap
             }
 
