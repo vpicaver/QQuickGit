@@ -11,6 +11,7 @@ Dialog {
 
     anchors.centerIn: parent
     modal: true
+    implicitWidth: 400
     title: qsTr("Discard All Changes?")
 
     contentItem: ColumnLayout {

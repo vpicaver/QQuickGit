@@ -221,7 +221,7 @@ Item {
                     objectName: "discardButton"
                     text: qsTr("Discard All")
                     enabled: root._fileCount > 0 && root.repository.hasCommits
-                    palette.buttonText: enabled ? root.deletedColor : palette.mid
+                    palette.buttonText: discardButton.enabled ? root.deletedColor : root.palette.mid
 
                     onClicked: discardDialog.open()
                 }

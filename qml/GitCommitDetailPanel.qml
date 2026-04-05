@@ -148,6 +148,9 @@ Item {
                 Layout.fillWidth: true
                 model: commitInfoLoader.parentShas
                 currentIndex: root.parentIndex
+                displayText: root.formatParentEntry(currentIndex)
+                font.family: "monospace"
+                font.pixelSize: GitFontScale.fontSizeSmall
 
                 delegate: ItemDelegate {
                     required property string modelData
@@ -160,14 +163,6 @@ Item {
                         elide: Text.ElideRight
                     }
                     highlighted: parentCombo.highlightedIndex === index
-                }
-
-                contentItem: Label {
-                    text: root.formatParentEntry(parentCombo.currentIndex)
-                    font.family: "monospace"
-                    font.pixelSize: GitFontScale.fontSizeSmall
-                    elide: Text.ElideRight
-                    verticalAlignment: Text.AlignVCenter
                 }
 
                 onCurrentIndexChanged: {
