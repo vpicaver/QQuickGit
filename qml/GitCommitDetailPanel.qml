@@ -71,7 +71,7 @@ Item {
         Label {
             Layout.fillWidth: true
             text: commitInfoLoader.subject
-            font.pixelSize: 16
+            font.pixelSize: GitFontScale.fontSizeTitle
             font.weight: Font.Bold
             wrapMode: Text.Wrap
         }
@@ -79,7 +79,7 @@ Item {
         Label {
             Layout.fillWidth: true
             text: commitInfoLoader.body
-            font.pixelSize: 13
+            font.pixelSize: GitFontScale.fontSizeBase
             wrapMode: Text.Wrap
             visible: commitInfoLoader.body !== ""
             opacity: 0.85
@@ -100,38 +100,38 @@ Item {
 
             Label {
                 text: qsTr("Author")
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: commitInfoLoader.author + " <" + commitInfoLoader.authorEmail + ">"
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             Label {
                 text: qsTr("Date")
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: Qt.formatDateTime(commitInfoLoader.timestamp, "yyyy-MM-dd hh:mm:ss")
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             Label {
                 text: qsTr("SHA")
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
             SelectableText {
                 Layout.fillWidth: true
                 text: root.commitSha
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
                 font.family: "monospace"
             }
         }
@@ -143,7 +143,7 @@ Item {
 
             Label {
                 text: qsTr("Parent")
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
                 opacity: 0.6
             }
 
@@ -152,7 +152,7 @@ Item {
                 Layout.fillWidth: true
                 model: commitInfoLoader.parentShas
                 currentIndex: root.parentIndex
-                font.pixelSize: 12
+                font.pixelSize: GitFontScale.fontSizeBase
 
                 delegate: ItemDelegate {
                     required property string modelData
@@ -160,7 +160,7 @@ Item {
                     width: parentCombo.width
                     contentItem: Label {
                         text: root.formatParentEntry(index)
-                        font.pixelSize: 12
+                        font.pixelSize: GitFontScale.fontSizeBase
                         font.family: "monospace"
                         elide: Text.ElideRight
                     }
@@ -169,7 +169,7 @@ Item {
 
                 contentItem: Label {
                     text: root.formatParentEntry(parentCombo.currentIndex)
-                    font.pixelSize: 12
+                    font.pixelSize: GitFontScale.fontSizeBase
                     font.family: "monospace"
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
@@ -184,7 +184,7 @@ Item {
             Label {
                 visible: commitInfoLoader.parentShas.length >= 8
                 text: qsTr("Showing first 8 of %1 parents").arg(commitInfoLoader.parentShas.length)
-                font.pixelSize: 11
+                font.pixelSize: GitFontScale.fontSizeSmall
                 font.italic: true
                 opacity: 0.5
             }
@@ -200,7 +200,7 @@ Item {
 
         Label {
             text: qsTr("%1 changed file(s)").arg(fileListView.count)
-            font.pixelSize: 12
+            font.pixelSize: GitFontScale.fontSizeBase
             font.weight: Font.DemiBold
             visible: fileListView.count > 0
         }
@@ -259,7 +259,7 @@ Item {
 
                     Label {
                         text: fileDelegate.statusText.charAt(0)
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         font.weight: Font.Bold
                         font.family: "monospace"
                         color: root.statusColor(fileDelegate.statusText)
@@ -270,14 +270,14 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         text: fileDelegate.filePath
-                        font.pixelSize: 12
+                        font.pixelSize: GitFontScale.fontSizeBase
                         elide: Text.ElideLeft
                     }
 
                     Label {
                         visible: fileDelegate.isBinary && !fileDelegate.isImage
                         text: qsTr("binary")
-                        font.pixelSize: 10
+                        font.pixelSize: GitFontScale.fontSizeCaption
                         font.italic: true
                         opacity: 0.5
                         padding: 2
@@ -293,7 +293,7 @@ Item {
                     Label {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.addedLines > 0
                         text: "+" + fileDelegate.addedLines
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         font.family: "monospace"
                         color: root.addedColor
                     }
@@ -301,7 +301,7 @@ Item {
                     Label {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.deletedLines > 0
                         text: "\u2212" + fileDelegate.deletedLines
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         font.family: "monospace"
                         color: root.deletedColor
                     }
@@ -332,7 +332,7 @@ Item {
             anchors.margins: 8
             text: commitInfoLoader.errorMessage
             color: root.errorColor
-            font.pixelSize: 12
+            font.pixelSize: GitFontScale.fontSizeBase
             wrapMode: Text.Wrap
             verticalAlignment: Text.AlignVCenter
         }

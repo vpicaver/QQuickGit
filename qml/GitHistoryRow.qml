@@ -125,42 +125,42 @@ Item {
             }
         }
 
-        Text {
+        QC.Label {
             Layout.fillWidth: true
             text: row.commitMessage
             elide: Text.ElideRight
             color: row.palette.text
-            font.pixelSize: 13
+            font.pixelSize: GitFontScale.fontSizeBase
             font.italic: row._isSynthetic
             font.bold: row.isHeadCommit
         }
 
-        Text {
+        QC.Label {
             text: row.commitAuthor
             color: row.palette.text
             opacity: 0.6
-            font.pixelSize: 12
+            font.pixelSize: GitFontScale.fontSizeBase
             Layout.preferredWidth: 100
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignRight
         }
 
-        Text {
+        QC.Label {
             text: row.commitSha.substring(0, 7)
             color: row.palette.text
             opacity: 0.4
-            font.pixelSize: 12
+            font.pixelSize: GitFontScale.fontSizeBase
             font.family: "monospace"
             Layout.preferredWidth: 56
             horizontalAlignment: Text.AlignRight
             visible: !row._isSynthetic
         }
 
-        Text {
+        QC.Label {
             text: Qt.formatDateTime(row.commitTimestamp, "yyyy-MM-dd")
             color: row.palette.text
             opacity: 0.4
-            font.pixelSize: 12
+            font.pixelSize: GitFontScale.fontSizeBase
             Layout.preferredWidth: 80
             horizontalAlignment: Text.AlignRight
         }

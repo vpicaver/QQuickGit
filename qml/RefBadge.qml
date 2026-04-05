@@ -33,20 +33,20 @@ Item {
         anchors.centerIn: parent
         spacing: 3
 
-        Text {
+        Label {
             id: checkText
             visible: root.checked
             text: "\u2713"
             color: root.accentColor
-            font.pixelSize: 11
+            font.pixelSize: GitFontScale.fontSizeSmall
             font.weight: Font.Bold
         }
 
-        Text {
+        Label {
             id: labelText
             text: root.text
             color: root.textColor
-            font.pixelSize: 11
+            font.pixelSize: GitFontScale.fontSizeSmall
             font.weight: root.checked ? Font.Bold : Font.Medium
         }
     }

@@ -63,12 +63,16 @@ file(GLOB qquickgit_QML_FILES CONFIGURE_DEPENDS "qml/*.qml" "qml/*.js")
 # Define the list of QML singletons
 set(qml_singletons
     # "UnitDefaults.qml"
+    "qml/GitFontScale.qml"
 )
 
 # Remove the singleton files from the regular QML file list
 foreach(singleton ${qml_singletons})
-    list(REMOVE_ITEM qquickgit_QML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/qml/${singleton}")
+    list(REMOVE_ITEM qquickgit_QML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/${singleton}")
 endforeach()
+
+# Mark singleton QML files so Qt registers them as singletons
+set_source_files_properties(${qml_singletons} PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 # Make the remaining QML files relative to the project directory
 set(qquickgit_RELATIVE_QML_FILES "")

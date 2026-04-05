@@ -44,7 +44,7 @@ Item {
             Layout.rightMargin: 12
             Layout.bottomMargin: 4
             text: qsTr("Uncommitted Changes (%1 files)").arg(root._fileCount)
-            font.pixelSize: 14
+            font.pixelSize: GitFontScale.fontSizeUI
             font.bold: true
             elide: Text.ElideRight
         }
@@ -116,7 +116,7 @@ Item {
 
                     Label {
                         text: fileDelegate.statusText.charAt(0)
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         font.bold: true
                         color: fileDelegate._statusColor
                         horizontalAlignment: Text.AlignHCenter
@@ -127,27 +127,27 @@ Item {
                         text: fileDelegate.filePath
                         Layout.fillWidth: true
                         elide: Text.ElideLeft
-                        font.pixelSize: 13
+                        font.pixelSize: GitFontScale.fontSizeBase
                     }
 
                     Label {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.addedLines > 0
                         text: "+" + fileDelegate.addedLines
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         color: root.addedColor
                     }
 
                     Label {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.deletedLines > 0
                         text: "-" + fileDelegate.deletedLines
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         color: root.deletedColor
                     }
 
                     Label {
                         visible: !fileDelegate.lineStatsFetched
                         text: "-"
-                        font.pixelSize: 11
+                        font.pixelSize: GitFontScale.fontSizeSmall
                         opacity: 0.4
                     }
                 }
@@ -188,7 +188,7 @@ Item {
                 objectName: "subjectField"
                 Layout.fillWidth: true
                 placeholderText: qsTr("Commit subject (required)")
-                font.pixelSize: 13
+                font.pixelSize: GitFontScale.fontSizeBase
             }
 
             TextArea {
@@ -197,7 +197,7 @@ Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 60
                 placeholderText: qsTr("Description (optional)")
-                font.pixelSize: 13
+                font.pixelSize: GitFontScale.fontSizeBase
                 wrapMode: TextEdit.Wrap
             }
 
@@ -233,7 +233,7 @@ Item {
             Label {
                 Layout.fillWidth: true
                 text: qsTr("Note: All modified files will be committed.")
-                font.pixelSize: 11
+                font.pixelSize: GitFontScale.fontSizeSmall
                 opacity: 0.5
                 horizontalAlignment: Text.AlignHCenter
                 visible: root._fileCount > 0
