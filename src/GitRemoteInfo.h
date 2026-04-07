@@ -3,12 +3,14 @@
 
 #include "QQuickGitExport.h"
 #include <QObject>
+#include <QQmlEngine>
 #include <QUrl>
 
 namespace QQuickGit {
 class QQUICKGIT_EXPORT GitRemoteInfo
 {
     Q_GADGET
+    QML_VALUE_TYPE(gitRemoteInfo)
 
     Q_PROPERTY(QString name READ name)
     Q_PROPERTY(QUrl url READ url)

@@ -2285,6 +2285,7 @@ QFuture<GitRepository::RemoteConnectionReport> GitRepository::testRemoteConnecti
 
             git_remote_callbacks callbacks = GIT_REMOTE_CALLBACKS_INIT;
             callbacks.credentials = GitRepositoryData::credentailCallBack;
+            callbacks.certificate_check = GitRepositoryData::certificateCheckCallback;
 
             check(git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nullptr, nullptr));
             report.transportOk = true;
