@@ -2349,3 +2349,113 @@ TEST_CASE("GitRepository hasCommits returns false for new repo and true after fi
 
     CHECK(repo.hasCommits());
 }
+
+TEST_CASE("GitRepository fetch succeeds when objects/pack directory is missing", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-pack.git"));
+    const QString localPath = tempDir.absoluteFilePath(QStringLiteral("local"));
+
+    TestUtilities::initBareRepo(remotePath);
+    REQUIRE(QDir().mkpath(localPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    // Create a repo, add a remote, push an initial commit so there is
+    // something to fetch.
+    GitRepository author;
+    author.setDirectory(QDir(localPath));
+    author.initRepository();
+    author.setAccount(&account);
+    author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+    TestUtilities::createFileAndCommit(author, "file.txt", "content", "Initial");
+    auto pushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, defaultTimeout));
+    REQUIRE(!pushFuture.result().hasError());
+
+    // Remove objects/pack to simulate the condition left by
+    // git_repository_init_ext on some platforms.
+    QDir gitDir(QDir(localPath).filePath(QStringLiteral(".git")));
+    QDir packDir(gitDir.filePath(QStringLiteral("objects/pack")));
+    if (packDir.exists()) {
+        REQUIRE(packDir.removeRecursively());
+    }
+    CHECK(!packDir.exists());
+
+    // Push a new commit from a separate clone so the remote advances.
+    const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
+    GitRepository peer;
+    peer.setDirectory(QDir(peerPath));
+    peer.setAccount(&account);
+    waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+    TestUtilities::createFileAndCommit(peer, "peer.txt", "peer", "Peer commit");
+    auto peerPush = peer.push();
+    REQUIRE(AsyncFuture::waitForFinished(peerPush, defaultTimeout));
+    REQUIRE(!peerPush.result().hasError());
+
+    // Fetch should recreate objects/pack and succeed.
+    auto fetchFuture = author.fetch();
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, defaultTimeout));
+    INFO("Fetch error: " << fetchFuture.result().errorMessage().toStdString());
+    CHECK(!fetchFuture.result().hasError());
+    CHECK(packDir.exists());
+}
+
+TEST_CASE("GitRepository pullRebaseOrMerge fast-forwards after fetch updates refs", "[GitRepository]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-stale.git"));
+    const QString authorPath = tempDir.absoluteFilePath(QStringLiteral("author"));
+    const QString peerPath = tempDir.absoluteFilePath(QStringLiteral("peer"));
+
+    TestUtilities::initBareRepo(remotePath);
+    REQUIRE(QDir().mkpath(authorPath));
+
+    Account account;
+    account.setName(QStringLiteral("Tester"));
+    account.setEmail(QStringLiteral("tester@example.com"));
+
+    // Set up a repo with one commit pushed to the bare remote.
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.initRepository();
+    author.setAccount(&account);
+    author.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+
+    TestUtilities::createFileAndCommit(author, "state.txt", "initial", "Initial");
+    auto initialPush = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(initialPush, defaultTimeout));
+    REQUIRE(!initialPush.result().hasError());
+
+    const QString headBefore = TestUtilities::getHeadSha(QDir(authorPath));
+    REQUIRE(!headBefore.isEmpty());
+
+    // Advance the remote from a peer clone.
+    GitRepository peer;
+    peer.setDirectory(QDir(peerPath));
+    peer.setAccount(&account);
+    waitForClone(peer.clone(QUrl::fromLocalFile(remotePath)));
+    TestUtilities::createFileAndCommit(peer, "state.txt", "advanced", "Peer advance");
+    auto peerPush = peer.push();
+    REQUIRE(AsyncFuture::waitForFinished(peerPush, defaultTimeout));
+    REQUIRE(!peerPush.result().hasError());
+
+    const QString peerHead = TestUtilities::getHeadSha(QDir(peerPath));
+    REQUIRE(!peerHead.isEmpty());
+    REQUIRE(peerHead != headBefore);
+
+    // Pull on the original author repo.  Before the fix, the stale refdb
+    // meant merge() saw origin/main at the old commit and returned
+    // AlreadyUpToDate, leaving HEAD unchanged.
+    auto pullFuture = author.pullRebaseOrMerge();
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, defaultTimeout));
+    INFO("Pull error: " << pullFuture.result().errorMessage().toStdString());
+    REQUIRE(!pullFuture.result().hasError());
+    CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::FastForward);
+
+    const QString headAfter = TestUtilities::getHeadSha(QDir(authorPath));
+    CHECK(headAfter == peerHead);
+}

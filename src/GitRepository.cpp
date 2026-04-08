@@ -1744,6 +1744,15 @@ public:
         }
     }
 
+    // Reopen the repo handle so the refdb picks up refs written
+    // by a separate handle (e.g. fetchRefsForDirectory).
+    void reopenRepository() {
+        auto path = mDirectory.absolutePath().toLocal8Bit();
+        git_repository_free(repo);
+        repo = nullptr;
+        check(git_repository_open(&repo, path));
+    }
+
     void unregisterImageProvider() {
         if (mImageProviderId >= 0) {
             if (auto* provider = GitCommitImageProvider::instance()) {
@@ -2047,6 +2056,14 @@ void GitRepository::initRepository()
         opts.flags = GIT_REPOSITORY_INIT_MKPATH;
         opts.initial_head = "main";
         check(git_repository_init_ext(&(d->repo), path, &opts));
+
+        // libgit2 init may not create objects/pack, which is needed for fetch.
+        if (d->repo) {
+            const char* gitPath = git_repository_path(d->repo);
+            if (gitPath) {
+                QDir(QString::fromUtf8(gitPath)).mkpath(QStringLiteral("objects/pack"));
+            }
+        }
 
         // Set init.defaultBranch so that git_repository_is_empty() recognises
         // refs/heads/main as the initial (unborn) branch.  Without this,
@@ -2395,6 +2412,14 @@ GitRepository::GitFuture fetchRefsForDirectory(const QDir& repositoryDir,
             git_repository* repo = nullptr;
             GitRepositoryData::check(git_repository_open(&repo, path));
             std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+            // Ensure objects/pack exists — libgit2 writes temporary pack
+            // files here during fetch and produces a wrong path if it is
+            // missing (e.g. repos created by git_repository_init_ext).
+            const char* gitDir = git_repository_path(repo);
+            if (gitDir) {
+                QDir(QString::fromUtf8(gitDir)).mkpath(QStringLiteral("objects/pack"));
+            }
 
             git_remote* gitRemote = nullptr;
             GitRepositoryData::check(git_remote_lookup(&gitRemote, repo, fixedRemote.toLocal8Bit()));
@@ -2996,6 +3021,8 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                                                                                     fetchResult.errorCode()));
                              }
 
+                             d->reopenRepository();
+
                              auto mergeResult = mtry(
                                  [=]() mutable ->Result<MergeResult>
                                  {
@@ -3047,6 +3074,8 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                         return AsyncFuture::completed(Result<MergeResult>(fetchResult.errorMessage(),
                                                                           fetchResult.errorCode()));
                     }
+
+                    d->reopenRepository();
 
                     auto pullResult = mtry([=]() mutable -> Result<MergeResult> {
                         const auto currentBranch = headBranchName();
@@ -3143,6 +3172,8 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
                     if (fetchResult.hasError()) {
                         return AsyncFuture::completed(fetchResult);
                     }
+
+                    d->reopenRepository();
 
                     auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
                         const int safeTotal = std::max(1, total);
