@@ -104,6 +104,25 @@ void ensureStandardLfsFilterConfig(git_repository* repo)
     git_config_set_bool(config, "filter.lfs.required", 1);
 }
 
+#ifdef Q_OS_WIN
+// Enable long path support to avoid MAX_PATH (260 char) failures
+// in git_status_list_new and other libgit2 operations.
+void enableLongPaths(git_repository* repo)
+{
+    if (!repo) {
+        return;
+    }
+
+    git_config* cfg = nullptr;
+    if (git_repository_config(&cfg, repo) != GIT_OK || cfg == nullptr) {
+        return;
+    }
+
+    auto guard = qScopeGuard([&cfg]() { git_config_free(cfg); });
+    git_config_set_bool(cfg, "core.longpaths", 1);
+}
+#endif
+
 int parseHttpStatusFromMessage(const QString& message)
 {
     static const QRegularExpression expression(QStringLiteral("httpStatus=(\\d{3})"));
@@ -2072,11 +2091,15 @@ void GitRepository::initRepository()
         if (d->repo) {
             git_config* cfg = nullptr;
             if (git_repository_config(&cfg, d->repo) == GIT_OK && cfg) {
+                auto guard = qScopeGuard([&cfg]() { git_config_free(cfg); });
                 git_config_set_string(cfg, "init.defaultBranch", "main");
-                git_config_free(cfg);
             }
         }
     }
+
+#ifdef Q_OS_WIN
+    enableLongPaths(d->repo);
+#endif
 
     if (d->repo) {
         const char* gitPath = git_repository_path(d->repo);
@@ -2524,6 +2547,18 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         clone_opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
                         clone_opts.checkout_opts.progress_cb = GitRepositoryData::cloneCheckoutProgress;
                         clone_opts.checkout_opts.progress_payload = static_cast<void*>(&callbackPayload);
+
+#ifdef Q_OS_WIN
+                        // Enable long path support before the checkout phase
+                        // writes files to disk.
+                        clone_opts.repository_cb = [](git_repository** out, const char* path, int bare, void* /*payload*/) -> int {
+                            int err = git_repository_init(out, path, bare);
+                            if (err == GIT_OK && *out) {
+                                enableLongPaths(*out);
+                            }
+                            return err;
+                        };
+#endif
 
                         auto urlByteArray = url.toString().toLocal8Bit();
                         auto repoDirectory = dir.absolutePath().toLocal8Bit();

@@ -2459,3 +2459,115 @@ TEST_CASE("GitRepository pullRebaseOrMerge fast-forwards after fetch updates ref
     const QString headAfter = TestUtilities::getHeadSha(QDir(authorPath));
     CHECK(headAfter == peerHead);
 }
+
+#ifdef Q_OS_WIN
+static bool getConfigBool(git_repository* repo, const char* key)
+{
+    git_config* cfg = nullptr;
+    if (git_repository_config(&cfg, repo) != GIT_OK || !cfg) {
+        return false;
+    }
+    int value = 0;
+    git_config_get_bool(&value, cfg, key);
+    git_config_free(cfg);
+    return value != 0;
+}
+#endif
+
+TEST_CASE("GitRepository initRepository enables core.longpaths on Windows", "[GitRepository][LongPath]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+#ifdef Q_OS_WIN
+    git_repository* raw = nullptr;
+    REQUIRE(git_repository_open(&raw, tempDir.path().toLocal8Bit().constData()) == GIT_OK);
+    auto guard = qScopeGuard([&raw]() { git_repository_free(raw); });
+
+    CHECK(getConfigBool(raw, "core.longpaths"));
+#endif
+}
+
+TEST_CASE("GitRepository clone enables core.longpaths on Windows", "[GitRepository][LongPath]")
+{
+    auto tempDir = TestUtilities::createUniqueTempDir();
+    const QString remotePath = tempDir.absoluteFilePath(QStringLiteral("remote-lp.git"));
+    const QString seedPath = tempDir.absoluteFilePath(QStringLiteral("seed-lp"));
+    const QString clonePath = tempDir.absoluteFilePath(QStringLiteral("clone-lp"));
+
+    // Create a bare remote with at least one commit so clone succeeds.
+    TestUtilities::initBareRepo(remotePath);
+    REQUIRE(QDir().mkpath(seedPath));
+    {
+        GitRepository seed;
+        seed.setDirectory(QDir(seedPath));
+        seed.initRepository();
+        seed.addRemote(QStringLiteral("origin"), QUrl::fromLocalFile(remotePath));
+        TestUtilities::createFileAndCommit(seed, "init.txt", "hello", "Initial commit");
+        auto pushFuture = seed.push();
+        REQUIRE(AsyncFuture::waitForFinished(pushFuture, defaultTimeout));
+        REQUIRE(!pushFuture.result().hasError());
+    }
+
+    // Clone into a path that does not yet exist — clone creates it.
+    GitRepository repo;
+    repo.setDirectory(QDir(clonePath));
+    waitForClone(repo.clone(QUrl::fromLocalFile(remotePath)));
+
+#ifdef Q_OS_WIN
+    git_repository* raw = nullptr;
+    REQUIRE(git_repository_open(&raw, clonePath.toLocal8Bit().constData()) == GIT_OK);
+    auto guard = qScopeGuard([&raw]() { git_repository_free(raw); });
+
+    CHECK(getConfigBool(raw, "core.longpaths"));
+#endif
+}
+
+TEST_CASE("GitRepository status works with deeply nested paths", "[GitRepository][LongPath]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    GitRepository repo;
+    repo.setDirectory(QDir(tempDir.path()));
+    repo.initRepository();
+
+    TestUtilities::createFileAndCommit(repo, "root.txt", "hello", "Initial commit");
+
+    // Build a path deep enough to exceed MAX_PATH (260 chars) on Windows.
+    // Each segment is 50 chars, so ~6 levels pushes the total path well past 260.
+    QDir dir(tempDir.path());
+    const QString segment = QString(50, QLatin1Char('d'));
+    for (int i = 0; i < 6; ++i) {
+        REQUIRE(dir.mkdir(segment));
+        REQUIRE(dir.cd(segment));
+    }
+
+    const QString deepRelPath = QString((segment + QStringLiteral("/")).repeated(6)) + QStringLiteral("deep.txt");
+    INFO("Full path length: " << QDir(tempDir.path()).filePath(deepRelPath).size());
+
+    {
+        QFile f(dir.filePath(QStringLiteral("deep.txt")));
+        REQUIRE(f.open(QFile::WriteOnly | QFile::Text));
+        f.write("deep content");
+        f.close();
+    }
+
+    // checkStatus should detect the new file despite the long path.
+    repo.checkStatus();
+    CHECK(repo.modifiedFileCount() > 0);
+
+    // Commit and verify status returns to clean.
+    Account account;
+    account.setName(QStringLiteral("Test Author"));
+    account.setEmail(QStringLiteral("test@example.com"));
+    repo.setAccount(&account);
+    repo.commitAll(QStringLiteral("Add deeply nested file"), QString());
+    repo.checkStatus();
+    CHECK(repo.modifiedFileCount() == 0);
+    CHECK(repo.hasCommits());
+}
