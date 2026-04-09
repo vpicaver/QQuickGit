@@ -1507,6 +1507,9 @@ TEST_CASE("Lfs commits keep working tree PNG for multiple commits", "[LFS]") {
 }
 
 TEST_CASE("Lfs hydration preserves executable bit after reset", "[LFS]") {
+#ifdef Q_OS_WIN
+    SKIP("NTFS does not support Unix executable permission bits");
+#endif
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
@@ -2094,10 +2097,10 @@ TEST_CASE("LfsStore canonicalizes git dir path for registry lookups", "[LFS]") {
     REQUIRE(!canonicalGitDirPath.isEmpty());
 
     const QString symlinkGitDirPath = QDir(tempDir.path()).filePath(QStringLiteral("gitdir-link"));
-    if (!QFile::link(realGitDirPath, symlinkGitDirPath)) {
+    if (!QFile::link(realGitDirPath, symlinkGitDirPath)
+        || !QFileInfo(symlinkGitDirPath).isSymLink()) {
         SKIP("Could not create git directory symlink for canonical-path test");
     }
-    REQUIRE(QFileInfo(symlinkGitDirPath).isSymLink());
     REQUIRE(QFileInfo(symlinkGitDirPath).canonicalFilePath() == canonicalGitDirPath);
 
     auto store = std::make_shared<LfsStore>(symlinkGitDirPath);
