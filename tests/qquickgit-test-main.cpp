@@ -7,6 +7,12 @@
 #include <QThread>
 #include <QSettings>
 
+//OpenSSL applink — must be in the .exe, not a DLL, so OpenSSL's
+//shared library can find OPENSSL_Applink during cleanup at exit.
+#ifdef Q_OS_WINDOWS
+#include <openssl/applink.c>
+#endif
+
 //Our inculdes
 #include "GitRepository.h"
 
@@ -37,6 +43,8 @@ int main( int argc, char* argv[] )
     }, Qt::QueuedConnection);
 
     app.exec();
+
+    GitRepository::shutdownGitEngine();
 
     return result;
 }
