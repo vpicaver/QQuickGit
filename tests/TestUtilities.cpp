@@ -8,12 +8,25 @@
 #include <QJsonDocument>
 #include <QDirIterator>
 #include <QFile>
+#include <QSignalSpy>
 
 //libgit2
 #include "git2.h"
 
 //Catch includes
 #include <catch2/catch_test_macros.hpp>
+
+// commitAll() emits refsChanged which triggers checkStatusAsync() in the background.
+// This helper drains that pending async callback so it doesn't race with later test
+// code that sets up dirty state and calls checkStatus() synchronously.
+static void waitForAsyncStatusAfterCommit(QQuickGit::GitRepository& repo)
+{
+    QSignalSpy statusSpy(&repo, &QQuickGit::GitRepository::modifiedFileCountChanged);
+    if (!statusSpy.wait(5000)) {
+        QCoreApplication::processEvents();
+    }
+    repo.checkStatus();
+}
 
 TestUtilities::TestUtilities()
 {
@@ -97,7 +110,7 @@ void TestUtilities::createFileAndCommit(QQuickGit::GitRepository& repo, const QS
     account.setEmail("test@example.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
-    repo.checkStatus();
+    waitForAsyncStatusAfterCommit(repo);
 }
 
 void TestUtilities::createBinaryFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
@@ -116,7 +129,7 @@ void TestUtilities::createBinaryFileAndCommit(QQuickGit::GitRepository& repo, co
     account.setEmail("test@example.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
-    repo.checkStatus();
+    waitForAsyncStatusAfterCommit(repo);
 }
 
 void TestUtilities::deleteFileAndCommit(QQuickGit::GitRepository& repo, const QString& filename,
@@ -132,7 +145,7 @@ void TestUtilities::deleteFileAndCommit(QQuickGit::GitRepository& repo, const QS
     account.setEmail("test@example.com");
     repo.setAccount(&account);
     repo.commitAll(message, QString());
-    repo.checkStatus();
+    waitForAsyncStatusAfterCommit(repo);
 }
 
 QString TestUtilities::getHeadSha(const QDir& dir)
