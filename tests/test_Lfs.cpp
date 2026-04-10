@@ -2012,6 +2012,68 @@ TEST_CASE("Lfs policy updates managed .gitattributes section", "[LFS]") {
     CHECK(updatedContents.contains(QByteArray("*.pdf filter=lfs diff=lfs merge=lfs -text")));
 }
 
+TEST_CASE("ensureLfsAttributes is idempotent with trailing newline", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    const QString attributesPath = repoDir.filePath(QStringLiteral(".gitattributes"));
+    const QByteArray initialContents = readFileBytes(attributesPath);
+    REQUIRE(!initialContents.isEmpty());
+
+    SECTION("Calling initRepository again does not modify the file") {
+        repository.initRepository();
+        CHECK(readFileBytes(attributesPath) == initialContents);
+    }
+
+    SECTION("Trailing newline does not grow on repeated calls") {
+        QByteArray withNewline = initialContents;
+        if (!withNewline.endsWith('\n')) {
+            withNewline.append('\n');
+        }
+        REQUIRE(writeTextFile(attributesPath, withNewline));
+
+        repository.initRepository();
+        const QByteArray afterFirstInit = readFileBytes(attributesPath);
+
+        repository.initRepository();
+        CHECK(readFileBytes(attributesPath) == afterFirstInit);
+    }
+
+    SECTION("User content before managed section is preserved") {
+        const QByteArray userLine = "* text=auto\n";
+        QByteArray existing = readFileBytes(attributesPath);
+        if (!existing.endsWith('\n')) {
+            existing.append('\n');
+        }
+        REQUIRE(writeTextFile(attributesPath, userLine + existing));
+
+        repository.initRepository();
+        const QByteArray afterFirst = readFileBytes(attributesPath);
+        CHECK(afterFirst.startsWith(userLine));
+
+        repository.initRepository();
+        CHECK(readFileBytes(attributesPath) == afterFirst);
+    }
+
+    SECTION("Empty file produces stable output") {
+        REQUIRE(writeTextFile(attributesPath, QByteArray()));
+
+        repository.initRepository();
+        const QByteArray afterFirst = readFileBytes(attributesPath);
+        REQUIRE(!afterFirst.isEmpty());
+        CHECK(!afterFirst.startsWith('\n'));
+
+        repository.initRepository();
+        CHECK(readFileBytes(attributesPath) == afterFirst);
+    }
+}
+
 TEST_CASE("Lfs empty policy does not write managed .gitattributes section", "[LFS]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

@@ -2151,7 +2151,9 @@ void GitRepository::ensureLfsAttributes()
     const QString beginMarker = QStringLiteral("# %1:begin-lfs").arg(tag);
     const QString endMarker = QStringLiteral("# %1:end-lfs").arg(tag);
 
-    QStringList lines = QString::fromUtf8(existingContents).split('\n');
+    QStringList lines = existingContents.isEmpty()
+                            ? QStringList{}
+                            : QString::fromUtf8(existingContents).split('\n');
     QStringList before;
     QStringList after;
     int beginIndex = -1;
@@ -2199,7 +2201,8 @@ void GitRepository::ensureLfsAttributes()
         combined.append(managed);
     }
     if (!after.isEmpty()) {
-        if (!combined.isEmpty() && !combined.last().isEmpty()) {
+        if (!combined.isEmpty() && !combined.last().isEmpty()
+            && !after.first().isEmpty()) {
             combined.append(QString());
         }
         combined.append(after);
