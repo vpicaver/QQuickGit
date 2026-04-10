@@ -420,8 +420,8 @@ TEST_CASE("Render git-test-repository history to PNG", "[visual][clone]")
     composite.fill(Qt::white);
 
     QPainter painter(&composite);
-    QFont monoFont("monospace", 20);
-    QFont smallMonoFont("monospace", 16);
+    QFont monoFont("Courier New", 20);
+    QFont smallMonoFont("Courier New", 16);
     QFont labelFont("sans-serif", 22);
     QFont titleFont("sans-serif", 26);
     titleFont.setBold(true);

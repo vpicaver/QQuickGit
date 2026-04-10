@@ -147,7 +147,7 @@ Item {
             text: row.commitSha.substring(0, 7)
             color: row.palette.text
             opacity: 0.4
-            font.family: "monospace"
+            font.family: GitFontScale.fontFamilyMono
             font.pixelSize: GitFontScale.fontSizeSmall
             Layout.preferredWidth: 56
             horizontalAlignment: Text.AlignRight

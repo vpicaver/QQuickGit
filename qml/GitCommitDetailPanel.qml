@@ -128,7 +128,7 @@ Item {
             SelectableText {
                 Layout.fillWidth: true
                 text: root.commitSha
-                font.family: "monospace"
+                font.family: GitFontScale.fontFamilyMono
                 font.pixelSize: GitFontScale.fontSizeSmall
             }
         }
@@ -149,7 +149,7 @@ Item {
                 model: commitInfoLoader.parentShas
                 currentIndex: root.parentIndex
                 displayText: root.formatParentEntry(currentIndex)
-                font.family: "monospace"
+                font.family: GitFontScale.fontFamilyMono
                 font.pixelSize: GitFontScale.fontSizeSmall
 
                 delegate: ItemDelegate {
@@ -158,7 +158,7 @@ Item {
                     width: parentCombo.width
                     contentItem: Label {
                         text: root.formatParentEntry(index)
-                        font.family: "monospace"
+                        font.family: GitFontScale.fontFamilyMono
                         font.pixelSize: GitFontScale.fontSizeSmall
                         elide: Text.ElideRight
                     }
@@ -250,7 +250,7 @@ Item {
                         text: fileDelegate.statusText.charAt(0)
                         font.pixelSize: GitFontScale.fontSizeSmall
                         font.weight: Font.Bold
-                        font.family: "monospace"
+                        font.family: GitFontScale.fontFamilyMono
                         color: root.statusColor(fileDelegate.statusText)
                         Layout.preferredWidth: 14
                         horizontalAlignment: Text.AlignHCenter
@@ -282,7 +282,7 @@ Item {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.addedLines > 0
                         text: "+" + fileDelegate.addedLines
                         font.pixelSize: GitFontScale.fontSizeSmall
-                        font.family: "monospace"
+                        font.family: GitFontScale.fontFamilyMono
                         color: root.addedColor
                     }
 
@@ -290,7 +290,7 @@ Item {
                         visible: fileDelegate.lineStatsFetched && fileDelegate.deletedLines > 0
                         text: "\u2212" + fileDelegate.deletedLines
                         font.pixelSize: GitFontScale.fontSizeSmall
-                        font.family: "monospace"
+                        font.family: GitFontScale.fontFamilyMono
                         color: root.deletedColor
                     }
                 }

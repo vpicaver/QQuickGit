@@ -11,4 +11,5 @@ QtObject {
     property int fontSizeUI:      14
     property int fontSizeBase:    16
     property int fontSizeTitle:   20
+    property string fontFamilyMono: "Courier New"
 }
