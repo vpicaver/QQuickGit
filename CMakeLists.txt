@@ -132,44 +132,46 @@ target_include_directories(qquickgit
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# Collect source files qquickgitLib
-file(GLOB qquickgit-test_CPP_FILES CONFIGURE_DEPENDS "tests/*.cpp")
-file(GLOB qquickgit-testlib_H_FILES CONFIGURE_DEPENDS "tests/*.h")
+if(NOT MOBILE_BUILD)
+    # Collect source files qquickgitLib
+    file(GLOB qquickgit-test_CPP_FILES CONFIGURE_DEPENDS "tests/*.cpp")
+    file(GLOB qquickgit-testlib_H_FILES CONFIGURE_DEPENDS "tests/*.h")
 
-add_library(qquickgit-lfs-test-server STATIC
-    tests/lfs/LfsServer.cpp
-    tests/lfs/LfsServer.h
-)
+    add_library(qquickgit-lfs-test-server STATIC
+        tests/lfs/LfsServer.cpp
+        tests/lfs/LfsServer.h
+    )
 
-target_link_libraries(qquickgit-lfs-test-server
-    PUBLIC
-    Qt6::Core
-    Qt6::Network
-)
+    target_link_libraries(qquickgit-lfs-test-server
+        PUBLIC
+        Qt6::Core
+        Qt6::Network
+    )
 
-target_include_directories(qquickgit-lfs-test-server
-    PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests/lfs
-)
+    target_include_directories(qquickgit-lfs-test-server
+        PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/lfs
+    )
 
-qt_add_executable(qquickgit-test
-    ${qquickgit-test_CPP_FILES}
-    ${qquickgit-test_H_FILES}
-)
+    qt_add_executable(qquickgit-test
+        ${qquickgit-test_CPP_FILES}
+        ${qquickgit-test_H_FILES}
+    )
 
-target_link_libraries(qquickgit-test
-    PRIVATE
-    qquickgit
-    qquickgit-lfs-test-server
-    Catch2::Catch2
-    Qt6::Test
-    Qt6::Network
-    SignalSpyChecker
-)
+    target_link_libraries(qquickgit-test
+        PRIVATE
+        qquickgit
+        qquickgit-lfs-test-server
+        Catch2::Catch2
+        Qt6::Test
+        Qt6::Network
+        SignalSpyChecker
+    )
 
-target_include_directories(qquickgit-test
-    PRIVATE
-    $<TARGET_PROPERTY:libgit2::libgit2,INTERFACE_INCLUDE_DIRECTORIES>
-)
+    target_include_directories(qquickgit-test
+        PRIVATE
+        $<TARGET_PROPERTY:libgit2::libgit2,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+endif()
 
 
