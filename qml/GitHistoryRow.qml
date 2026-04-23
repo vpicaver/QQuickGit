@@ -138,6 +138,7 @@ Item {
             text: row.commitAuthor
             color: row.palette.text
             opacity: 0.6
+            font.bold: row.isHeadCommit
             Layout.preferredWidth: 100
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignRight
@@ -149,6 +150,7 @@ Item {
             opacity: 0.4
             font.family: GitFontScale.fontFamilyMono
             font.pixelSize: GitFontScale.fontSizeSmall
+            font.bold: row.isHeadCommit
             Layout.preferredWidth: 56
             horizontalAlignment: Text.AlignRight
             visible: !row._isSynthetic
@@ -158,6 +160,7 @@ Item {
             text: Qt.formatDateTime(row.commitTimestamp, "yyyy-MM-dd")
             color: row.palette.text
             opacity: 0.4
+            font.bold: row.isHeadCommit
             Layout.preferredWidth: 80
             horizontalAlignment: Text.AlignRight
         }
