@@ -212,8 +212,12 @@ Item {
 
                     // commitAll() requires account() to be set.
                     // CaveWhere guarantees this at startup before the UI is reachable.
-                    onClicked: root.commitRequested(subjectField.text.trim(),
-                                                    descriptionField.text.trim())
+                    onClicked: {
+                        root.commitRequested(subjectField.text.trim(),
+                                             descriptionField.text.trim())
+                        subjectField.clear()
+                        descriptionField.clear()
+                    }
                 }
 
                 Button {
