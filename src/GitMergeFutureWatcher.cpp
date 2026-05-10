@@ -28,6 +28,7 @@ void GitMergeFutureWatcher::setFuture(const GitRepository::MergeFuture& mergeFut
                 case GitRepository::MergeResult::Rebased:
                     return QStringLiteral("Success!");
                 }
+                return QStringLiteral("Unknown merge state");
             };
             setProgress(ProgressState(stateToString(result.value().state()), 1, 1));
         });
