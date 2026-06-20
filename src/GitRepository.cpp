@@ -991,6 +991,97 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     return Monad::Result<LfsPushUploadPlan>(plan);
 }
 
+// Serial / bounded-concurrency async iteration
+// --------------------------------------------
+// The LFS transfer paths share one shape: drive a list of async steps, stop on the first error.
+// asyncPumpBounded is the single driver (keep up to maxInFlight perItem calls in flight at once);
+// asyncForEach is the window-of-one serial wrapper. `perItem` maps one item to a GitFuture
+// (QFuture<Monad::ResultBase>); the returned future completes with the first item error, or with
+// Monad::ResultBase() once every item finishes. perItem alone decides whether a soft failure aborts
+// (return an error) or is swallowed (return success) — the driver only knows "error == abort".
+//
+// Lifetime: the driver owns a self-referential pump (state -> pump -> state) re-entered from each
+// item's completion. On every terminal path it queues a reset that nulls the pump once the stack
+// unwinds — you cannot destroy a std::function from inside its own body — breaking the cycle so the
+// state frees. Every member is touched only on `context`'s thread (AsyncFuture completions are
+// delivered there, queued), so no synchronization is needed. If `context` dies mid-flight the queued
+// reset is dropped and the state leaks, which is acceptable: teardown is already underway.
+template <typename Item, typename PerItem>
+GitRepository::GitFuture asyncPumpBounded(QVector<Item> items,
+                                          int maxInFlight,
+                                          QObject* context,
+                                          PerItem perItem)
+{
+    auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
+    deferred.reportStarted();
+
+    if (items.isEmpty()) {
+        deferred.complete(Monad::ResultBase());
+        return deferred.future();
+    }
+
+    struct PumpState {
+        QVector<Item> items;
+        std::function<void()> pump;
+        int nextIndex = 0;
+        int inFlight = 0;
+        bool finished = false;
+    };
+
+    auto state = std::make_shared<PumpState>();
+    state->items = std::move(items);
+
+    auto releasePump = [state, context]() {
+        QMetaObject::invokeMethod(context, [state]() { state->pump = nullptr; }, Qt::QueuedConnection);
+    };
+
+    state->pump = [state, deferred, context, maxInFlight, perItem = std::move(perItem), releasePump]() mutable {
+        if (state->finished) {
+            return;
+        }
+
+        while (state->nextIndex < state->items.size() && state->inFlight < maxInFlight) {
+            const Item& item = state->items.at(state->nextIndex);
+            state->nextIndex++;
+            state->inFlight++;
+
+            auto itemFuture = perItem(item);
+            AsyncFuture::observe(itemFuture)
+                .context(context, [state, deferred, itemFuture, releasePump]() mutable {
+                    state->inFlight--;
+                    if (state->finished) {
+                        return;
+                    }
+                    const Monad::ResultBase result = itemFuture.result();
+                    if (result.hasError()) {
+                        state->finished = true;
+                        deferred.complete(result);
+                        releasePump();
+                        return;
+                    }
+                    state->pump();
+                });
+        }
+
+        if (!state->finished && state->inFlight == 0 && state->nextIndex >= state->items.size()) {
+            state->finished = true;
+            deferred.complete(Monad::ResultBase());
+            releasePump();
+        }
+    };
+
+    state->pump();
+    return deferred.future();
+}
+
+// Serial async iteration: run each item through perItem one at a time, stop on the first error,
+// complete with Monad::ResultBase() if every item succeeds. A window-of-one asyncPumpBounded.
+template <typename Item, typename PerItem>
+GitRepository::GitFuture asyncForEach(QVector<Item> items, QObject* context, PerItem perItem)
+{
+    return asyncPumpBounded(std::move(items), 1, context, std::move(perItem));
+}
+
 // Defined below; declared here so the push-upload path can chunk batches the same way the download
 // path does (GitHub rejects batch requests with more than 100 objects).
 QFuture<Monad::Result<QVector<LfsBatchClient::ObjectResponse>>>
@@ -1044,22 +1135,7 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
         return AsyncFuture::completed(Monad::ResultBase());
     }
 
-    auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
-    deferred.reportStarted();
-
-    auto taskList = std::make_shared<QVector<UploadTask>>(std::move(tasks));
-    auto nextIndex = std::make_shared<int>(0);
-    auto step = std::make_shared<std::function<void()>>();
-
-    *step = [deferred, context, client, gitDirPath, pointersByOid, taskList, nextIndex, step]() mutable {
-        if (*nextIndex >= taskList->size()) {
-            deferred.complete(Monad::ResultBase());
-            return;
-        }
-
-        const UploadTask task = taskList->at(*nextIndex);
-        (*nextIndex)++;
-
+    auto perTask = [gitDirPath, pointersByOid, client, context](const UploadTask& task) -> GitRepository::GitFuture {
         LfsPointer pointer = pointersByOid.value(task.oid);
         if (!pointer.isValid()) {
             pointer.oid = task.oid;
@@ -1071,9 +1147,9 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
             }
         }
         if (!pointer.isValid()) {
-            deferred.complete(Monad::ResultBase(QStringLiteral("Missing LFS pointer details for oid %1").arg(task.oid),
-                                                static_cast<int>(LfsFetchErrorCode::Protocol)));
-            return;
+            return AsyncFuture::completed(
+                Monad::ResultBase(QStringLiteral("Missing LFS pointer details for oid %1").arg(task.oid),
+                                  static_cast<int>(LfsFetchErrorCode::Protocol)));
         }
         QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
         if (!QFileInfo::exists(objectPath)) {
@@ -1084,43 +1160,34 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
             }
         }
 
-        auto runVerify = [deferred, context, client, pointer, task, step]() mutable {
+        auto runVerify = [client, context, pointer, task]() -> GitRepository::GitFuture {
             if (!task.hasVerify) {
-                (*step)();
-                return;
+                return AsyncFuture::completed(Monad::ResultBase());
             }
             auto verifyFuture = client->verifyObject(task.verifyAction, pointer);
-            AsyncFuture::observe(verifyFuture)
-                .context(context, [deferred, step, verifyFuture]() mutable {
-                    const auto verifyResult = verifyFuture.result();
-                    if (verifyResult.hasError()) {
-                        deferred.complete(verifyResult);
-                        return;
-                    }
-                    (*step)();
-                });
+            return AsyncFuture::observe(verifyFuture)
+                .context(context, [verifyFuture]() -> Monad::ResultBase {
+                    return verifyFuture.result();
+                }).future();
         };
 
         if (!task.hasUpload) {
-            runVerify();
-            return;
+            return runVerify();
         }
 
         auto uploadFuture = client->uploadObject(task.uploadAction, objectPath, pointer);
-        AsyncFuture::observe(uploadFuture)
-            .context(context, [deferred, uploadFuture, runVerify]() mutable {
+        return AsyncFuture::observe(uploadFuture)
+            .context(context, [uploadFuture, runVerify]() -> GitRepository::GitFuture {
                 const auto uploadResult = uploadFuture.result();
                 if (uploadResult.hasError()) {
                     qDebug() << "[LFS upload-actions] upload failed:" << uploadResult.errorMessage();
-                    deferred.complete(uploadResult);
-                    return;
+                    return AsyncFuture::completed(uploadResult);
                 }
-                runVerify();
-            });
+                return runVerify();
+            }).future();
     };
 
-    (*step)();
-    return deferred.future();
+    return asyncForEach(std::move(tasks), context, perTask);
 }
 
 GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
@@ -1409,41 +1476,27 @@ struct LfsDownloadTask {
     int errorCode = 0;
 };
 
-// All mutable per-run state for runLfsDownloadActions, owned by one shared_ptr so the pump and every
-// transfer continuation share a single allocation instead of a fistful of shared_ptr<int>s. `store`
-// outlives the whole chain; `pump` is self-referential (re-entered from each completion) and forms a
-// run -> pump -> run cycle that releaseDownloadRunPump() breaks on every terminal path.
+// Download-specific aggregate state shared by the per-object transfer steps: the object store the
+// transfers write into, the per-oid/at-completion byte tallies feeding progress, and an `aborted`
+// latch that stops late streaming callbacks from reporting progress once a fatal error has been
+// raised. The serial/parallel iteration itself lives in asyncPumpBounded.
 //
-// Threading invariant: every member is touched only on the context object's (main) thread. The pump,
-// each transfer-completion continuation, and each streaming-progress callback are all delivered there
-// (AsyncFuture completions are queued; QNetworkReply signals fire on the manager's thread), so no
+// Threading invariant: every member is touched only on the context object's (main) thread — the
+// transfer-completion continuations and the streaming-progress callbacks are all delivered there
+// (AsyncFuture completions are queued; QNetworkReply signals fire on the manager's thread) — so no
 // synchronization is needed. Do not access these members from a worker thread.
-struct LfsDownloadRun {
-    explicit LfsDownloadRun(const QString& gitDirPath)
+struct DownloadAggregate {
+    explicit DownloadAggregate(const QString& gitDirPath)
         : store(gitDirPath, LfsPolicy())
     {
     }
 
-    QVector<LfsDownloadTask> tasks;
     LfsStore store;
     QHash<QString, qint64> bytesByOid;
-    std::function<void()> pump;
-    int nextIndex = 0;
-    int inFlight = 0;
     int completed = 0;
     qint64 receivedBytes = 0;
-    bool finished = false;
+    bool aborted = false;
 };
-
-// Breaks the run -> run->pump -> run reference cycle once hydration settles, so the run (and its
-// captured plan/tasks/store) is freed instead of leaking once per hydration. Posted queued because
-// the terminal paths run inside run->pump, and destroying a std::function from within its own body
-// is undefined; clearing it after the stack unwinds is safe. The captured shared_ptr keeps the run
-// alive until the reset fires. If `context` dies first the post is dropped (teardown is underway).
-void releaseDownloadRunPump(const std::shared_ptr<LfsDownloadRun>& run, QObject* context)
-{
-    QMetaObject::invokeMethod(context, [run]() { run->pump = nullptr; }, Qt::QueuedConnection);
-}
 
 // Upper bound on LFS object transfers kept in flight at once. Matches git-lfs's default
 // `lfs.concurrenttransfers`. The shared QNetworkAccessManager still caps live connections per host,
@@ -1476,8 +1529,8 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
         }
     }
 
-    auto run = std::make_shared<LfsDownloadRun>(plan.gitDirPath);
-    run->tasks.reserve(plan.missingPointers.size());
+    QVector<LfsDownloadTask> tasks;
+    tasks.reserve(plan.missingPointers.size());
     qint64 totalBytesAccumulator = 0;
     for (const LfsPointer& pointer : plan.missingPointers) {
         LfsDownloadTask task;
@@ -1505,113 +1558,94 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
             }
         }
         totalBytesAccumulator += std::max<qint64>(0, pointer.size);
-        run->tasks.push_back(task);
+        tasks.push_back(task);
     }
 
-    auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
-    deferred.reportStarted();
-
-    const int totalObjects = static_cast<int>(run->tasks.size());
+    const int totalObjects = static_cast<int>(tasks.size());
     const qint64 totalBytes = totalBytesAccumulator;
 
-    auto reportAggregate = [progress, run, totalObjects, totalBytes]() {
+    auto aggregate = std::make_shared<DownloadAggregate>(plan.gitDirPath);
+
+    auto reportAggregate = [progress, aggregate, totalObjects, totalBytes]() {
         if (progress) {
-            progress(formatLfsAggregateProgressText(run->completed, totalObjects, run->receivedBytes, totalBytes),
-                     run->completed,
+            progress(formatLfsAggregateProgressText(aggregate->completed, totalObjects,
+                                                    aggregate->receivedBytes, totalBytes),
+                     aggregate->completed,
                      totalObjects);
         }
     };
 
-    auto fail = [deferred, run, context](const QString& message, int code) mutable {
-        if (run->finished) {
-            return;
+    // Resolves and streams one object. A fatal error is returned (asyncPumpBounded aborts the whole
+    // hydration on it) and latches `aborted` so in-flight transfers stop reporting progress; a
+    // fallback-eligible error (offline / no-remote) is swallowed as success so the affected pointer
+    // file is left in place and the remaining transfers finish.
+    auto perObject = [aggregate, client, context, reportAggregate](const LfsDownloadTask& task)
+        -> GitRepository::GitFuture {
+        if (task.hasError) {
+            if (!LfsStore::shouldFallbackForFetchError(task.errorCode)) {
+                aggregate->aborted = true;
+                return AsyncFuture::completed(Monad::ResultBase(task.errorMessage, task.errorCode));
+            }
+            aggregate->completed++;
+            reportAggregate();
+            return AsyncFuture::completed(Monad::ResultBase());
         }
-        run->finished = true;
-        deferred.complete(Monad::ResultBase(message, code));
-        releaseDownloadRunPump(run, context);
-    };
 
-    // Fills the concurrency window: dispatches transfers until kDefaultLfsConcurrentTransfers are in
-    // flight, then settles the deferred once the queue drains. Re-entered from each transfer's
-    // completion so a freed slot is immediately refilled.
-    run->pump = [run, fail, reportAggregate, client, context, progress, plan, deferred]() mutable {
-        if (run->finished) {
-            return;
-        }
+        const QString oid = task.pointer.oid;
+        const qint64 objectSize = std::max<qint64>(0, task.pointer.size);
 
-        while (run->nextIndex < run->tasks.size() && run->inFlight < kDefaultLfsConcurrentTransfers) {
-            const LfsDownloadTask& task = run->tasks.at(run->nextIndex);
-            run->nextIndex++;
-
-            if (task.hasError) {
-                if (!LfsStore::shouldFallbackForFetchError(task.errorCode)) {
-                    fail(task.errorMessage, task.errorCode);
+        auto downloadFuture = client->downloadObject(
+            task.action,
+            aggregate->store,
+            task.pointer,
+            [aggregate, reportAggregate, oid](qint64 downloadedBytes, qint64) {
+                if (aggregate->aborted) {
                     return;
                 }
-                run->completed++;
+                const qint64 prior = aggregate->bytesByOid.value(oid, 0);
+                aggregate->receivedBytes += (downloadedBytes - prior);
+                aggregate->bytesByOid.insert(oid, downloadedBytes);
                 reportAggregate();
-                continue;
-            }
+            });
 
-            run->inFlight++;
-            const QString oid = task.pointer.oid;
-            const qint64 objectSize = std::max<qint64>(0, task.pointer.size);
-
-            auto downloadFuture = client->downloadObject(
-                task.action,
-                run->store,
-                task.pointer,
-                [progress, reportAggregate, run, oid](qint64 downloadedBytes, qint64) {
-                    if (!progress || run->finished) {
-                        return;
-                    }
-                    const qint64 prior = run->bytesByOid.value(oid, 0);
-                    run->receivedBytes += (downloadedBytes - prior);
-                    run->bytesByOid.insert(oid, downloadedBytes);
-                    reportAggregate();
-                });
-
-            AsyncFuture::observe(downloadFuture)
-                .context(context, [run, downloadFuture, fail, reportAggregate, oid, objectSize]() mutable {
-                    run->inFlight--;
-                    if (run->finished) {
-                        return;
-                    }
-
-                    const auto result = downloadFuture.result();
-                    if (result.hasError() && !LfsStore::shouldFallbackForFetchError(result.errorCode())) {
-                        fail(result.errorMessage(), result.errorCode());
-                        return;
-                    }
-
-                    if (!result.hasError()) {
-                        const qint64 prior = run->bytesByOid.value(oid, 0);
-                        run->receivedBytes += (objectSize - prior);
-                        run->bytesByOid.insert(oid, objectSize);
-                    }
-                    run->completed++;
-                    reportAggregate();
-                    run->pump();
-                });
-        }
-
-        if (!run->finished && run->inFlight == 0 && run->nextIndex >= run->tasks.size()) {
-            run->finished = true;
-            if (progress) {
-                const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
-                progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
-            }
-            deferred.complete(hydratePointerFiles(plan));
-            releaseDownloadRunPump(run, context);
-        }
+        return AsyncFuture::observe(downloadFuture)
+            .context(context, [aggregate, downloadFuture, reportAggregate, oid, objectSize]() -> Monad::ResultBase {
+                if (aggregate->aborted) {
+                    return Monad::ResultBase();
+                }
+                const auto result = downloadFuture.result();
+                if (result.hasError() && !LfsStore::shouldFallbackForFetchError(result.errorCode())) {
+                    aggregate->aborted = true;
+                    return Monad::ResultBase(result.errorMessage(), result.errorCode());
+                }
+                if (!result.hasError()) {
+                    const qint64 prior = aggregate->bytesByOid.value(oid, 0);
+                    aggregate->receivedBytes += (objectSize - prior);
+                    aggregate->bytesByOid.insert(oid, objectSize);
+                }
+                aggregate->completed++;
+                reportAggregate();
+                return Monad::ResultBase();
+            }).future();
     };
 
     if (progress) {
         progress(formatLfsAggregateProgressText(0, totalObjects, 0, totalBytes), 0, totalObjects);
     }
 
-    run->pump();
-    return deferred.future();
+    auto transfersFuture = asyncPumpBounded(std::move(tasks), kDefaultLfsConcurrentTransfers, context, perObject);
+    return AsyncFuture::observe(transfersFuture)
+        .context(context, [transfersFuture, plan, progress]() -> GitRepository::GitFuture {
+            const Monad::ResultBase result = transfersFuture.result();
+            if (result.hasError()) {
+                return AsyncFuture::completed(result);
+            }
+            if (progress) {
+                const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
+                progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+            }
+            return AsyncFuture::completed(hydratePointerFiles(plan));
+        }).future();
 }
 
 // Conservative per-request object cap across hosts. GitHub enforces 100 and rejects anything larger
@@ -1632,54 +1666,43 @@ runLfsBatchRequests(const QString& operation,
 {
     using BatchObjects = QVector<LfsBatchClient::ObjectResponse>;
 
-    auto deferred = AsyncFuture::deferred<Monad::Result<BatchObjects>>();
-    deferred.reportStarted();
-
-    auto objects = std::make_shared<BatchObjects>();
-    auto nextIndex = std::make_shared<int>(0);
-    auto step = std::make_shared<std::function<void()>>();
-
-    // Clears the step's self-capture once the chunk chain settles, so `step` (which otherwise keeps
-    // itself alive forever via the capture below) drops to zero refs and frees. Queued because the
-    // success path runs inside *step, and destroying a std::function from within its own body is UB.
-    auto releaseStep = [step, context]() {
-        QMetaObject::invokeMethod(context, [step]() { *step = nullptr; }, Qt::QueuedConnection);
-    };
-
-    *step = [deferred, operation, specs, remoteName, client, context, objects, nextIndex, step, releaseStep]() mutable {
-        if (*nextIndex >= specs.size()) {
-            deferred.complete(Monad::Result<BatchObjects>(*objects));
-            releaseStep();
-            return;
-        }
-
-        const int begin = *nextIndex;
+    // Split the specs into <=kMaxObjectsPerBatchRequest chunks, then drive them serially.
+    QVector<QVector<LfsBatchClient::ObjectSpec>> chunks;
+    for (int begin = 0; begin < specs.size(); begin += kMaxObjectsPerBatchRequest) {
         const int count = std::min(kMaxObjectsPerBatchRequest, static_cast<int>(specs.size()) - begin);
-        *nextIndex += count;
-
         QVector<LfsBatchClient::ObjectSpec> chunk;
         chunk.reserve(count);
         for (int i = begin; i < begin + count; ++i) {
             chunk.push_back(specs.at(i));
         }
+        chunks.push_back(std::move(chunk));
+    }
 
+    auto objects = std::make_shared<BatchObjects>();
+
+    auto perChunk = [objects, operation, remoteName, client, context](
+        const QVector<LfsBatchClient::ObjectSpec>& chunk) -> GitRepository::GitFuture {
         auto batchFuture = client->batch(operation, chunk, remoteName);
-        AsyncFuture::observe(batchFuture)
-            .context(context, [deferred, batchFuture, objects, step, releaseStep]() mutable {
+        return AsyncFuture::observe(batchFuture)
+            .context(context, [objects, batchFuture]() -> Monad::ResultBase {
                 const auto batchResult = batchFuture.result();
                 if (batchResult.hasError()) {
-                    deferred.complete(Monad::Result<BatchObjects>(batchResult.errorMessage(),
-                                                                  batchResult.errorCode()));
-                    releaseStep();
-                    return;
+                    return Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode());
                 }
                 objects->append(batchResult.value().objects);
-                (*step)();
-            });
+                return Monad::ResultBase();
+            }).future();
     };
 
-    (*step)();
-    return deferred.future();
+    auto chunksFuture = asyncForEach(std::move(chunks), context, perChunk);
+    return AsyncFuture::observe(chunksFuture)
+        .context(context, [chunksFuture, objects]() -> Monad::Result<BatchObjects> {
+            const Monad::ResultBase result = chunksFuture.result();
+            if (result.hasError()) {
+                return Monad::Result<BatchObjects>(result.errorMessage(), result.errorCode());
+            }
+            return Monad::Result<BatchObjects>(*objects);
+        }).future();
 }
 
 GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
