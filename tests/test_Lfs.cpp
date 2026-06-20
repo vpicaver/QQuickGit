@@ -2899,6 +2899,102 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
     CHECK(lfsServer.downloadObjectRequestCount() > 0);
 }
 
+TEST_CASE("Lfs hydration fetches multiple missing objects with a single batch request",
+          "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-multi"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-multi"));
+    const QStringList trackedFileNames = {
+        QStringLiteral("multi-a.png"),
+        QStringLiteral("multi-b.png"),
+        QStringLiteral("multi-c.png"),
+    };
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    for (const QString& fileName : trackedFileNames) {
+        REQUIRE(!createPngFile(QDir(authorPath).filePath(fileName), Qt::red).isEmpty());
+    }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files"), QStringLiteral("multi baseline")));
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(authorPath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    // Fresh, distinct content for every tracked file, committed in a single update so the
+    // consumer's fast-forward pull leaves several distinct missing LFS objects to hydrate at once.
+    // Distinct colors keep the oids distinct (identical bytes would dedupe to one object).
+    const QList<QColor> updateColors = { Qt::green, Qt::blue, Qt::magenta };
+    REQUIRE(updateColors.size() == trackedFileNames.size());
+    QHash<QString, QByteArray> updatedBytesByFile;
+    for (int i = 0; i < trackedFileNames.size(); ++i) {
+        const QString& fileName = trackedFileNames.at(i);
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), updateColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+        updatedBytesByFile.insert(fileName, bytes);
+    }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Update LFS files"), QStringLiteral("multi update")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray blobData = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!blobData.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(blobData, &pointer));
+        REQUIRE(pointer.size == updatedBytesByFile.value(fileName).size());
+
+        lfsServer.setDownloadObject(pointer.oid, updatedBytesByFile.value(fileName));
+
+        const QString objectPath = LfsStore::objectPath(consumerGitDirPath, pointer.oid);
+        REQUIRE(!objectPath.isEmpty());
+        if (QFileInfo::exists(objectPath)) {
+            REQUIRE(QFile::remove(objectPath));
+        }
+    }
+
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+
+    auto pullFuture = consumer.pull();
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
+    INFO("Pull error:" << pullFuture.result().errorMessage().toStdString()
+         << "code:" << pullFuture.result().errorCode());
+    REQUIRE(!pullFuture.result().hasError());
+
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray workingBytes = readFileBytes(QDir(consumerPath).filePath(fileName));
+        REQUIRE(!workingBytes.isEmpty());
+        CHECK(workingBytes == updatedBytesByFile.value(fileName));
+    }
+
+    // Stage 1 win: all missing objects are resolved through one batch request rather than one
+    // batch round trip per object, while each object is still downloaded individually.
+    CHECK(lfsServer.downloadBatchRequestCount() == 1);
+    CHECK(lfsServer.downloadObjectRequestCount() == static_cast<int>(trackedFileNames.size()));
+}
+
 TEST_CASE("Lfs pull delete ignores hydrated file modifications", "[LFS][regression][P1]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

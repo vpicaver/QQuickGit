@@ -27,27 +27,6 @@ int contentLengthFromHeaders(const QByteArray& request)
     return 0;
 }
 
-QString firstRequestedOidFromBatchBody(const QByteArray& body)
-{
-    QJsonParseError parseError{};
-    const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
-    if (doc.isNull() || !doc.isObject()) {
-        return QString();
-    }
-
-    const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
-    for (const QJsonValue& value : objects) {
-        if (!value.isObject()) {
-            continue;
-        }
-        const QString oid = value.toObject().value(QStringLiteral("oid")).toString();
-        if (!oid.isEmpty()) {
-            return oid;
-        }
-    }
-    return QString();
-}
-
 QJsonArray requestedObjectsFromBatchBody(const QByteArray& body)
 {
     QJsonParseError parseError{};
@@ -204,30 +183,34 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         }
 
         mDownloadBatchRequestCount++;
-        const QString requestedOid = firstRequestedOidFromBatchBody(body);
-        const QString oid = (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid))
-            ? requestedOid
-            : (mDownloadObjects.isEmpty() ? QString() : mDownloadObjects.constBegin().key());
-        const QByteArray objectBytes = oid.isEmpty() ? QByteArray() : mDownloadObjects.value(oid);
+        QJsonArray responseObjects;
+        const QJsonArray requestObjects = requestedObjectsFromBatchBody(body);
+        for (const QJsonValue& value : requestObjects) {
+            const QString oid = value.toObject().value(QStringLiteral("oid")).toString();
+            if (oid.isEmpty() || !mDownloadObjects.contains(oid)) {
+                continue;
+            }
+            const QByteArray objectBytes = mDownloadObjects.value(oid);
 
-        if (oid.isEmpty() || objectBytes.isEmpty()) {
-            respond(socket,
-                    200,
-                    QByteArray("application/vnd.git-lfs+json"),
-                    QByteArray("{\"transfer\":\"basic\",\"objects\":[]}"));
-            return true;
+            QJsonObject downloadAction;
+            downloadAction.insert(QStringLiteral("href"),
+                                  QStringLiteral("http://127.0.0.1:%1/objects/%2")
+                                      .arg(mServer.serverPort())
+                                      .arg(oid));
+            QJsonObject actions;
+            actions.insert(QStringLiteral("download"), downloadAction);
+
+            QJsonObject responseObject;
+            responseObject.insert(QStringLiteral("oid"), oid);
+            responseObject.insert(QStringLiteral("size"), static_cast<qint64>(objectBytes.size()));
+            responseObject.insert(QStringLiteral("actions"), actions);
+            responseObjects.append(responseObject);
         }
 
-        const QString href = QStringLiteral("http://127.0.0.1:%1/objects/%2")
-            .arg(mServer.serverPort())
-            .arg(oid);
-        const QByteArray responseBody = QStringLiteral(
-            "{\"transfer\":\"basic\",\"objects\":[{\"oid\":\"%1\",\"size\":%2,"
-            "\"actions\":{\"download\":{\"href\":\"%3\"}}}]}")
-            .arg(oid)
-            .arg(objectBytes.size())
-            .arg(href)
-            .toUtf8();
+        const QByteArray responseBody = QJsonDocument(QJsonObject{
+            {QStringLiteral("transfer"), QStringLiteral("basic")},
+            {QStringLiteral("objects"), responseObjects}
+        }).toJson(QJsonDocument::Compact);
         respond(socket, 200, QByteArray("application/vnd.git-lfs+json"), responseBody);
         return true;
     }

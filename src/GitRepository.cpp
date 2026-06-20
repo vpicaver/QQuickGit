@@ -1393,37 +1393,76 @@ QString formatLfsDownloadProgressText(const QString& relativePath,
         .arg(totalText);
 }
 
-GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
-                                                 QObject* context,
-                                                 const LfsHydrationProgress& progress = {})
+struct LfsDownloadTask {
+    LfsPointer pointer;
+    QString relativePath;
+    LfsBatchClient::Action action;
+    bool hasError = false;
+    QString errorMessage;
+    int errorCode = 0;
+};
+
+// Drives the per-object downloads from a single batch response. The batch request is made once by
+// the caller; here we only resolve each object's download action and stream it to the object store,
+// one at a time, preserving the prior single-object fetch semantics (first fatal error aborts;
+// fallback-eligible errors leave the pointer file in place and continue).
+GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
+                                               const QVector<LfsBatchClient::ObjectResponse>& objects,
+                                               std::shared_ptr<LfsBatchClient> client,
+                                               QObject* context,
+                                               const LfsHydrationProgress& progress)
 {
-    if (plan.pointerFiles.isEmpty()) {
-        return AsyncFuture::completed(Monad::ResultBase());
+    QHash<QString, LfsBatchClient::ObjectResponse> responsesByOid;
+    for (const auto& object : objects) {
+        responsesByOid.insert(object.oid, object);
     }
 
-    if (progress) {
-        const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
-        progress(QStringLiteral("Hydrating LFS files"), 0, std::max(1, pointerFileCount));
-    }
-
-    auto store = std::make_shared<LfsStore>(plan.gitDirPath, LfsPolicy());
-    if (plan.missingPointers.isEmpty()) {
-        if (progress) {
-            const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
-            progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+    auto tasks = std::make_shared<QVector<LfsDownloadTask>>();
+    tasks->reserve(plan.missingPointers.size());
+    for (const LfsPointer& pointer : plan.missingPointers) {
+        LfsDownloadTask task;
+        task.pointer = pointer;
+        task.relativePath = pointer.oid;
+        for (const auto& item : plan.pointerFiles) {
+            if (item.pointer.oid == pointer.oid) {
+                task.relativePath = item.relativePath;
+                break;
+            }
         }
-        return AsyncFuture::completed(hydratePointerFiles(plan));
+
+        if (!responsesByOid.contains(pointer.oid)) {
+            task.hasError = true;
+            task.errorMessage = QStringLiteral("Missing LFS batch response for oid %1").arg(pointer.oid);
+            task.errorCode = static_cast<int>(LfsFetchErrorCode::Protocol);
+        } else {
+            const auto& response = responsesByOid.value(pointer.oid);
+            if (!response.errorMessage.isEmpty()) {
+                task.hasError = true;
+                task.errorMessage = response.errorMessage;
+                task.errorCode = response.errorCode == 404
+                    ? static_cast<int>(LfsFetchErrorCode::NotFound)
+                    : static_cast<int>(LfsFetchErrorCode::Transfer);
+            } else if (!response.actions.contains(QStringLiteral("download"))) {
+                task.hasError = true;
+                task.errorMessage = QStringLiteral("Missing LFS download action");
+                task.errorCode = static_cast<int>(LfsFetchErrorCode::Protocol);
+            } else {
+                task.action = response.actions.value(QStringLiteral("download"));
+            }
+        }
+        tasks->push_back(task);
     }
 
     auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
     deferred.reportStarted();
 
-    auto pointers = std::make_shared<QVector<LfsPointer>>(plan.missingPointers);
+    // A dedicated store instance that outlives the whole download chain. Never capture `this`.
+    auto store = std::make_shared<LfsStore>(plan.gitDirPath, LfsPolicy());
     auto nextIndex = std::make_shared<int>(0);
     auto step = std::make_shared<std::function<void()>>();
 
-    *step = [deferred, context, store, plan, pointers, nextIndex, step, progress]() mutable {
-        if (*nextIndex >= pointers->size()) {
+    *step = [deferred, context, client, store, plan, tasks, nextIndex, step, progress]() mutable {
+        if (*nextIndex >= tasks->size()) {
             if (progress) {
                 const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
                 progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
@@ -1432,29 +1471,35 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
             return;
         }
 
-        const LfsPointer pointer = pointers->at(*nextIndex);
+        const LfsDownloadTask task = tasks->at(*nextIndex);
         const int currentObject = *nextIndex + 1;
-        const int totalObjects = static_cast<int>(pointers->size());
-        QString relativePath = pointer.oid;
-        for (const auto& item : plan.pointerFiles) {
-            if (item.pointer.oid == pointer.oid) {
-                relativePath = item.relativePath;
-                break;
-            }
-        }
+        const int totalObjects = static_cast<int>(tasks->size());
+        const QString relativePath = task.relativePath;
+        (*nextIndex)++;
+
         if (progress) {
             progress(formatLfsDownloadProgressText(relativePath,
                                                    currentObject,
                                                    totalObjects,
                                                    0,
-                                                   pointer.size),
+                                                   task.pointer.size),
                      currentObject,
                      totalObjects);
         }
-        (*nextIndex)++;
-        auto fetchFuture = store->fetchObject(
-            pointer,
-            QString(),
+
+        if (task.hasError) {
+            if (LfsStore::shouldFallbackForFetchError(task.errorCode)) {
+                (*step)();
+                return;
+            }
+            deferred.complete(Monad::ResultBase(task.errorMessage, task.errorCode));
+            return;
+        }
+
+        auto downloadFuture = client->downloadObject(
+            task.action,
+            *store,
+            task.pointer,
             [progress, currentObject, totalObjects, relativePath](qint64 downloadedBytes, qint64 totalBytes) {
                 if (!progress) {
                     return;
@@ -1467,11 +1512,11 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
                          currentObject,
                          totalObjects);
             });
-        AsyncFuture::observe(fetchFuture)
-            .context(context, [deferred, step, fetchFuture]() mutable {
-                const auto result = fetchFuture.result();
+        AsyncFuture::observe(downloadFuture)
+            .context(context, [deferred, step, downloadFuture]() mutable {
+                const auto result = downloadFuture.result();
                 if (result.hasError()) {
-                    if (QQuickGit::LfsStore::shouldFallbackForFetchError(result.errorCode())) {
+                    if (LfsStore::shouldFallbackForFetchError(result.errorCode())) {
                         (*step)();
                         return;
                     }
@@ -1484,6 +1529,51 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
 
     (*step)();
     return deferred.future();
+}
+
+GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
+                                                 QObject* context,
+                                                 const LfsHydrationProgress& progress = {})
+{
+    if (plan.pointerFiles.isEmpty()) {
+        return AsyncFuture::completed(Monad::ResultBase());
+    }
+
+    const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
+    if (progress) {
+        progress(QStringLiteral("Hydrating LFS files"), 0, std::max(1, pointerFileCount));
+    }
+
+    if (plan.missingPointers.isEmpty()) {
+        if (progress) {
+            progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+        }
+        return AsyncFuture::completed(hydratePointerFiles(plan));
+    }
+
+    // One batch request resolves download actions for every missing object, instead of a separate
+    // batch round trip per object.
+    QVector<LfsBatchClient::ObjectSpec> specs;
+    specs.reserve(plan.missingPointers.size());
+    for (const LfsPointer& pointer : plan.missingPointers) {
+        specs.push_back(LfsBatchClient::ObjectSpec{pointer.oid, pointer.size});
+    }
+
+    auto client = std::make_shared<LfsBatchClient>(plan.gitDirPath);
+    auto batchFuture = client->batch(QStringLiteral("download"), specs);
+    return AsyncFuture::observe(batchFuture)
+        .context(context, [batchFuture, plan, client, context, progress]() -> GitRepository::GitFuture {
+            const auto batchResult = batchFuture.result();
+            if (batchResult.hasError()) {
+                // Offline / no-remote clones still succeed by leaving the pointer files in place.
+                if (LfsStore::shouldFallbackForFetchError(batchResult.errorCode())) {
+                    return AsyncFuture::completed(hydratePointerFiles(plan));
+                }
+                return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
+            }
+
+            return runLfsDownloadActions(plan, batchResult.value().objects, client, context, progress);
+        }).future();
 }
 
 QFuture<Monad::Result<LfsHydrationPlan>> prepareLfsHydrationPlan(const QDir& repositoryDir)
