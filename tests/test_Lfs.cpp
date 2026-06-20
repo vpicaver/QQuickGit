@@ -25,6 +25,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QThreadPool>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -2993,6 +2994,324 @@ TEST_CASE("Lfs hydration fetches multiple missing objects with a single batch re
     // batch round trip per object, while each object is still downloaded individually.
     CHECK(lfsServer.downloadBatchRequestCount() == 1);
     CHECK(lfsServer.downloadObjectRequestCount() == static_cast<int>(trackedFileNames.size()));
+}
+
+TEST_CASE("Lfs hydration downloads missing objects in parallel with aggregate progress",
+          "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+    // Hold each object response open briefly so the parallel transfers overlap on the wire long
+    // enough to be observed; the serial path would only ever have one request in flight. 40 ms is a
+    // tuned overlap window, not arbitrary — if this ever flakes on a loaded CI box, raise the delay
+    // rather than lowering the maxConcurrentObjectRequests() >= 2 threshold below.
+    lfsServer.setObjectResponseDelayMs(40);
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-parallel"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-parallel"));
+    const QStringList trackedFileNames = {
+        QStringLiteral("p-a.png"), QStringLiteral("p-b.png"), QStringLiteral("p-c.png"),
+        QStringLiteral("p-d.png"), QStringLiteral("p-e.png"), QStringLiteral("p-f.png"),
+    };
+    // Distinct colors keep the oids distinct (identical bytes would dedupe to one object).
+    const QList<QColor> fileColors = {
+        Qt::green, Qt::blue, Qt::magenta, Qt::cyan, Qt::yellow, Qt::gray,
+    };
+    REQUIRE(fileColors.size() == trackedFileNames.size());
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    QHash<QString, QByteArray> bytesByFile;
+    for (int i = 0; i < trackedFileNames.size(); ++i) {
+        const QString& fileName = trackedFileNames.at(i);
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), fileColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+        bytesByFile.insert(fileName, bytes);
+    }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files"), QStringLiteral("parallel baseline")));
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(authorPath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+
+    // A local file:// clone does not populate the consumer LFS object store, so seed it and reset
+    // the working tree to real bytes before knocking the objects back out.
+    LfsStore consumerStore(consumerGitDirPath);
+    for (const QString& fileName : trackedFileNames) {
+        auto seedResult = consumerStore.storeBytes(bytesByFile.value(fileName));
+        INFO("Seed error:" << seedResult.errorMessage().toStdString());
+        REQUIRE(!seedResult.hasError());
+    }
+    requireGitFutureSuccess(consumer.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+
+    // Drop every LFS object from the consumer store so a single fetch must re-hydrate them all at
+    // once, exercising the parallel transfer window.
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray blobData = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!blobData.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(blobData, &pointer));
+        REQUIRE(pointer.size == bytesByFile.value(fileName).size());
+
+        lfsServer.setDownloadObject(pointer.oid, bytesByFile.value(fileName));
+
+        const QString objectPath = LfsStore::objectPath(consumerGitDirPath, pointer.oid);
+        REQUIRE(!objectPath.isEmpty());
+        REQUIRE(QFileInfo::exists(objectPath));
+        REQUIRE(QFile::remove(objectPath));
+    }
+
+    auto fetchFuture = consumer.fetch();
+    QList<ProgressState> downloadProgressStates;
+    AsyncFuture::observe(fetchFuture).onProgress([&downloadProgressStates, fetchFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(fetchFuture.progressText());
+        if (state.text().contains(QStringLiteral("Downloading LFS objects"))) {
+            downloadProgressStates.append(state);
+        }
+    });
+
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 60 * 1000));
+    INFO("Fetch error:" << fetchFuture.result().errorMessage().toStdString()
+         << "code:" << fetchFuture.result().errorCode());
+    REQUIRE(!fetchFuture.result().hasError());
+
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray workingBytes = readFileBytes(QDir(consumerPath).filePath(fileName));
+        REQUIRE(!workingBytes.isEmpty());
+        CHECK(workingBytes == bytesByFile.value(fileName));
+    }
+
+    // Still one batch request for all missing objects (Stage 1 contract preserved).
+    CHECK(lfsServer.downloadBatchRequestCount() == 1);
+    CHECK(lfsServer.downloadObjectRequestCount() == static_cast<int>(trackedFileNames.size()));
+
+    // Stage 2: transfers overlap (serial hydration would peak at exactly one in flight).
+    CHECK(lfsServer.maxConcurrentObjectRequests() >= 2);
+
+    // Stage 2 progress is aggregate (one fraction over all objects), non-decreasing, and reports a
+    // constant object-count total rather than per-object resets.
+    REQUIRE(downloadProgressStates.size() >= 2);
+    const size_t sharedTotal = downloadProgressStates.first().total();
+    CHECK(sharedTotal == static_cast<size_t>(trackedFileNames.size()));
+    size_t previousCurrent = 0;
+    for (const ProgressState& state : std::as_const(downloadProgressStates)) {
+        CHECK(state.total() == sharedTotal);
+        CHECK(state.current() >= previousCurrent);
+        previousCurrent = state.current();
+    }
+}
+
+// Hidden ([.]) so the default no-filter run (CI/nightly) skips it: this exercise commits 100+ LFS
+// files, which trips a pre-existing heap-corruption race in the many-file clean path that is
+// unrelated to the batch-chunking fix under test. Run on demand with the [lfs-batch-cap] tag.
+TEST_CASE("Lfs hydration splits more than 100 missing objects across batch requests",
+          "[.][lfs-batch-cap][regression][P1]") {
+    // Drain background hydration workers left running by earlier tests before this heavier test
+    // does its git work, so a lingering worker can't race it (a pre-existing teardown hazard).
+    QThreadPool::globalInstance()->waitForDone();
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    // The server rejects any batch request with more than 100 objects (HTTP 413), exactly like
+    // GitHub. A single coalesced batch for >100 objects would fail; hydration must chunk.
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-batchcap"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-batchcap"));
+
+    // 101 distinct objects → just over the 100-object cap → two batch requests. Distinct red
+    // channels keep every file's bytes (and therefore its oid) unique.
+    const int fileCount = 101;
+    QStringList trackedFileNames;
+    QList<QColor> fileColors;
+    for (int i = 0; i < fileCount; ++i) {
+        trackedFileNames.append(QStringLiteral("cap-%1.png").arg(i, 3, 10, QLatin1Char('0')));
+        fileColors.append(QColor(i, 0, 0));
+    }
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    // Commit one file per commit. Committing many LFS files in a single commitAll trips a
+    // pre-existing heap-corruption race in the clean path (issue #546); one-at-a-time keeps each
+    // commit the size of the other LFS tests while still leaving 101 distinct pointers (and missing
+    // objects) in HEAD. Do NOT batch multiple files per commit here — that re-arms the #546 race.
+    QHash<QString, QByteArray> bytesByFile;
+    for (int i = 0; i < fileCount; ++i) {
+        const QString& fileName = trackedFileNames.at(i);
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), fileColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+        bytesByFile.insert(fileName, bytes);
+
+        REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files %1").arg(i),
+                                         QStringLiteral("batch cap baseline")));
+    }
+
+    GitRepository consumer;
+    consumer.setDirectory(QDir(consumerPath));
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(authorPath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+
+    LfsStore consumerStore(consumerGitDirPath);
+    for (const QString& fileName : std::as_const(trackedFileNames)) {
+        auto seedResult = consumerStore.storeBytes(bytesByFile.value(fileName));
+        INFO("Seed error:" << seedResult.errorMessage().toStdString());
+        REQUIRE(!seedResult.hasError());
+    }
+    requireGitFutureSuccess(consumer.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard));
+
+    for (const QString& fileName : std::as_const(trackedFileNames)) {
+        const QByteArray blobData = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!blobData.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(blobData, &pointer));
+
+        lfsServer.setDownloadObject(pointer.oid, bytesByFile.value(fileName));
+
+        const QString objectPath = LfsStore::objectPath(consumerGitDirPath, pointer.oid);
+        REQUIRE(!objectPath.isEmpty());
+        REQUIRE(QFileInfo::exists(objectPath));
+        REQUIRE(QFile::remove(objectPath));
+    }
+
+    auto fetchFuture = consumer.fetch();
+    REQUIRE(AsyncFuture::waitForFinished(fetchFuture, 120 * 1000));
+    INFO("Fetch error:" << fetchFuture.result().errorMessage().toStdString()
+         << "code:" << fetchFuture.result().errorCode());
+    REQUIRE(!fetchFuture.result().hasError());
+
+    for (const QString& fileName : std::as_const(trackedFileNames)) {
+        const QByteArray workingBytes = readFileBytes(QDir(consumerPath).filePath(fileName));
+        REQUIRE(!workingBytes.isEmpty());
+        CHECK(workingBytes == bytesByFile.value(fileName));
+    }
+
+    // The 101 objects must be spread over at least two batch requests (the old single-batch path
+    // would have been rejected with HTTP 413), and every object is still fetched individually.
+    CHECK(lfsServer.downloadBatchRequestCount() >= 2);
+    CHECK(lfsServer.downloadObjectRequestCount() == fileCount);
+}
+
+TEST_CASE("Lfs push splits more than 100 tracked objects across batch requests",
+          "[.][lfs-batch-cap][regression][P1]") {
+    // Drain background hydration workers left running by earlier tests before this heavier test
+    // does its git work, so a lingering worker can't race it (a pre-existing teardown hazard).
+    QThreadPool::globalInstance()->waitForDone();
+
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    // The server rejects any batch request with more than 100 objects (HTTP 413), exactly like
+    // GitHub. A single coalesced upload batch for >100 objects would fail; push must chunk.
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-batchcap"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-batchcap.git"));
+
+    // 101 distinct objects → just over the 100-object cap → two upload batch requests. Distinct red
+    // channels keep every file's bytes (and therefore its oid) unique.
+    const int fileCount = 101;
+    QStringList trackedFileNames;
+    QList<QColor> fileColors;
+    for (int i = 0; i < fileCount; ++i) {
+        trackedFileNames.append(QStringLiteral("cap-%1.png").arg(i, 3, 10, QLatin1Char('0')));
+        fileColors.append(QColor(i, 0, 0));
+    }
+
+    TestUtilities::initBareRepo(remotePath);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    // Commit one file per commit. Committing many LFS files in a single commitAll trips a
+    // pre-existing heap-corruption race in the clean path (issue #546); one-at-a-time keeps each
+    // commit the size of the other LFS tests while still leaving 101 distinct pointers in HEAD to
+    // upload. Do NOT batch multiple files per commit here — that re-arms the #546 race.
+    for (int i = 0; i < fileCount; ++i) {
+        const QString& fileName = trackedFileNames.at(i);
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), fileColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+
+        REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files %1").arg(i),
+                                         QStringLiteral("push batch cap baseline")));
+    }
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    for (const QString& fileName : std::as_const(trackedFileNames)) {
+        const QByteArray blobData = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!blobData.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(blobData, &pointer));
+        lfsServer.setExpectedUploadObject(pointer.oid, pointer.size);
+    }
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    auto pushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, 120 * 1000));
+    INFO("Push error:" << pushFuture.result().errorMessage().toStdString()
+         << "code:" << pushFuture.result().errorCode());
+    REQUIRE(!pushFuture.result().hasError());
+
+    // The 101 objects must be spread over at least two batch requests (the old single-batch path
+    // would have been rejected with HTTP 413), and every object is still uploaded individually.
+    CHECK(lfsServer.uploadBatchRequestCount() >= 2);
+    CHECK(lfsServer.uploadRequestCount() == fileCount);
 }
 
 TEST_CASE("Lfs pull delete ignores hydrated file modifications", "[LFS][regression][P1]") {

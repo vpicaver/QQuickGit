@@ -991,6 +991,15 @@ Monad::Result<LfsPushUploadPlan> buildLfsPushUploadPlan(git_repository* repo,
     return Monad::Result<LfsPushUploadPlan>(plan);
 }
 
+// Defined below; declared here so the push-upload path can chunk batches the same way the download
+// path does (GitHub rejects batch requests with more than 100 objects).
+QFuture<Monad::Result<QVector<LfsBatchClient::ObjectResponse>>>
+runLfsBatchRequests(const QString& operation,
+                    const QVector<LfsBatchClient::ObjectSpec>& specs,
+                    std::shared_ptr<LfsBatchClient> client,
+                    QObject* context,
+                    const QString& remoteName = QString());
+
 GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                                              const QHash<QString, LfsPointer>& pointersByOid,
                                              const QVector<LfsBatchClient::ObjectResponse>& objects,
@@ -1150,7 +1159,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
             }
 
             auto client = std::make_shared<LfsBatchClient>(plan.gitDirPath);
-            auto batchFuture = client->batch(QStringLiteral("upload"), plan.objects, remoteName);
+            auto batchFuture = runLfsBatchRequests(QStringLiteral("upload"), plan.objects, client, context, remoteName);
             return AsyncFuture::observe(batchFuture)
                 .context(context, [batchFuture, plan, client, context]() -> GitRepository::GitFuture {
                     const auto batchResult = batchFuture.result();
@@ -1160,7 +1169,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
 
                     return runLfsUploadActions(plan.gitDirPath,
                                                plan.pointersByOid,
-                                               batchResult.value().objects,
+                                               batchResult.value(),
                                                client,
                                                context);
                 }).future();
@@ -1376,20 +1385,18 @@ QString formatBytesForProgress(qint64 bytes)
     return QStringLiteral("%1 B").arg(static_cast<qint64>(value));
 }
 
-QString formatLfsDownloadProgressText(const QString& relativePath,
-                                      int currentObject,
-                                      int totalObjects,
-                                      qint64 downloadedBytes,
-                                      qint64 totalBytes)
+QString formatLfsAggregateProgressText(int completedObjects,
+                                       int totalObjects,
+                                       qint64 receivedBytes,
+                                       qint64 totalBytes)
 {
     const QString totalText = totalBytes > 0
         ? formatBytesForProgress(totalBytes)
         : QStringLiteral("?");
-    return QStringLiteral("Downloading LFS: %1 (%2/%3) - %4/%5")
-        .arg(relativePath)
-        .arg(currentObject)
+    return QStringLiteral("Downloading LFS objects (%1/%2) - %3/%4")
+        .arg(completedObjects)
         .arg(totalObjects)
-        .arg(formatBytesForProgress(downloadedBytes))
+        .arg(formatBytesForProgress(receivedBytes))
         .arg(totalText);
 }
 
@@ -1402,10 +1409,53 @@ struct LfsDownloadTask {
     int errorCode = 0;
 };
 
+// All mutable per-run state for runLfsDownloadActions, owned by one shared_ptr so the pump and every
+// transfer continuation share a single allocation instead of a fistful of shared_ptr<int>s. `store`
+// outlives the whole chain; `pump` is self-referential (re-entered from each completion) and forms a
+// run -> pump -> run cycle that releaseDownloadRunPump() breaks on every terminal path.
+//
+// Threading invariant: every member is touched only on the context object's (main) thread. The pump,
+// each transfer-completion continuation, and each streaming-progress callback are all delivered there
+// (AsyncFuture completions are queued; QNetworkReply signals fire on the manager's thread), so no
+// synchronization is needed. Do not access these members from a worker thread.
+struct LfsDownloadRun {
+    explicit LfsDownloadRun(const QString& gitDirPath)
+        : store(gitDirPath, LfsPolicy())
+    {
+    }
+
+    QVector<LfsDownloadTask> tasks;
+    LfsStore store;
+    QHash<QString, qint64> bytesByOid;
+    std::function<void()> pump;
+    int nextIndex = 0;
+    int inFlight = 0;
+    int completed = 0;
+    qint64 receivedBytes = 0;
+    bool finished = false;
+};
+
+// Breaks the run -> run->pump -> run reference cycle once hydration settles, so the run (and its
+// captured plan/tasks/store) is freed instead of leaking once per hydration. Posted queued because
+// the terminal paths run inside run->pump, and destroying a std::function from within its own body
+// is undefined; clearing it after the stack unwinds is safe. The captured shared_ptr keeps the run
+// alive until the reset fires. If `context` dies first the post is dropped (teardown is underway).
+void releaseDownloadRunPump(const std::shared_ptr<LfsDownloadRun>& run, QObject* context)
+{
+    QMetaObject::invokeMethod(context, [run]() { run->pump = nullptr; }, Qt::QueuedConnection);
+}
+
+// Upper bound on LFS object transfers kept in flight at once. Matches git-lfs's default
+// `lfs.concurrenttransfers`. The shared QNetworkAccessManager still caps live connections per host,
+// so this is a ceiling rather than a guarantee.
+constexpr int kDefaultLfsConcurrentTransfers = 8;
+
 // Drives the per-object downloads from a single batch response. The batch request is made once by
-// the caller; here we only resolve each object's download action and stream it to the object store,
-// one at a time, preserving the prior single-object fetch semantics (first fatal error aborts;
-// fallback-eligible errors leave the pointer file in place and continue).
+// the caller; here we resolve each object's download action and stream up to
+// kDefaultLfsConcurrentTransfers of them in parallel, reporting aggregate byte progress across all
+// objects. Error semantics match the prior serial fetch: the first fatal error aborts the whole
+// hydration, while fallback-eligible errors (offline / no-remote) leave the affected pointer file
+// in place and let the remaining transfers finish.
 GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
                                                const QVector<LfsBatchClient::ObjectResponse>& objects,
                                                std::shared_ptr<LfsBatchClient> client,
@@ -1417,18 +1467,22 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
         responsesByOid.insert(object.oid, object);
     }
 
-    auto tasks = std::make_shared<QVector<LfsDownloadTask>>();
-    tasks->reserve(plan.missingPointers.size());
+    // First pointer file wins for a given oid (the same content can appear under several paths),
+    // matching the prior linear first-match scan.
+    QHash<QString, QString> relativePathByOid;
+    for (const auto& item : plan.pointerFiles) {
+        if (!relativePathByOid.contains(item.pointer.oid)) {
+            relativePathByOid.insert(item.pointer.oid, item.relativePath);
+        }
+    }
+
+    auto run = std::make_shared<LfsDownloadRun>(plan.gitDirPath);
+    run->tasks.reserve(plan.missingPointers.size());
+    qint64 totalBytesAccumulator = 0;
     for (const LfsPointer& pointer : plan.missingPointers) {
         LfsDownloadTask task;
         task.pointer = pointer;
-        task.relativePath = pointer.oid;
-        for (const auto& item : plan.pointerFiles) {
-            if (item.pointer.oid == pointer.oid) {
-                task.relativePath = item.relativePath;
-                break;
-            }
-        }
+        task.relativePath = relativePathByOid.value(pointer.oid, pointer.oid);
 
         if (!responsesByOid.contains(pointer.oid)) {
             task.hasError = true;
@@ -1450,79 +1504,176 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
                 task.action = response.actions.value(QStringLiteral("download"));
             }
         }
-        tasks->push_back(task);
+        totalBytesAccumulator += std::max<qint64>(0, pointer.size);
+        run->tasks.push_back(task);
     }
 
     auto deferred = AsyncFuture::deferred<Monad::ResultBase>();
     deferred.reportStarted();
 
-    // A dedicated store instance that outlives the whole download chain. Never capture `this`.
-    auto store = std::make_shared<LfsStore>(plan.gitDirPath, LfsPolicy());
-    auto nextIndex = std::make_shared<int>(0);
-    auto step = std::make_shared<std::function<void()>>();
+    const int totalObjects = static_cast<int>(run->tasks.size());
+    const qint64 totalBytes = totalBytesAccumulator;
 
-    *step = [deferred, context, client, store, plan, tasks, nextIndex, step, progress]() mutable {
-        if (*nextIndex >= tasks->size()) {
+    auto reportAggregate = [progress, run, totalObjects, totalBytes]() {
+        if (progress) {
+            progress(formatLfsAggregateProgressText(run->completed, totalObjects, run->receivedBytes, totalBytes),
+                     run->completed,
+                     totalObjects);
+        }
+    };
+
+    auto fail = [deferred, run, context](const QString& message, int code) mutable {
+        if (run->finished) {
+            return;
+        }
+        run->finished = true;
+        deferred.complete(Monad::ResultBase(message, code));
+        releaseDownloadRunPump(run, context);
+    };
+
+    // Fills the concurrency window: dispatches transfers until kDefaultLfsConcurrentTransfers are in
+    // flight, then settles the deferred once the queue drains. Re-entered from each transfer's
+    // completion so a freed slot is immediately refilled.
+    run->pump = [run, fail, reportAggregate, client, context, progress, plan, deferred]() mutable {
+        if (run->finished) {
+            return;
+        }
+
+        while (run->nextIndex < run->tasks.size() && run->inFlight < kDefaultLfsConcurrentTransfers) {
+            const LfsDownloadTask& task = run->tasks.at(run->nextIndex);
+            run->nextIndex++;
+
+            if (task.hasError) {
+                if (!LfsStore::shouldFallbackForFetchError(task.errorCode)) {
+                    fail(task.errorMessage, task.errorCode);
+                    return;
+                }
+                run->completed++;
+                reportAggregate();
+                continue;
+            }
+
+            run->inFlight++;
+            const QString oid = task.pointer.oid;
+            const qint64 objectSize = std::max<qint64>(0, task.pointer.size);
+
+            auto downloadFuture = client->downloadObject(
+                task.action,
+                run->store,
+                task.pointer,
+                [progress, reportAggregate, run, oid](qint64 downloadedBytes, qint64) {
+                    if (!progress || run->finished) {
+                        return;
+                    }
+                    const qint64 prior = run->bytesByOid.value(oid, 0);
+                    run->receivedBytes += (downloadedBytes - prior);
+                    run->bytesByOid.insert(oid, downloadedBytes);
+                    reportAggregate();
+                });
+
+            AsyncFuture::observe(downloadFuture)
+                .context(context, [run, downloadFuture, fail, reportAggregate, oid, objectSize]() mutable {
+                    run->inFlight--;
+                    if (run->finished) {
+                        return;
+                    }
+
+                    const auto result = downloadFuture.result();
+                    if (result.hasError() && !LfsStore::shouldFallbackForFetchError(result.errorCode())) {
+                        fail(result.errorMessage(), result.errorCode());
+                        return;
+                    }
+
+                    if (!result.hasError()) {
+                        const qint64 prior = run->bytesByOid.value(oid, 0);
+                        run->receivedBytes += (objectSize - prior);
+                        run->bytesByOid.insert(oid, objectSize);
+                    }
+                    run->completed++;
+                    reportAggregate();
+                    run->pump();
+                });
+        }
+
+        if (!run->finished && run->inFlight == 0 && run->nextIndex >= run->tasks.size()) {
+            run->finished = true;
             if (progress) {
                 const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
                 progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
             }
             deferred.complete(hydratePointerFiles(plan));
+            releaseDownloadRunPump(run, context);
+        }
+    };
+
+    if (progress) {
+        progress(formatLfsAggregateProgressText(0, totalObjects, 0, totalBytes), 0, totalObjects);
+    }
+
+    run->pump();
+    return deferred.future();
+}
+
+// Conservative per-request object cap across hosts. GitHub enforces 100 and rejects anything larger
+// with HTTP 413 "More than 100 objects specified"; GitLab/Bitbucket allow more (or document no cap),
+// so chunking at 100 is always valid, just more round trips on those hosts. Split the objects across
+// as many batch requests as needed and accumulate the per-object responses.
+constexpr int kMaxObjectsPerBatchRequest = 100;
+
+// Issues one or more batch requests (chunked to kMaxObjectsPerBatchRequest) for the given specs and
+// accumulates every object response. Chunks run serially; the first failing chunk aborts and
+// reports its error (the caller decides fallback vs. propagate). Never captures `this`.
+QFuture<Monad::Result<QVector<LfsBatchClient::ObjectResponse>>>
+runLfsBatchRequests(const QString& operation,
+                    const QVector<LfsBatchClient::ObjectSpec>& specs,
+                    std::shared_ptr<LfsBatchClient> client,
+                    QObject* context,
+                    const QString& remoteName)
+{
+    using BatchObjects = QVector<LfsBatchClient::ObjectResponse>;
+
+    auto deferred = AsyncFuture::deferred<Monad::Result<BatchObjects>>();
+    deferred.reportStarted();
+
+    auto objects = std::make_shared<BatchObjects>();
+    auto nextIndex = std::make_shared<int>(0);
+    auto step = std::make_shared<std::function<void()>>();
+
+    // Clears the step's self-capture once the chunk chain settles, so `step` (which otherwise keeps
+    // itself alive forever via the capture below) drops to zero refs and frees. Queued because the
+    // success path runs inside *step, and destroying a std::function from within its own body is UB.
+    auto releaseStep = [step, context]() {
+        QMetaObject::invokeMethod(context, [step]() { *step = nullptr; }, Qt::QueuedConnection);
+    };
+
+    *step = [deferred, operation, specs, remoteName, client, context, objects, nextIndex, step, releaseStep]() mutable {
+        if (*nextIndex >= specs.size()) {
+            deferred.complete(Monad::Result<BatchObjects>(*objects));
+            releaseStep();
             return;
         }
 
-        const LfsDownloadTask task = tasks->at(*nextIndex);
-        const int currentObject = *nextIndex + 1;
-        const int totalObjects = static_cast<int>(tasks->size());
-        const QString relativePath = task.relativePath;
-        (*nextIndex)++;
+        const int begin = *nextIndex;
+        const int count = std::min(kMaxObjectsPerBatchRequest, static_cast<int>(specs.size()) - begin);
+        *nextIndex += count;
 
-        if (progress) {
-            progress(formatLfsDownloadProgressText(relativePath,
-                                                   currentObject,
-                                                   totalObjects,
-                                                   0,
-                                                   task.pointer.size),
-                     currentObject,
-                     totalObjects);
+        QVector<LfsBatchClient::ObjectSpec> chunk;
+        chunk.reserve(count);
+        for (int i = begin; i < begin + count; ++i) {
+            chunk.push_back(specs.at(i));
         }
 
-        if (task.hasError) {
-            if (LfsStore::shouldFallbackForFetchError(task.errorCode)) {
-                (*step)();
-                return;
-            }
-            deferred.complete(Monad::ResultBase(task.errorMessage, task.errorCode));
-            return;
-        }
-
-        auto downloadFuture = client->downloadObject(
-            task.action,
-            *store,
-            task.pointer,
-            [progress, currentObject, totalObjects, relativePath](qint64 downloadedBytes, qint64 totalBytes) {
-                if (!progress) {
+        auto batchFuture = client->batch(operation, chunk, remoteName);
+        AsyncFuture::observe(batchFuture)
+            .context(context, [deferred, batchFuture, objects, step, releaseStep]() mutable {
+                const auto batchResult = batchFuture.result();
+                if (batchResult.hasError()) {
+                    deferred.complete(Monad::Result<BatchObjects>(batchResult.errorMessage(),
+                                                                  batchResult.errorCode()));
+                    releaseStep();
                     return;
                 }
-                progress(formatLfsDownloadProgressText(relativePath,
-                                                       currentObject,
-                                                       totalObjects,
-                                                       downloadedBytes,
-                                                       totalBytes),
-                         currentObject,
-                         totalObjects);
-            });
-        AsyncFuture::observe(downloadFuture)
-            .context(context, [deferred, step, downloadFuture]() mutable {
-                const auto result = downloadFuture.result();
-                if (result.hasError()) {
-                    if (LfsStore::shouldFallbackForFetchError(result.errorCode())) {
-                        (*step)();
-                        return;
-                    }
-                    deferred.complete(Monad::ResultBase(result.errorMessage(), result.errorCode()));
-                    return;
-                }
+                objects->append(batchResult.value().objects);
                 (*step)();
             });
     };
@@ -1551,8 +1702,8 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
         return AsyncFuture::completed(hydratePointerFiles(plan));
     }
 
-    // One batch request resolves download actions for every missing object, instead of a separate
-    // batch round trip per object.
+    // Resolve download actions for every missing object in as few batch requests as the 100-object
+    // cap allows, instead of a separate batch round trip per object.
     QVector<LfsBatchClient::ObjectSpec> specs;
     specs.reserve(plan.missingPointers.size());
     for (const LfsPointer& pointer : plan.missingPointers) {
@@ -1560,7 +1711,7 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
     }
 
     auto client = std::make_shared<LfsBatchClient>(plan.gitDirPath);
-    auto batchFuture = client->batch(QStringLiteral("download"), specs);
+    auto batchFuture = runLfsBatchRequests(QStringLiteral("download"), specs, client, context);
     return AsyncFuture::observe(batchFuture)
         .context(context, [batchFuture, plan, client, context, progress]() -> GitRepository::GitFuture {
             const auto batchResult = batchFuture.result();
@@ -1572,7 +1723,7 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
                 return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
             }
 
-            return runLfsDownloadActions(plan, batchResult.value().objects, client, context, progress);
+            return runLfsDownloadActions(plan, batchResult.value(), client, context, progress);
         }).future();
 }
 

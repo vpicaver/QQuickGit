@@ -23,8 +23,13 @@ public:
     void setDownloadObject(const QString& oid, const QByteArray& bytes);
     void setExpectedUploadObject(const QString& oid, qint64 size);
 
+    // Delays each object download response so concurrent transfers overlap on the wire long enough
+    // to be observed via maxConcurrentObjectRequests(). 0 (default) responds synchronously.
+    void setObjectResponseDelayMs(int delayMs);
+
     int downloadBatchRequestCount() const;
     int downloadObjectRequestCount() const;
+    int maxConcurrentObjectRequests() const;
     int uploadBatchRequestCount() const;
     int uploadRequestCount() const;
 
@@ -40,6 +45,9 @@ private:
     QSet<QString> mUploadedOids;
     int mDownloadBatchRequestCount = 0;
     int mDownloadObjectRequestCount = 0;
+    int mObjectResponseDelayMs = 0;
+    int mInFlightObjectRequests = 0;
+    int mMaxConcurrentObjectRequests = 0;
     int mUploadBatchRequestCount = 0;
     int mUploadRequestCount = 0;
 };

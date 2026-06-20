@@ -6,6 +6,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTcpSocket>
+#include <QTimer>
+
+#include <algorithm>
 
 namespace {
 int contentLengthFromHeaders(const QByteArray& request)
@@ -36,6 +39,9 @@ QJsonArray requestedObjectsFromBatchBody(const QByteArray& body)
     }
     return doc.object().value(QStringLiteral("objects")).toArray();
 }
+
+// Real Git LFS batch endpoints (e.g. GitHub) reject requests with more than 100 objects.
+constexpr int kMaxBatchObjects = 100;
 } // namespace
 
 LfsServer::LfsServer(QObject* parent)
@@ -73,6 +79,11 @@ void LfsServer::setExpectedUploadObject(const QString& oid, qint64 size)
     mExpectedUploads.insert(oid, size);
 }
 
+void LfsServer::setObjectResponseDelayMs(int delayMs)
+{
+    mObjectResponseDelayMs = std::max(0, delayMs);
+}
+
 int LfsServer::downloadBatchRequestCount() const
 {
     return mDownloadBatchRequestCount;
@@ -81,6 +92,11 @@ int LfsServer::downloadBatchRequestCount() const
 int LfsServer::downloadObjectRequestCount() const
 {
     return mDownloadObjectRequestCount;
+}
+
+int LfsServer::maxConcurrentObjectRequests() const
+{
+    return mMaxConcurrentObjectRequests;
 }
 
 int LfsServer::uploadBatchRequestCount() const
@@ -139,6 +155,12 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
     const QByteArray body = request.mid(bodyStart, contentLength >= 0 ? contentLength : receivedBodyBytes);
 
     if (path.contains("/objects/batch")) {
+        if (requestedObjectsFromBatchBody(body).size() > kMaxBatchObjects) {
+            respond(socket, 413, QByteArray("application/vnd.git-lfs+json"),
+                    QByteArray("{\"message\":\"More than 100 objects specified\"}"));
+            return true;
+        }
+
         const bool isUpload = body.contains("\"operation\":\"upload\"");
         if (isUpload) {
             mUploadBatchRequestCount++;
@@ -235,10 +257,26 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
         mDownloadObjectRequestCount++;
         const QByteArray oidBytes = path.mid(objectPrefixIndex + objectPathPrefix.size());
         const QString requestedOid = QString::fromUtf8(oidBytes);
-        if (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid)) {
-            respond(socket, 200, QByteArray("application/octet-stream"), mDownloadObjects.value(requestedOid));
+
+        mInFlightObjectRequests++;
+        mMaxConcurrentObjectRequests = std::max(mMaxConcurrentObjectRequests, mInFlightObjectRequests);
+
+        auto sendObject = [this, socket, requestedOid]() {
+            mInFlightObjectRequests--;
+            if (!requestedOid.isEmpty() && mDownloadObjects.contains(requestedOid)) {
+                respond(socket, 200, QByteArray("application/octet-stream"), mDownloadObjects.value(requestedOid));
+            } else {
+                respond(socket, 404, QByteArray("application/octet-stream"), QByteArray("missing"));
+            }
+        };
+
+        // Holding the response open lets several transfers overlap on the wire so the test can see
+        // the parallel hydration window via maxConcurrentObjectRequests(). socket is the context
+        // object, so a disconnect cancels the pending response cleanly.
+        if (mObjectResponseDelayMs > 0) {
+            QTimer::singleShot(mObjectResponseDelayMs, socket, sendObject);
         } else {
-            respond(socket, 404, QByteArray("application/octet-stream"), QByteArray("missing"));
+            sendObject();
         }
         return true;
     }
@@ -252,7 +290,14 @@ void LfsServer::respond(QTcpSocket* socket,
                             const QByteArray& contentType,
                             const QByteArray& body) const
 {
-    const QByteArray statusText = status == 200 ? QByteArray("OK") : QByteArray("Not Found");
+    const auto reasonPhrase = [](int code) -> QByteArray {
+        switch (code) {
+        case 200: return QByteArray("OK");
+        case 413: return QByteArray("Payload Too Large");
+        default:  return QByteArray("Not Found");
+        }
+    };
+    const QByteArray statusText = reasonPhrase(status);
     const QByteArray response =
         "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
         "Content-Type: " + contentType + "\r\n"
