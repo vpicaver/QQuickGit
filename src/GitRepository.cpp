@@ -3019,8 +3019,15 @@ bool GitRepository::hasCommits() const
 void GitRepository::checkStatus()
 {
     if (d->repo) {
-        auto locker = d->lockRepo();
-        setModifiedFileCount(computeModifiedFileCount(d->repo, d->mDirectory.absolutePath()));
+        int count = 0;
+        {
+            // Hold the lock only for the git read, not across the signal that
+            // setModifiedFileCount emits — a slot may re-enter checkStatus()
+            // and deadlock on this non-recursive mutex (e.g. cwProjectSyncHealth).
+            auto locker = d->lockRepo();
+            count = computeModifiedFileCount(d->repo, d->mDirectory.absolutePath());
+        }
+        setModifiedFileCount(count);
     }
 }
 
