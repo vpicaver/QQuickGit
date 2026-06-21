@@ -2029,6 +2029,13 @@ public:
     // keeps it alive even if the GitRepository is destroyed mid-run (issue #546).
     std::shared_ptr<QMutex> mRepoMutex = std::make_shared<QMutex>();
 
+    // Acquire the per-repo serialization lock for an apply phase. Hold it only
+    // for the local mutation (index/worktree/refs/config/LFS smudge), never
+    // across network transfer — see plans/GIT_REPO_SERIAL_EXECUTOR_PLAN.md.
+    // For worker lambdas, capture `auto repoMutex = d->mRepoMutex;` by value and
+    // lock inside the apply phase so the mutex outlives the GitRepository.
+    [[nodiscard]] QMutexLocker<QMutex> lockRepo() const { return QMutexLocker(mRepoMutex.get()); }
+
     // Tracks the in-flight background status worker. Touched only on the main
     // thread (checkStatusAsync and its continuation), so it needs no locking.
     QFuture<int> mStatusFuture;
@@ -2925,18 +2932,24 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     return AsyncFuture::completed(ResultBase(cloneResult.errorMessage(), cloneResult.errorCode()));
                 }
 
-                d->repo = cloneResult.value().repo;
-                if (d->mLfsStore) {
-                    LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
-                    d->mLfsStore.reset();
+                // Apply tail of the clone: swap in the repo handle, re-register
+                // the shared LFS store, and write config. Serialize against the
+                // status worker before LFS hydration streams in (issue #546).
+                {
+                    auto locker = d->lockRepo();
+                    d->repo = cloneResult.value().repo;
+                    if (d->mLfsStore) {
+                        LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
+                        d->mLfsStore.reset();
+                    }
+                    const char* gitPath = git_repository_path(d->repo);
+                    if (gitPath) {
+                        d->mLfsStore = std::make_shared<LfsStore>(QString::fromUtf8(gitPath), d->mLfsPolicy);
+                        LfsStoreRegistry::registerStore(d->mLfsStore);
+                    }
+                    ensureLfsAttributes();
+                    ensureStandardLfsFilterConfig(d->repo);
                 }
-                const char* gitPath = git_repository_path(d->repo);
-                if (gitPath) {
-                    d->mLfsStore = std::make_shared<LfsStore>(QString::fromUtf8(gitPath), d->mLfsPolicy);
-                    LfsStoreRegistry::registerStore(d->mLfsStore);
-                }
-                ensureLfsAttributes();
-                ensureStandardLfsFilterConfig(d->repo);
                 auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
                     const int safeTotal = std::max(1, total);
                     const int safeCurrent = std::clamp(current, 0, safeTotal);
@@ -3006,7 +3019,7 @@ bool GitRepository::hasCommits() const
 void GitRepository::checkStatus()
 {
     if (d->repo) {
-        QMutexLocker locker(d->mRepoMutex.get());
+        auto locker = d->lockRepo();
         setModifiedFileCount(computeModifiedFileCount(d->repo, d->mDirectory.absolutePath()));
     }
 }
@@ -3056,7 +3069,7 @@ QFuture<bool> GitRepository::checkStatusAsync()
 
 void GitRepository::resetHard(const QString& refSpec)
 {
-    QMutexLocker locker(d->mRepoMutex.get());
+    auto locker = d->lockRepo();
 
     git_object* object;
     check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
@@ -3076,7 +3089,7 @@ void GitRepository::cleanUntracked()
         return;
     }
 
-    QMutexLocker locker(d->mRepoMutex.get());
+    auto locker = d->lockRepo();
 
     git_status_list* list = nullptr;
     git_status_options opt = GIT_STATUS_OPTIONS_INIT;
@@ -3123,7 +3136,7 @@ void GitRepository::commitAll(const QString &subject,
 
     // Serialize against the background status worker so the LFS clean filter,
     // index, and config are never touched from two threads at once (issue #546).
-    QMutexLocker locker(d->mRepoMutex.get());
+    auto locker = d->lockRepo();
 
     ensureStandardLfsFilterConfig(d->repo);
 
@@ -3267,7 +3280,13 @@ void GitRepository::commitAll(const QString &subject,
 
 GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 {
-    ensureStandardLfsFilterConfig(d->repo);
+    // Config write touches .git/config — serialize against the status worker,
+    // which writes the same config from its own handle (issue #546). The lock is
+    // released before the network transfer below; we never hold it across I/O.
+    {
+        auto locker = d->lockRepo();
+        ensureStandardLfsFilterConfig(d->repo);
+    }
     auto future = progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
@@ -3350,7 +3369,10 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
 
 GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 {
-    ensureStandardLfsFilterConfig(d->repo);
+    {
+        auto locker = d->lockRepo();
+        ensureStandardLfsFilterConfig(d->repo);
+    }
     QString fixedRemote = fixUpRemote(remote);
     auto future = progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
@@ -3405,7 +3427,10 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 
 GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remote)
 {
-    ensureStandardLfsFilterConfig(d->repo);
+    {
+        auto locker = d->lockRepo();
+        ensureStandardLfsFilterConfig(d->repo);
+    }
     QString fixedRemote = fixUpRemote(remote);
     auto future = progressFuture<Result<MergeResult>>(
         [=](QFutureInterface<Result<MergeResult>> progressInterface)
@@ -3459,7 +3484,13 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                         }
 
                         setProgress(&progressInterface, ProgressState(QStringLiteral("Rebasing"), 0, 1));
-                        const auto rebaseResult = runRebaseOntoRemoteBranch(d->repo, remoteBranch, account());
+                        // Apply phase: the rebase rewrites the worktree/index and
+                        // smudges LFS files. Serialize against the status worker;
+                        // released before the merge() fallback, which self-locks.
+                        const auto rebaseResult = [&]() {
+                            auto locker = d->lockRepo();
+                            return runRebaseOntoRemoteBranch(d->repo, remoteBranch, account());
+                        }();
                         if (rebaseResult.hasError()) {
                             return Result<MergeResult>(rebaseResult.errorMessage(),
                                                        rebaseResult.errorCode());
@@ -3510,7 +3541,10 @@ GitRepository::GitFuture GitRepository::pullPush(const QString &refSpec, const Q
 
 GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 {
-    ensureStandardLfsFilterConfig(d->repo);
+    {
+        auto locker = d->lockRepo();
+        ensureStandardLfsFilterConfig(d->repo);
+    }
     return progressFuture<ResultBase>(
         [=](QFutureInterface<ResultBase> progressInterface)
         {
@@ -3546,6 +3580,10 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 
 GitRepository::MergeResult GitRepository::merge(const QStringList &refSpecs)
 {
+    // Apply phase: serialize the index/worktree/config/LFS mutation against the
+    // status worker and other repo ops (issue #546). RAII covers every return.
+    auto locker = d->lockRepo();
+
     ensureStandardLfsFilterConfig(d->repo);
 
     auto state = git_repository_state(d->repo);
@@ -4366,7 +4404,7 @@ void GitRepository::createBranch(const QString &branchName, const QString& refSp
 {
     Q_ASSERT(d->repo);
 
-    QMutexLocker locker(d->mRepoMutex.get());
+    auto locker = d->lockRepo();
 
     git_reference* ref;
     git_annotated_commit* commit;
@@ -4414,9 +4452,13 @@ GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, Checkou
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localRefSpec = refSpec.toLocal8Bit();
+            auto repoMutex = d->mRepoMutex;
 
             auto prepareFuture = QtConcurrent::run([=]() mutable {
                 return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    // Apply phase: serialize the worktree/index/HEAD mutation
+                    // against the status worker and other repo ops (issue #546).
+                    QMutexLocker locker(repoMutex.get());
                     auto repo = makeScopedPtr(git_repository_free);
                     check(git_repository_open(&repo, path));
 
@@ -4462,9 +4504,13 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localRefSpec = refSpec.toLocal8Bit();
+            auto repoMutex = d->mRepoMutex;
 
             auto prepareFuture = QtConcurrent::run([=]() mutable {
                 return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    // Apply phase: serialize the worktree/index mutation against
+                    // the status worker and other repo ops (issue #546).
+                    QMutexLocker locker(repoMutex.get());
                     auto repo = makeScopedPtr(git_repository_free);
                     check(git_repository_open(&repo, path));
 
@@ -4613,9 +4659,13 @@ GitRepository::GitFuture GitRepository::restoreToCommit(const QString& targetSha
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localTargetSha = targetSha.toLocal8Bit();
+            auto repoMutex = d->mRepoMutex;
 
             auto prepareFuture = QtConcurrent::run([=]() mutable {
                 return mtry([=]() mutable -> Monad::Result<LfsHydrationPlan> {
+                    // Apply phase: creates a commit and checks out, writing the
+                    // index/worktree. Serialize against the status worker (#546).
+                    QMutexLocker locker(repoMutex.get());
                     auto repo = makeScopedPtr(git_repository_free);
                     check(git_repository_open(&repo, path));
 
