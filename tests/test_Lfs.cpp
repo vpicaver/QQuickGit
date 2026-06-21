@@ -25,7 +25,6 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
-#include <QThreadPool>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -3123,15 +3122,12 @@ TEST_CASE("Lfs hydration downloads missing objects in parallel with aggregate pr
     }
 }
 
-// Hidden ([.]) so the default no-filter run (CI/nightly) skips it: this exercise commits 100+ LFS
-// files, which trips a pre-existing heap-corruption race in the many-file clean path that is
-// unrelated to the batch-chunking fix under test. Run on demand with the [lfs-batch-cap] tag.
+// Commits 100+ LFS files in a single commitAll and hydrates them through the 100-object batch
+// cap. Committing this many files at once used to trip a heap-corruption race in the clean path
+// (issue #546); serializing the background status worker against commitAll fixed it, so this now
+// runs in the default suite and doubles as the #546 regression.
 TEST_CASE("Lfs hydration splits more than 100 missing objects across batch requests",
-          "[.][lfs-batch-cap][regression][P1]") {
-    // Drain background hydration workers left running by earlier tests before this heavier test
-    // does its git work, so a lingering worker can't race it (a pre-existing teardown hazard).
-    QThreadPool::globalInstance()->waitForDone();
-
+          "[lfs-batch-cap][regression][P1]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
@@ -3163,20 +3159,17 @@ TEST_CASE("Lfs hydration splits more than 100 missing objects across batch reque
     account.setEmail(QStringLiteral("lfs@test.invalid"));
     author.setAccount(&account);
 
-    // Commit one file per commit. Committing many LFS files in a single commitAll trips a
-    // pre-existing heap-corruption race in the clean path (issue #546); one-at-a-time keeps each
-    // commit the size of the other LFS tests while still leaving 101 distinct pointers (and missing
-    // objects) in HEAD. Do NOT batch multiple files per commit here — that re-arms the #546 race.
+    // Commit all 101 LFS files in a single commitAll. This is the path that used to trip the
+    // #546 clean-path race; it leaves 101 distinct pointers (and missing objects) in HEAD.
     QHash<QString, QByteArray> bytesByFile;
     for (int i = 0; i < fileCount; ++i) {
         const QString& fileName = trackedFileNames.at(i);
         const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), fileColors.at(i));
         REQUIRE(!bytes.isEmpty());
         bytesByFile.insert(fileName, bytes);
-
-        REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files %1").arg(i),
-                                         QStringLiteral("batch cap baseline")));
     }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add %1 LFS files").arg(fileCount),
+                                     QStringLiteral("batch cap baseline")));
 
     GitRepository consumer;
     consumer.setDirectory(QDir(consumerPath));
@@ -3235,11 +3228,7 @@ TEST_CASE("Lfs hydration splits more than 100 missing objects across batch reque
 }
 
 TEST_CASE("Lfs push splits more than 100 tracked objects across batch requests",
-          "[.][lfs-batch-cap][regression][P1]") {
-    // Drain background hydration workers left running by earlier tests before this heavier test
-    // does its git work, so a lingering worker can't race it (a pre-existing teardown hazard).
-    QThreadPool::globalInstance()->waitForDone();
-
+          "[lfs-batch-cap][regression][P1]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
@@ -3273,18 +3262,15 @@ TEST_CASE("Lfs push splits more than 100 tracked objects across batch requests",
     account.setEmail(QStringLiteral("lfs@test.invalid"));
     author.setAccount(&account);
 
-    // Commit one file per commit. Committing many LFS files in a single commitAll trips a
-    // pre-existing heap-corruption race in the clean path (issue #546); one-at-a-time keeps each
-    // commit the size of the other LFS tests while still leaving 101 distinct pointers in HEAD to
-    // upload. Do NOT batch multiple files per commit here — that re-arms the #546 race.
+    // Commit all 101 LFS files in a single commitAll (the path that used to trip the #546 clean
+    // race), leaving 101 distinct pointers in HEAD to upload.
     for (int i = 0; i < fileCount; ++i) {
         const QString& fileName = trackedFileNames.at(i);
         const QByteArray bytes = createPngFile(QDir(authorPath).filePath(fileName), fileColors.at(i));
         REQUIRE(!bytes.isEmpty());
-
-        REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files %1").arg(i),
-                                         QStringLiteral("push batch cap baseline")));
     }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add %1 LFS files").arg(fileCount),
+                                     QStringLiteral("push batch cap baseline")));
 
     git_repository* authorRepo = nullptr;
     REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
@@ -3312,6 +3298,63 @@ TEST_CASE("Lfs push splits more than 100 tracked objects across batch requests",
     // would have been rejected with HTTP 413), and every object is still uploaded individually.
     CHECK(lfsServer.uploadBatchRequestCount() >= 2);
     CHECK(lfsServer.uploadRequestCount() == fileCount);
+}
+
+// Focused regression for issue #546: committing many LFS files in a single commitAll while the
+// background status worker (refsChanged -> checkStatusAsync) is in flight must not corrupt the
+// heap. Each commitAll re-dirties every tracked file and kicks the status worker, so the worker's
+// git_status clean pass overlaps the next commit's clean path on the same repo. The fix serializes
+// the two against a per-repository mutex. No LFS server or clone — this isolates the clean path.
+TEST_CASE("Lfs commitAll with many files stays safe against the background status worker",
+          "[LFS][regression][P1]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-clean-race"));
+
+    const int fileCount = 101;
+    QStringList trackedFileNames;
+    for (int i = 0; i < fileCount; ++i) {
+        trackedFileNames.append(QStringLiteral("cap-%1.png").arg(i, 3, 10, QLatin1Char('0')));
+    }
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    const auto writeGeneration = [&](int generation) {
+        for (int i = 0; i < fileCount; ++i) {
+            // Distinct color per (file, generation) so every commitAll re-dirties every file.
+            const QColor color((i + generation) % 256, generation % 256, (i * 7) % 256);
+            REQUIRE(!createPngFile(QDir(authorPath).filePath(trackedFileNames.at(i)), color).isEmpty());
+        }
+    };
+
+    for (int generation = 0; generation < 6; ++generation) {
+        writeGeneration(generation);
+        REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Generation %1").arg(generation),
+                                         QStringLiteral("clean race regression")));
+        // Hammer the background status worker so it overlaps the next generation's clean path.
+        author.checkStatusAsync();
+    }
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    // Every tracked file must have landed in HEAD as a valid LFS pointer.
+    for (const QString& fileName : std::as_const(trackedFileNames)) {
+        const QByteArray blobData = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!blobData.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(blobData, &pointer));
+    }
 }
 
 TEST_CASE("Lfs pull delete ignores hydrated file modifications", "[LFS][regression][P1]") {

@@ -29,6 +29,8 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QPointer>
 #include <QSet>
 #include <QtConcurrent>
@@ -2020,6 +2022,19 @@ public:
     std::shared_ptr<LfsStore> mLfsStore;
     GitCredentials m_credentials;
 
+    // Serializes git operations on this repository across threads so the
+    // background status worker (checkStatusAsync) can never run concurrently
+    // with a main-thread operation that touches the same index/working tree,
+    // config, or shared LFS store. Held by a shared_ptr so an in-flight worker
+    // keeps it alive even if the GitRepository is destroyed mid-run (issue #546).
+    std::shared_ptr<QMutex> mRepoMutex = std::make_shared<QMutex>();
+
+    // Tracks the in-flight background status worker. Touched only on the main
+    // thread (checkStatusAsync and its continuation), so it needs no locking.
+    QFuture<int> mStatusFuture;
+    QFuture<bool> mStatusBoolFuture;
+    bool mStatusRefreshPending = false;
+
     ~GitRepositoryData() {
         unregisterImageProvider();
         if(repo) {
@@ -2287,6 +2302,14 @@ GitRepository::GitRepository(QObject *parent) :
 
 GitRepository::~GitRepository()
 {
+    // Let any in-flight background status worker finish before we tear down the
+    // LFS store and registry entry it may still be reading through the clean
+    // filter. The worker holds its own repo handle and the shared mutex, so this
+    // is a plain QFuture wait (not AsyncFuture) and does not spin the event loop.
+    if (d->mStatusFuture.isRunning()) {
+        d->mStatusFuture.waitForFinished();
+    }
+
     if (d->mLfsStore) {
         LfsStoreRegistry::unregisterStore(d->mLfsStore->gitDirPath(), d->mLfsStore);
         d->mLfsStore.reset();
@@ -2983,6 +3006,7 @@ bool GitRepository::hasCommits() const
 void GitRepository::checkStatus()
 {
     if (d->repo) {
+        QMutexLocker locker(d->mRepoMutex.get());
         setModifiedFileCount(computeModifiedFileCount(d->repo, d->mDirectory.absolutePath()));
     }
 }
@@ -2992,8 +3016,22 @@ QFuture<bool> GitRepository::checkStatusAsync()
     if (!d->repo) {
         return QtConcurrent::run([]() { return false; });
     }
+
+    // Coalesce: keep at most one background status worker in flight. A burst of
+    // refsChanged emissions (e.g. a rapid commitAll loop) marks a refresh
+    // pending and re-uses the running future instead of spawning overlapping
+    // workers that would race the main thread's git operations (issue #546).
+    if (d->mStatusFuture.isRunning()) {
+        d->mStatusRefreshPending = true;
+        return d->mStatusBoolFuture;
+    }
+    d->mStatusRefreshPending = false;
+
     const QString dirPath = d->mDirectory.absolutePath();
-    auto countFuture = QtConcurrent::run([dirPath]() -> int {
+    auto repoMutex = d->mRepoMutex;
+    auto countFuture = QtConcurrent::run([dirPath, repoMutex]() -> int {
+        // Serialize against main-thread git operations on the same repository.
+        QMutexLocker locker(repoMutex.get());
         git_repository* repo = nullptr;
         if (git_repository_open(&repo, dirPath.toLocal8Bit().constData()) != GIT_OK) {
             return 0;
@@ -3001,18 +3039,25 @@ QFuture<bool> GitRepository::checkStatusAsync()
         auto repoGuard = qScopeGuard([&repo]() { git_repository_free(repo); });
         return computeModifiedFileCount(repo, dirPath);
     });
+    d->mStatusFuture = countFuture;
 
     auto boolFuture = AsyncFuture::observe(countFuture).context(this, [this, countFuture]() {
         int count = countFuture.result();
         setModifiedFileCount(count);
+        if (d->mStatusRefreshPending) {
+            checkStatusAsync();
+        }
         return count > 0;
     }).future();
+    d->mStatusBoolFuture = boolFuture;
 
     return boolFuture;
 }
 
 void GitRepository::resetHard(const QString& refSpec)
 {
+    QMutexLocker locker(d->mRepoMutex.get());
+
     git_object* object;
     check(git_revparse_single(&object, d->repo, refSpec.toLocal8Bit()));
 
@@ -3021,6 +3066,7 @@ void GitRepository::resetHard(const QString& refSpec)
 
     git_object_free(object);
 
+    locker.unlock();
     emit refsChanged();
 }
 
@@ -3029,6 +3075,8 @@ void GitRepository::cleanUntracked()
     if (!d->repo) {
         return;
     }
+
+    QMutexLocker locker(d->mRepoMutex.get());
 
     git_status_list* list = nullptr;
     git_status_options opt = GIT_STATUS_OPTIONS_INIT;
@@ -3072,6 +3120,11 @@ void GitRepository::commitAll(const QString &subject,
                               const QString &description)
 {
     Q_ASSERT(account());
+
+    // Serialize against the background status worker so the LFS clean filter,
+    // index, and config are never touched from two threads at once (issue #546).
+    QMutexLocker locker(d->mRepoMutex.get());
+
     ensureStandardLfsFilterConfig(d->repo);
 
     git_index *index;
@@ -3208,6 +3261,7 @@ void GitRepository::commitAll(const QString &subject,
     git_tree_free(parentTree);
     git_tree_free(tree);
 
+    locker.unlock();
     emit refsChanged();
 }
 
@@ -4312,6 +4366,8 @@ void GitRepository::createBranch(const QString &branchName, const QString& refSp
 {
     Q_ASSERT(d->repo);
 
+    QMutexLocker locker(d->mRepoMutex.get());
+
     git_reference* ref;
     git_annotated_commit* commit;
 
@@ -4330,6 +4386,7 @@ void GitRepository::createBranch(const QString &branchName, const QString& refSp
         d->checkout(git_annotated_commit_id(commit), QString("refs/heads/") + branchName);
     }
 
+    locker.unlock();
     emit refsChanged();
 }
 
