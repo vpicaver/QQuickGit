@@ -19,7 +19,7 @@ const int timeout = 30000;
 using namespace QQuickGit;
 
 //This test case is flakey
-TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[GitFutureWatcher]") {
+TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[GitFutureWatcher][network][ssh]") {
 
     QTemporaryDir tempParent;
     REQUIRE(tempParent.isValid());
@@ -64,7 +64,7 @@ TEST_CASE("GitFutureWatcher should watch git repository futures correctly", "[Gi
     CHECK(watcher.errorMessage().isEmpty());
 }
 
-TEST_CASE("GitFutureWatcher Test bad url handling", "[GitFutureWatcher]") {
+TEST_CASE("GitFutureWatcher Test bad url handling", "[GitFutureWatcher][network][ssh]") {
 
     QTemporaryDir tempParent;
     REQUIRE(tempParent.isValid());
