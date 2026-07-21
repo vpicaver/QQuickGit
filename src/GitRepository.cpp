@@ -1790,7 +1790,8 @@ GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir,
 
 GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<GitRepository::MergeResult>& mergeResult,
                                                          const QDir& repositoryDir,
-                                                         QObject* context)
+                                                         QObject* context,
+                                                         const LfsHydrationProgress& progress = {})
 {
     if (mergeResult.hasError()) {
         return AsyncFuture::completed(mergeResult);
@@ -1804,7 +1805,7 @@ GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<Git
         return AsyncFuture::completed(mergeResult);
     }
 
-    auto hydrateFuture = runLfsHydrationForDirectory(repositoryDir, context);
+    auto hydrateFuture = runLfsHydrationForDirectory(repositoryDir, context, progress);
     return AsyncFuture::observe(hydrateFuture)
         .context(context, [hydrateFuture, mergeResult]() -> Monad::Result<GitRepository::MergeResult> {
             const auto hydrateResult = hydrateFuture.result();
@@ -2008,6 +2009,20 @@ void setProgress(ProgressInterface* progressInterface, const ProgressState& prog
     //We have to increment the progress by one to signal that the text changes
     progressInterface->setProgressRange(0, progress.total());
     setProgress(progressInterface, progress.toJsonString());
+}
+
+//Builds the LFS-hydration progress callback shared by clone/fetch/pull/pullRebaseOrMerge.
+//The QFutureInterface is copied into the returned callback so it outlives the caller frame.
+template<typename ProgressInterface>
+LfsHydrationProgress makeLfsHydrationProgress(ProgressInterface progressInterface) {
+    return [progressInterface](const QString& text, int current, int total) mutable {
+        const int safeTotal = std::max(1, total);
+        const int safeCurrent = std::clamp(current, 0, safeTotal);
+        setProgress(&progressInterface,
+                    ProgressState(text,
+                                  static_cast<size_t>(safeCurrent),
+                                  static_cast<size_t>(safeTotal)));
+    };
 }
 
 
@@ -2950,15 +2965,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     ensureLfsAttributes();
                     ensureStandardLfsFilterConfig(d->repo);
                 }
-                auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
-                    const int safeTotal = std::max(1, total);
-                    const int safeCurrent = std::clamp(current, 0, safeTotal);
-                    setProgress(&progressInterface,
-                                ProgressState(text,
-                                              static_cast<size_t>(safeCurrent),
-                                              static_cast<size_t>(safeTotal)));
-                };
-                return runLfsHydrationForDirectory(d->mDirectory, this, lfsProgress);
+                return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsHydrationProgress(progressInterface));
             }).future();
     });
 }
@@ -3425,8 +3432,9 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                                      return Result<MergeResult>(); //QStringLiteral("Current branch name is empty"));
                                  });
 
-                             return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this);
-                         }).future(); //This strips the progress from fetchFuture
+                             return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this,
+                                                                  makeLfsHydrationProgress(progressInterface));
+                         }).future();
         });
     emitRefsChangedOnSuccess(future);
     return future;
@@ -3511,7 +3519,8 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                         return Result<MergeResult>(MergeResult(rebaseResult.value()));
                     });
 
-                    return runMergeHydrationForDirectory(pullResult, d->mDirectory, this);
+                    return runMergeHydrationForDirectory(pullResult, d->mDirectory, this,
+                                                         makeLfsHydrationProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -3572,15 +3581,7 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 
                     d->reopenRepository();
 
-                    auto lfsProgress = [progressInterface](const QString& text, int current, int total) mutable {
-                        const int safeTotal = std::max(1, total);
-                        const int safeCurrent = std::clamp(current, 0, safeTotal);
-                        setProgress(&progressInterface,
-                                    ProgressState(text,
-                                                  static_cast<size_t>(safeCurrent),
-                                                  static_cast<size_t>(safeTotal)));
-                    };
-                    return runLfsHydrationForDirectory(d->mDirectory, this, lfsProgress);
+                    return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsHydrationProgress(progressInterface));
                 }).future();
         });
 }

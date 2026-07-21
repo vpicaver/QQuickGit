@@ -32,6 +32,8 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <algorithm>
+#include <functional>
 #include <memory>
 #include <csignal>
 #if defined(Q_OS_UNIX)
@@ -2897,6 +2899,200 @@ TEST_CASE("Lfs pull fast-forward hydrates by fetching missing LFS object", "[LFS
 
     CHECK(lfsServer.downloadBatchRequestCount() > 0);
     CHECK(lfsServer.downloadObjectRequestCount() > 0);
+}
+
+namespace {
+
+// Clones a consumer from an author repo tracking a single LFS file, then updates
+// that file on the author and primes the consumer to re-download it: the
+// consumer's lfs.url is pointed at `lfsServer` (with the updated object
+// registered), and the consumer's local copy is deleted so the next pull must
+// fetch it over the network. `beforeAuthorUpdate` runs on the freshly-cloned
+// consumer before the author's update commit — used to create diverging local
+// history for the rebase path. Returns the expected pointer for the fetch.
+LfsPointer primeConsumerForMissingLfsDownload(GitRepository& author,
+                                              GitRepository& consumer,
+                                              const QString& authorPath,
+                                              const QString& consumerPath,
+                                              const QString& trackedFileName,
+                                              Account& account,
+                                              LfsServer& lfsServer,
+                                              const std::function<void()>& beforeAuthorUpdate = {})
+{
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+    author.setAccount(&account);
+
+    const QString authorFilePath = QDir(authorPath).filePath(trackedFileName);
+    const QByteArray initialBytes = createPngFile(authorFilePath, Qt::red);
+    REQUIRE(!initialBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS file"), QStringLiteral("LFS progress baseline")));
+
+    consumer.setDirectory(QDir(consumerPath));
+    auto cloneFuture = consumer.clone(QUrl::fromLocalFile(authorPath));
+    REQUIRE(AsyncFuture::waitForFinished(cloneFuture, 60 * 1000));
+    INFO("Consumer clone error:" << cloneFuture.result().errorMessage().toStdString());
+    REQUIRE(!cloneFuture.result().hasError());
+
+    if (beforeAuthorUpdate) {
+        beforeAuthorUpdate();
+    }
+
+    const QByteArray updatedBytes = createPngFile(authorFilePath, Qt::green);
+    REQUIRE(!updatedBytes.isEmpty());
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Update LFS file"), QStringLiteral("LFS progress update")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    const QByteArray authorBlobData = readBlobFromHead(authorRepo, trackedFileName.toUtf8().constData());
+    REQUIRE(!authorBlobData.isEmpty());
+    LfsPointer expectedPointer;
+    REQUIRE(LfsPointer::parse(authorBlobData, &expectedPointer));
+    REQUIRE(expectedPointer.size == updatedBytes.size());
+
+    REQUIRE(setGitConfigString(consumerPath, "lfs.url", lfsServer.endpoint()));
+    lfsServer.setDownloadObject(expectedPointer.oid, updatedBytes);
+
+    const QString consumerGitDirPath = gitDirPathFromWorkTree(consumerPath);
+    REQUIRE(!consumerGitDirPath.isEmpty());
+    const QString missingObjectPath = LfsStore::objectPath(consumerGitDirPath, expectedPointer.oid);
+    REQUIRE(!missingObjectPath.isEmpty());
+    if (QFileInfo::exists(missingObjectPath)) {
+        REQUIRE(QFile::remove(missingObjectPath));
+    }
+
+    return expectedPointer;
+}
+
+// Attaches an LFS-download progress collector to `pullFuture` and returns the
+// list it fills. Only "Downloading LFS objects" updates are kept, so the
+// always-on "Hydrating LFS files" tick (emitted for any pointer file even when
+// nothing is fetched) can't masquerade as download progress. The list is heap-
+// owned so it outlives this frame and stays valid for the async callback.
+std::shared_ptr<QList<ProgressState>>
+observeLfsDownloadProgress(const GitRepository::MergeFuture& pullFuture)
+{
+    auto states = std::make_shared<QList<ProgressState>>();
+    AsyncFuture::observe(pullFuture).onProgress([states, pullFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(pullFuture.progressText());
+        if (state.text().contains(QStringLiteral("Downloading LFS objects"))) {
+            states->append(state);
+        }
+    });
+    return states;
+}
+
+// Asserts the collected LFS-download progress actually surfaced, kept a constant
+// object-count total, never went backwards, and reached completion
+// (current == total) by the furthest-along observed update.
+void requireLfsDownloadProgress(const QList<ProgressState>& downloadStates)
+{
+    INFO("Observed " << downloadStates.size() << " LFS download progress updates");
+    REQUIRE_FALSE(downloadStates.isEmpty());
+
+    const size_t total = downloadStates.first().total();
+    CHECK(total > 0);
+    size_t previousCurrent = 0;
+    size_t maxCurrent = 0;
+    for (const ProgressState& state : downloadStates) {
+        CHECK(state.total() == total);
+        CHECK(state.current() >= previousCurrent);
+        CHECK(state.current() <= state.total());
+        previousCurrent = state.current();
+        maxCurrent = (std::max)(maxCurrent, state.current());
+    }
+    CHECK(maxCurrent == total);
+}
+
+} // namespace
+
+TEST_CASE("Lfs pull fast-forward reports LFS download progress", "[LFS][regression][P2][issue-545]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-pull-progress"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-pull-progress"));
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+
+    GitRepository author;
+    GitRepository consumer;
+    primeConsumerForMissingLfsDownload(author, consumer, authorPath, consumerPath,
+                                       QStringLiteral("pull-progress.png"), account, lfsServer);
+
+    auto pullFuture = consumer.pull();
+    auto downloadStates = observeLfsDownloadProgress(pullFuture);
+
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
+    INFO("Pull error:" << pullFuture.result().errorMessage().toStdString()
+         << "code:" << pullFuture.result().errorCode());
+    REQUIRE(!pullFuture.result().hasError());
+    CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::FastForward);
+
+    // The missing object must actually have been downloaded, so download progress
+    // must have surfaced for it — the download-specific text, not the always-on
+    // "Hydrating LFS files" tick that fires for any pointer file.
+    REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
+    requireLfsDownloadProgress(*downloadStates);
+}
+
+TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][regression][P2][issue-545]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-rebase-progress"));
+    const QString consumerPath = QDir(tempDir.path()).filePath(QStringLiteral("consumer-rebase-progress"));
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+
+    GitRepository author;
+    GitRepository consumer;
+    consumer.setAccount(&account);
+
+    // A local, non-LFS commit puts the consumer ahead of the remote so
+    // pullRebaseOrMerge takes the rebase path rather than a fast-forward.
+    const auto addDivergingLocalCommit = [&]() {
+        const QString consumerLocalPath = QDir(consumerPath).filePath(QStringLiteral("consumer-only.txt"));
+        QFile localFile(consumerLocalPath);
+        REQUIRE(localFile.open(QFile::WriteOnly | QFile::Truncate));
+        const QByteArray localContents("consumer local change\n");
+        REQUIRE(localFile.write(localContents) == localContents.size());
+        localFile.close();
+        REQUIRE_NOTHROW(consumer.commitAll(QStringLiteral("Consumer local"), QStringLiteral("diverging local change")));
+    };
+
+    primeConsumerForMissingLfsDownload(author, consumer, authorPath, consumerPath,
+                                       QStringLiteral("rebase-progress.png"), account, lfsServer,
+                                       addDivergingLocalCommit);
+
+    auto pullFuture = consumer.pullRebaseOrMerge();
+    auto downloadStates = observeLfsDownloadProgress(pullFuture);
+
+    REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
+    INFO("pullRebaseOrMerge error:" << pullFuture.result().errorMessage().toStdString()
+         << "code:" << pullFuture.result().errorCode());
+    REQUIRE(!pullFuture.result().hasError());
+    CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::Rebased);
+
+    // The rebase must have hydrated the missing object over the network, so
+    // download progress must have surfaced for it — the download-specific text,
+    // not the always-on "Hydrating LFS files" tick that fires for any pointer file.
+    REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
+    requireLfsDownloadProgress(*downloadStates);
 }
 
 TEST_CASE("Lfs hydration fetches multiple missing objects with a single batch request",
