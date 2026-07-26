@@ -67,7 +67,8 @@ public:
 
     QFuture<Monad::ResultBase> uploadObject(const Action& action,
                                             const QString& objectPath,
-                                            const LfsPointer& pointer) const;
+                                            const LfsPointer& pointer,
+                                            std::function<void(qint64 uploadedBytes, qint64 totalBytes)> progressCallback = {}) const;
     QFuture<Monad::ResultBase> verifyObject(const Action& action,
                                             const LfsPointer& pointer) const;
 

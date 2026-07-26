@@ -2968,40 +2968,48 @@ LfsPointer primeConsumerForMissingLfsDownload(GitRepository& author,
     return expectedPointer;
 }
 
-// Attaches an LFS-download progress collector to `operationFuture` and returns
-// the list it fills. Only "Downloading LFS objects" updates are kept, so the
-// always-on "Hydrating LFS files" tick (emitted for any pointer file even when
-// nothing is fetched) can't masquerade as download progress. The list is heap-
-// owned so it outlives this frame and stays valid for the async callback.
-// Templated on the future type so it serves both the pull/merge (MergeFuture)
-// and checkout/reset/restore (GitFuture) hydration paths.
+// Attaches an LFS-transfer progress collector to `operationFuture` and returns
+// the list it fills. Only updates whose text contains `filterText` are kept, so
+// the always-on "Hydrating LFS files" tick (emitted for any pointer file even
+// when nothing is transferred) and the general push transfer ticks can't
+// masquerade as LFS transfer progress. Pass "Uploading LFS objects" for the push
+// path; the default matches the download (clone/fetch/pull/checkout) paths. The
+// list is heap-owned so it outlives this frame and stays valid for the async
+// callback. Templated on the future type so it serves both the MergeFuture
+// (pull/merge) and GitFuture (checkout/reset/restore/push) paths.
 template<typename FutureT>
 std::shared_ptr<QList<ProgressState>>
-observeLfsDownloadProgress(const FutureT& operationFuture)
+observeLfsTransferProgress(const FutureT& operationFuture,
+                           const QString& filterText = QStringLiteral("Downloading LFS objects"))
 {
     auto states = std::make_shared<QList<ProgressState>>();
-    AsyncFuture::observe(operationFuture).onProgress([states, operationFuture]() mutable {
+    AsyncFuture::observe(operationFuture).onProgress([states, operationFuture, filterText]() mutable {
         const ProgressState state = ProgressState::fromJson(operationFuture.progressText());
-        if (state.text().contains(QStringLiteral("Downloading LFS objects"))) {
+        if (state.text().contains(filterText)) {
             states->append(state);
         }
     });
     return states;
 }
 
-// Asserts the collected LFS-download progress actually surfaced, kept a constant
+// Asserts the collected LFS-transfer progress actually surfaced, kept a constant
 // object-count total, never went backwards, and reached completion
-// (current == total) by the furthest-along observed update.
-void requireLfsDownloadProgress(const QList<ProgressState>& downloadStates)
+// (current == total) by the furthest-along observed update. `expectedTotal` of 0
+// only requires a positive total; a positive value pins the exact object count.
+void requireLfsTransferProgress(const QList<ProgressState>& transferStates, size_t expectedTotal = 0)
 {
-    INFO("Observed " << downloadStates.size() << " LFS download progress updates");
-    REQUIRE_FALSE(downloadStates.isEmpty());
+    INFO("Observed " << transferStates.size() << " LFS transfer progress updates");
+    REQUIRE_FALSE(transferStates.isEmpty());
 
-    const size_t total = downloadStates.first().total();
-    CHECK(total > 0);
+    const size_t total = transferStates.first().total();
+    if (expectedTotal > 0) {
+        CHECK(total == expectedTotal);
+    } else {
+        CHECK(total > 0);
+    }
     size_t previousCurrent = 0;
     size_t maxCurrent = 0;
-    for (const ProgressState& state : downloadStates) {
+    for (const ProgressState& state : transferStates) {
         CHECK(state.total() == total);
         CHECK(state.current() >= previousCurrent);
         CHECK(state.current() <= state.total());
@@ -3094,14 +3102,14 @@ void requireOperationReportsLfsDownloadProgress(
         repository, QDir(tempDir.path()), trackedFileName, account, lfsServer);
 
     auto operationFuture = makeOperation(repository, fixture);
-    auto downloadStates = observeLfsDownloadProgress(operationFuture);
+    auto downloadStates = observeLfsTransferProgress(operationFuture);
     requireGitFutureSuccess(operationFuture);
 
     // The operation had to hydrate the missing object over the network, so
     // download-specific progress must have surfaced (not just the always-on
     // "Hydrating LFS files" tick), and the working tree must hold the real bytes.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
-    requireLfsDownloadProgress(*downloadStates);
+    requireLfsTransferProgress(*downloadStates);
     CHECK(readFileBytes(fixture.filePath) == fixture.bytes);
 }
 
@@ -3127,7 +3135,7 @@ TEST_CASE("Lfs pull fast-forward reports LFS download progress", "[LFS][regressi
                                        QStringLiteral("pull-progress.png"), account, lfsServer);
 
     auto pullFuture = consumer.pull();
-    auto downloadStates = observeLfsDownloadProgress(pullFuture);
+    auto downloadStates = observeLfsTransferProgress(pullFuture);
 
     REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
     INFO("Pull error:" << pullFuture.result().errorMessage().toStdString()
@@ -3139,7 +3147,7 @@ TEST_CASE("Lfs pull fast-forward reports LFS download progress", "[LFS][regressi
     // must have surfaced for it — the download-specific text, not the always-on
     // "Hydrating LFS files" tick that fires for any pointer file.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
-    requireLfsDownloadProgress(*downloadStates);
+    requireLfsTransferProgress(*downloadStates);
 }
 
 TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][regression][P2][issue-545]") {
@@ -3177,7 +3185,7 @@ TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][r
                                        addDivergingLocalCommit);
 
     auto pullFuture = consumer.pullRebaseOrMerge();
-    auto downloadStates = observeLfsDownloadProgress(pullFuture);
+    auto downloadStates = observeLfsTransferProgress(pullFuture);
 
     REQUIRE(AsyncFuture::waitForFinished(pullFuture, 60 * 1000));
     INFO("pullRebaseOrMerge error:" << pullFuture.result().errorMessage().toStdString()
@@ -3189,7 +3197,7 @@ TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][r
     // download progress must have surfaced for it — the download-specific text,
     // not the always-on "Hydrating LFS files" tick that fires for any pointer file.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
-    requireLfsDownloadProgress(*downloadStates);
+    requireLfsTransferProgress(*downloadStates);
 }
 
 TEST_CASE("Lfs reset reports LFS download progress", "[LFS][regression][P2][issue-545]") {
@@ -4111,6 +4119,70 @@ TEST_CASE("Lfs push uploads objects in parallel", "[LFS][regression][P2]") {
 
     // Uploads overlap: a serial upload loop would peak at exactly one PUT in flight.
     CHECK(lfsServer.maxConcurrentUploadRequests() >= 2);
+}
+
+TEST_CASE("Lfs push surfaces aggregate upload progress", "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+    // Hold each upload response open so several object-progress updates land before the push
+    // completes, giving the observer more than a single terminal tick to inspect.
+    lfsServer.setObjectResponseDelayMs(40);
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-progress"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-progress.git"));
+    const QStringList trackedFileNames = {
+        QStringLiteral("p-a.png"), QStringLiteral("p-b.png"), QStringLiteral("p-c.png"),
+        QStringLiteral("p-d.png"),
+    };
+    const QList<QColor> fileColors = {Qt::green, Qt::blue, Qt::magenta, Qt::cyan};
+    REQUIRE(fileColors.size() == trackedFileNames.size());
+
+    TestUtilities::initBareRepo(remotePath);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    for (int i = 0; i < trackedFileNames.size(); ++i) {
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(trackedFileNames.at(i)), fileColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+    }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files"), QStringLiteral("upload progress")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray committedBlob = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!committedBlob.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(committedBlob, &pointer));
+        lfsServer.setExpectedUploadObject(pointer.oid, pointer.size);
+    }
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    auto pushFuture = author.push();
+    auto uploadStates = observeLfsTransferProgress(pushFuture, QStringLiteral("Uploading LFS objects"));
+
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
+    INFO("Push error:" << pushFuture.result().errorMessage().toStdString()
+         << "code:" << pushFuture.result().errorCode());
+    REQUIRE(!pushFuture.result().hasError());
+
+    requireLfsTransferProgress(*uploadStates, static_cast<size_t>(trackedFileNames.size()));
 }
 
 TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LFS][regression][P1]") {

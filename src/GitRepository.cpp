@@ -1098,11 +1098,87 @@ runLfsBatchRequests(const QString& operation,
                     QObject* context,
                     const QString& remoteName = QString());
 
+// Progress sink shared by the LFS upload (push) and download (clone/fetch/pull) paths:
+// (human-readable text, completed objects, total objects). makeLfsHydrationProgress adapts a
+// QFutureInterface into one of these.
+using LfsHydrationProgress = std::function<void(const QString& text, int current, int total)>;
+
+QString formatBytesForProgress(qint64 bytes)
+{
+    const double value = static_cast<double>(std::max<qint64>(0, bytes));
+    constexpr double kb = 1024.0;
+    constexpr double mb = 1024.0 * kb;
+    constexpr double gb = 1024.0 * mb;
+
+    if (value >= gb) {
+        return QStringLiteral("%1 GB").arg(value / gb, 0, 'f', 2);
+    }
+    if (value >= mb) {
+        return QStringLiteral("%1 MB").arg(value / mb, 0, 'f', 2);
+    }
+    if (value >= kb) {
+        return QStringLiteral("%1 KB").arg(value / kb, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 B").arg(static_cast<qint64>(value));
+}
+
+// `verb` is the leading present-participle ("Downloading" / "Uploading") so the same
+// "<verb> LFS objects (done/total) - transferred/total" line serves both transfer directions.
+QString formatLfsAggregateProgressText(const QString& verb,
+                                       int completedObjects,
+                                       int totalObjects,
+                                       qint64 transferredBytes,
+                                       qint64 totalBytes)
+{
+    const QString totalText = totalBytes > 0
+        ? formatBytesForProgress(totalBytes)
+        : QStringLiteral("?");
+    return QStringLiteral("%1 LFS objects (%2/%3) - %4/%5")
+        .arg(verb)
+        .arg(completedObjects)
+        .arg(totalObjects)
+        .arg(formatBytesForProgress(transferredBytes))
+        .arg(totalText);
+}
+
+// Upload-specific aggregate state shared by the per-object transfer steps: the per-oid/at-completion
+// byte tallies feeding progress and an `aborted` latch that stops late streaming callbacks from
+// reporting progress once a fatal error has been raised. Mirrors DownloadAggregate (minus the
+// LfsStore, which uploads read from rather than write to); the bounded iteration lives in
+// asyncPumpBounded.
+//
+// Threading invariant: every member is touched only on the context object's (main) thread — the
+// transfer-completion continuations and the streaming-progress callbacks are all delivered there —
+// so no synchronization is needed. Do not access these members from a worker thread.
+struct UploadAggregate {
+    QHash<QString, qint64> bytesByOid;
+    int completed = 0;
+    qint64 sentBytes = 0;
+    bool aborted = false;
+};
+
+// Resolves an LFS object's upload byte size: prefer the committed pointer's size, fall back to the
+// batch-response size, and finally stat the on-disk object. Shared by the progress denominator and
+// the per-object pointer/completion snap so the two can't drift.
+qint64 resolveLfsUploadSize(const QHash<QString, LfsPointer>& pointersByOid,
+                            const QString& gitDirPath,
+                            const QString& oid,
+                            qint64 batchSize)
+{
+    const LfsPointer pointer = pointersByOid.value(oid);
+    qint64 size = pointer.isValid() ? pointer.size : batchSize;
+    if (size < 0) {
+        size = QFileInfo(LfsStore::objectPath(gitDirPath, oid)).size();
+    }
+    return std::max<qint64>(0, size);
+}
+
 GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                                              const QHash<QString, LfsPointer>& pointersByOid,
                                              const QVector<LfsBatchClient::ObjectResponse>& objects,
                                              std::shared_ptr<LfsBatchClient> client,
-                                             QObject* context)
+                                             QObject* context,
+                                             const LfsHydrationProgress& progress)
 {
     struct UploadTask {
         QString oid;
@@ -1142,18 +1218,43 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
         return AsyncFuture::completed(Monad::ResultBase());
     }
 
-    auto perTask = [gitDirPath, pointersByOid, client, context](const UploadTask& task) -> GitRepository::GitFuture {
+    // Only upload tasks move bytes on the wire; verify-only tasks still count toward object progress
+    // but contribute no bytes to the denominator.
+    qint64 totalBytesAccumulator = 0;
+    for (const UploadTask& task : tasks) {
+        if (task.hasUpload) {
+            totalBytesAccumulator += resolveLfsUploadSize(pointersByOid, gitDirPath, task.oid, task.size);
+        }
+    }
+
+    const int totalObjects = static_cast<int>(tasks.size());
+    const qint64 totalBytes = totalBytesAccumulator;
+
+    auto aggregate = std::make_shared<UploadAggregate>();
+
+    auto reportAggregate = [progress, aggregate, totalObjects, totalBytes]() {
+        if (progress) {
+            progress(formatLfsAggregateProgressText(QStringLiteral("Uploading"),
+                                                    aggregate->completed, totalObjects,
+                                                    aggregate->sentBytes, totalBytes),
+                     aggregate->completed,
+                     totalObjects);
+        }
+    };
+
+    // Uploads (and verifies) one object, streaming sent-byte progress into the aggregate. On success
+    // the object's tally is snapped to its full size and `completed` is bumped; the first error
+    // latches `aborted` (so in-flight streaming callbacks stop reporting) and propagates, which makes
+    // asyncPumpBounded abort the whole push upload.
+    auto perTask = [gitDirPath, pointersByOid, client, context, aggregate, reportAggregate]
+        (const UploadTask& task) -> GitRepository::GitFuture {
         LfsPointer pointer = pointersByOid.value(task.oid);
         if (!pointer.isValid()) {
             pointer.oid = task.oid;
-            if (task.size >= 0) {
-                pointer.size = task.size;
-            } else {
-                const QString fallbackObjectPath = LfsStore::objectPath(gitDirPath, task.oid);
-                pointer.size = QFileInfo(fallbackObjectPath).size();
-            }
+            pointer.size = resolveLfsUploadSize(pointersByOid, gitDirPath, task.oid, task.size);
         }
         if (!pointer.isValid()) {
+            aggregate->aborted = true;
             return AsyncFuture::completed(
                 Monad::ResultBase(QStringLiteral("Missing LFS pointer details for oid %1").arg(task.oid),
                                   static_cast<int>(LfsFetchErrorCode::Protocol)));
@@ -1167,6 +1268,9 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
             }
         }
 
+        const QString oid = pointer.oid;
+        const qint64 expectedSize = task.hasUpload ? std::max<qint64>(0, pointer.size) : 0;
+
         auto runVerify = [client, context, pointer, task]() -> GitRepository::GitFuture {
             if (!task.hasVerify) {
                 return AsyncFuture::completed(Monad::ResultBase());
@@ -1178,21 +1282,56 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                 }).future();
         };
 
+        // Upload (streaming byte progress) then verify; a verify-only task skips straight to verify.
+        // The prior error semantics hold: an upload error short-circuits verify.
+        GitRepository::GitFuture transferFuture;
         if (!task.hasUpload) {
-            return runVerify();
+            transferFuture = runVerify();
+        } else {
+            auto progressCallback = [aggregate, reportAggregate, oid](qint64 sentBytes, qint64) {
+                if (aggregate->aborted) {
+                    return;
+                }
+                const qint64 prior = aggregate->bytesByOid.value(oid, 0);
+                aggregate->sentBytes += (sentBytes - prior);
+                aggregate->bytesByOid.insert(oid, sentBytes);
+                reportAggregate();
+            };
+
+            auto uploadFuture = client->uploadObject(task.uploadAction, objectPath, pointer, progressCallback);
+            transferFuture = AsyncFuture::observe(uploadFuture)
+                .context(context, [uploadFuture, runVerify]() -> GitRepository::GitFuture {
+                    const auto uploadResult = uploadFuture.result();
+                    if (uploadResult.hasError()) {
+                        qDebug() << "[LFS upload-actions] upload failed:" << uploadResult.errorMessage();
+                        return AsyncFuture::completed(uploadResult);
+                    }
+                    return runVerify();
+                }).future();
         }
 
-        auto uploadFuture = client->uploadObject(task.uploadAction, objectPath, pointer);
-        return AsyncFuture::observe(uploadFuture)
-            .context(context, [uploadFuture, runVerify]() -> GitRepository::GitFuture {
-                const auto uploadResult = uploadFuture.result();
-                if (uploadResult.hasError()) {
-                    qDebug() << "[LFS upload-actions] upload failed:" << uploadResult.errorMessage();
-                    return AsyncFuture::completed(uploadResult);
+        return AsyncFuture::observe(transferFuture)
+            .context(context, [transferFuture, aggregate, reportAggregate, oid, expectedSize]() -> Monad::ResultBase {
+                const auto result = transferFuture.result();
+                if (result.hasError()) {
+                    aggregate->aborted = true;
+                    return result;
                 }
-                return runVerify();
+                if (!aggregate->aborted) {
+                    const qint64 prior = aggregate->bytesByOid.value(oid, 0);
+                    aggregate->sentBytes += (expectedSize - prior);
+                    aggregate->bytesByOid.insert(oid, expectedSize);
+                    aggregate->completed++;
+                    reportAggregate();
+                }
+                return Monad::ResultBase();
             }).future();
     };
+
+    if (progress) {
+        progress(formatLfsAggregateProgressText(QStringLiteral("Uploading"), 0, totalObjects, 0, totalBytes),
+                 0, totalObjects);
+    }
 
     return asyncPumpBounded(std::move(tasks), kDefaultLfsConcurrentTransfers, context, perTask);
 }
@@ -1201,7 +1340,8 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                                              const QString& refSpec,
                                              const QString& remoteName,
                                              QObject* context,
-                                             const QString& httpsToken = QString())
+                                             const QString& httpsToken = QString(),
+                                             const LfsHydrationProgress& progress = {})
 {
     auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName, httpsToken]() {
         return mtry([repoPath, refSpec, remoteName, httpsToken]() -> Monad::Result<LfsPushUploadPlan> {
@@ -1220,7 +1360,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
     });
 
     return AsyncFuture::observe(planFuture)
-        .context(context, [planFuture, remoteName, context]() -> GitRepository::GitFuture {
+        .context(context, [planFuture, remoteName, context, progress]() -> GitRepository::GitFuture {
             const auto planResult = planFuture.result();
             if (planResult.hasError()) {
                 qDebug() << "[LFS pre-push] plan error:" << planResult.errorMessage();
@@ -1235,7 +1375,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
             auto client = std::make_shared<LfsBatchClient>(plan.gitDirPath);
             auto batchFuture = runLfsBatchRequests(QStringLiteral("upload"), plan.objects, client, context, remoteName);
             return AsyncFuture::observe(batchFuture)
-                .context(context, [batchFuture, plan, client, context]() -> GitRepository::GitFuture {
+                .context(context, [batchFuture, plan, client, context, progress]() -> GitRepository::GitFuture {
                     const auto batchResult = batchFuture.result();
                     if (batchResult.hasError()) {
                         return AsyncFuture::completed(Monad::ResultBase(batchResult.errorMessage(), batchResult.errorCode()));
@@ -1245,7 +1385,8 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                                                plan.pointersByOid,
                                                batchResult.value(),
                                                client,
-                                               context);
+                                               context,
+                                               progress);
                 }).future();
         }).future();
 }
@@ -1438,42 +1579,6 @@ Monad::ResultBase hydratePointerFiles(const LfsHydrationPlan& plan)
     return Monad::ResultBase();
 }
 
-using LfsHydrationProgress = std::function<void(const QString& text, int current, int total)>;
-
-QString formatBytesForProgress(qint64 bytes)
-{
-    const double value = static_cast<double>(std::max<qint64>(0, bytes));
-    constexpr double kb = 1024.0;
-    constexpr double mb = 1024.0 * kb;
-    constexpr double gb = 1024.0 * mb;
-
-    if (value >= gb) {
-        return QStringLiteral("%1 GB").arg(value / gb, 0, 'f', 2);
-    }
-    if (value >= mb) {
-        return QStringLiteral("%1 MB").arg(value / mb, 0, 'f', 2);
-    }
-    if (value >= kb) {
-        return QStringLiteral("%1 KB").arg(value / kb, 0, 'f', 1);
-    }
-    return QStringLiteral("%1 B").arg(static_cast<qint64>(value));
-}
-
-QString formatLfsAggregateProgressText(int completedObjects,
-                                       int totalObjects,
-                                       qint64 receivedBytes,
-                                       qint64 totalBytes)
-{
-    const QString totalText = totalBytes > 0
-        ? formatBytesForProgress(totalBytes)
-        : QStringLiteral("?");
-    return QStringLiteral("Downloading LFS objects (%1/%2) - %3/%4")
-        .arg(completedObjects)
-        .arg(totalObjects)
-        .arg(formatBytesForProgress(receivedBytes))
-        .arg(totalText);
-}
-
 struct LfsDownloadTask {
     LfsPointer pointer;
     QString relativePath;
@@ -1570,7 +1675,8 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
 
     auto reportAggregate = [progress, aggregate, totalObjects, totalBytes]() {
         if (progress) {
-            progress(formatLfsAggregateProgressText(aggregate->completed, totalObjects,
+            progress(formatLfsAggregateProgressText(QStringLiteral("Downloading"),
+                                                    aggregate->completed, totalObjects,
                                                     aggregate->receivedBytes, totalBytes),
                      aggregate->completed,
                      totalObjects);
@@ -1632,7 +1738,8 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
     };
 
     if (progress) {
-        progress(formatLfsAggregateProgressText(0, totalObjects, 0, totalBytes), 0, totalObjects);
+        progress(formatLfsAggregateProgressText(QStringLiteral("Downloading"), 0, totalObjects, 0, totalBytes),
+                 0, totalObjects);
     }
 
     auto transfersFuture = asyncPumpBounded(std::move(tasks), kDefaultLfsConcurrentTransfers, context, perObject);
@@ -3320,7 +3427,8 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto fixRemote = fixUpRemote(remote);
             const GitCredentials credentials = d->m_credentials;   // snapshot on main thread
-            auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this, credentials.httpsToken);
+            auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this, credentials.httpsToken,
+                                                           makeLfsHydrationProgress(progressInterface));
 
             return AsyncFuture::observe(prePushUploadFuture)
                 .context(this, [=]() -> GitFuture {

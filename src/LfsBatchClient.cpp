@@ -689,7 +689,8 @@ QFuture<Monad::ResultBase> LfsBatchClient::downloadObject(const Action& action,
 
 QFuture<Monad::ResultBase> LfsBatchClient::uploadObject(const Action& action,
                                                         const QString& objectPath,
-                                                        const LfsPointer& pointer) const
+                                                        const LfsPointer& pointer,
+                                                        std::function<void(qint64 uploadedBytes, qint64 totalBytes)> progressCallback) const
 {
     if (!action.href.isValid()) {
         return AsyncFuture::completed(Monad::ResultBase(QStringLiteral("Missing LFS upload href"),
@@ -723,6 +724,17 @@ QFuture<Monad::ResultBase> LfsBatchClient::uploadObject(const Action& action,
     }
 
     QNetworkReply* reply = mManager->put(request, file.get());
+
+    QObject::connect(reply, &QNetworkReply::uploadProgress, reply,
+                     [progressCallback, pointer](qint64 sent, qint64 total) {
+        if (!progressCallback) {
+            return;
+        }
+
+        const qint64 normalizedTotal = total > 0 ? total : pointer.size;
+        const qint64 normalizedSent = std::max<qint64>(0, sent);
+        progressCallback(normalizedSent, normalizedTotal);
+    });
 
     auto finish = [deferred, reply, file](const Monad::ResultBase& result) mutable {
         deferred.complete(result);
