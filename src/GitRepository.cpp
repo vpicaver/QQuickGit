@@ -7,6 +7,7 @@
 #include "GitRepository.h"
 #include "GitCommitImageProvider.h"
 #include "GitOidUtils.h"
+#include "GitRefSpecUtil.h"
 #include "RSAKeyGenerator.h"
 #include "Account.h"
 #include "LfsFilter.h"
@@ -45,35 +46,6 @@ using namespace Monad;
 using namespace QQuickGit;
 
 namespace {
-QString extractHostFromUrl(const char *url)
-{
-    if(url == nullptr) {
-        return QString();
-    }
-
-    QString urlText = QString::fromUtf8(url);
-    if(urlText.contains("://")) {
-        QUrl parsed(urlText);
-        return parsed.host();
-    }
-
-    // scp-like: user@host:path
-    auto atIndex = urlText.indexOf('@');
-    if(atIndex >= 0) {
-        auto hostStart = atIndex + 1;
-        auto hostEnd = urlText.indexOf(':', hostStart);
-        if(hostEnd == -1) {
-            hostEnd = urlText.indexOf('/', hostStart);
-        }
-        if(hostEnd == -1) {
-            hostEnd = urlText.size();
-        }
-        return urlText.mid(hostStart, hostEnd - hostStart);
-    }
-
-    return QString();
-}
-
 QString gitErrorMessageWithPrefix(const QString& prefix)
 {
     const git_error* lastError = git_error_last();
@@ -496,35 +468,10 @@ struct LfsPushUploadPlan {
     QHash<QString, LfsPointer> pointersByOid;
 };
 
-struct LfsPushRefSpec {
-    QString sourceRef;
-    QString destinationRef;
-};
-
 struct LfsTreeCollectPayload {
     git_repository* repo = nullptr;
     QHash<QString, LfsPointer>* pointersByOid = nullptr;
 };
-
-LfsPushRefSpec parsePushRefSpec(QString refSpec)
-{
-    if (refSpec.startsWith(QLatin1Char('+'))) {
-        refSpec.remove(0, 1);
-    }
-
-    const int colonIndex = refSpec.indexOf(QLatin1Char(':'));
-    if (colonIndex >= 0) {
-        return LfsPushRefSpec{refSpec.left(colonIndex), refSpec.mid(colonIndex + 1)};
-    }
-    return LfsPushRefSpec{refSpec, QString()};
-}
-
-bool hasRefGlobPattern(const QString& ref)
-{
-    return ref.contains(QLatin1Char('*'))
-        || ref.contains(QLatin1Char('?'))
-        || ref.contains(QLatin1Char('['));
-}
 
 bool pushRejectedByRemoteAdvanceMessage(const QString& errorMessage)
 {
