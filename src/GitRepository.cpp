@@ -4456,7 +4456,7 @@ bool GitRepository::remoteBranchExists(const QString &refSpec) const
 GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, CheckoutMode mode)
 {
     auto future = progressFuture<ResultBase>(
-        [=](QFutureInterface<ResultBase>)
+        [=](QFutureInterface<ResultBase> progressInterface)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localRefSpec = refSpec.toLocal8Bit();
@@ -4498,7 +4498,8 @@ GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, Checkou
                     if (prepareResult.hasError()) {
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
-                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                    return runLfsHydrationPipeline(prepareResult.value(), this,
+                                                   makeLfsHydrationProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -4508,7 +4509,7 @@ GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, Checkou
 GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode mode)
 {
     auto future = progressFuture<ResultBase>(
-        [=](QFutureInterface<ResultBase>)
+        [=](QFutureInterface<ResultBase> progressInterface)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localRefSpec = refSpec.toLocal8Bit();
@@ -4560,7 +4561,8 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
                     if (prepareResult.hasError()) {
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
-                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                    return runLfsHydrationPipeline(prepareResult.value(), this,
+                                                   makeLfsHydrationProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -4663,7 +4665,7 @@ GitRepository::GitFuture GitRepository::restoreToCommit(const QString& targetSha
     auto accountEmail = account()->email().toLocal8Bit();
 
     auto future = progressFuture<ResultBase>(
-        [=](QFutureInterface<ResultBase>)
+        [=](QFutureInterface<ResultBase> progressInterface)
         {
             auto path = d->mDirectory.absolutePath().toLocal8Bit();
             auto localTargetSha = targetSha.toLocal8Bit();
@@ -4748,7 +4750,8 @@ GitRepository::GitFuture GitRepository::restoreToCommit(const QString& targetSha
                     if (prepareResult.hasError()) {
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
-                    return runLfsHydrationPipeline(prepareResult.value(), this);
+                    return runLfsHydrationPipeline(prepareResult.value(), this,
+                                                   makeLfsHydrationProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);

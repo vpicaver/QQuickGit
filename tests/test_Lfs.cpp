@@ -2968,17 +2968,20 @@ LfsPointer primeConsumerForMissingLfsDownload(GitRepository& author,
     return expectedPointer;
 }
 
-// Attaches an LFS-download progress collector to `pullFuture` and returns the
-// list it fills. Only "Downloading LFS objects" updates are kept, so the
+// Attaches an LFS-download progress collector to `operationFuture` and returns
+// the list it fills. Only "Downloading LFS objects" updates are kept, so the
 // always-on "Hydrating LFS files" tick (emitted for any pointer file even when
 // nothing is fetched) can't masquerade as download progress. The list is heap-
 // owned so it outlives this frame and stays valid for the async callback.
+// Templated on the future type so it serves both the pull/merge (MergeFuture)
+// and checkout/reset/restore (GitFuture) hydration paths.
+template<typename FutureT>
 std::shared_ptr<QList<ProgressState>>
-observeLfsDownloadProgress(const GitRepository::MergeFuture& pullFuture)
+observeLfsDownloadProgress(const FutureT& operationFuture)
 {
     auto states = std::make_shared<QList<ProgressState>>();
-    AsyncFuture::observe(pullFuture).onProgress([states, pullFuture]() mutable {
-        const ProgressState state = ProgressState::fromJson(pullFuture.progressText());
+    AsyncFuture::observe(operationFuture).onProgress([states, operationFuture]() mutable {
+        const ProgressState state = ProgressState::fromJson(operationFuture.progressText());
         if (state.text().contains(QStringLiteral("Downloading LFS objects"))) {
             states->append(state);
         }
@@ -3006,6 +3009,100 @@ void requireLfsDownloadProgress(const QList<ProgressState>& downloadStates)
         maxCurrent = (std::max)(maxCurrent, state.current());
     }
     CHECK(maxCurrent == total);
+}
+
+// Result of priming a single repo so its next force checkout/reset/restore must
+// download a missing LFS object over the network.
+struct MissingLfsObjectFixture {
+    QByteArray bytes;
+    QString filePath;
+    QString headSha;
+};
+
+// Commits one LFS-tracked PNG into `repository`, points its lfs.url at
+// `lfsServer` (with the object registered for download), deletes the local
+// object, and dirties the working-tree file. A subsequent force checkout/reset/
+// restore must then overwrite (and re-smudge) the file, driving the missing
+// object through hydration as a real download — the case the checkout/reset/
+// restore progress plumbing must surface.
+MissingLfsObjectFixture primeRepoForMissingLfsDownload(GitRepository& repository,
+                                                       const QDir& repoDir,
+                                                       const QString& trackedFileName,
+                                                       Account& account,
+                                                       LfsServer& lfsServer)
+{
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+    repository.setAccount(&account);
+
+    const QString filePath = repoDir.filePath(trackedFileName);
+    const QByteArray bytes = createPngFile(filePath, Qt::red);
+    REQUIRE(!bytes.isEmpty());
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add LFS file"),
+                                         QStringLiteral("LFS hydration progress baseline")));
+
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(repo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> repoHolder(repo, &git_repository_free);
+
+    const QByteArray blobData = readBlobFromHead(repo, trackedFileName.toUtf8().constData());
+    REQUIRE(!blobData.isEmpty());
+    LfsPointer pointer;
+    REQUIRE(LfsPointer::parse(blobData, &pointer));
+    REQUIRE(pointer.size == bytes.size());
+
+    const QString headSha = headOidString(repo);
+    REQUIRE(!headSha.isEmpty());
+
+    REQUIRE(setGitConfigString(repoDir.absolutePath(), "lfs.url", lfsServer.endpoint()));
+    lfsServer.setDownloadObject(pointer.oid, bytes);
+
+    const QString gitDirPath = QDir(QString::fromUtf8(git_repository_path(repo))).absolutePath();
+    const QString objectPath = LfsStore::objectPath(gitDirPath, pointer.oid);
+    REQUIRE(!objectPath.isEmpty());
+    REQUIRE(QFileInfo::exists(objectPath));
+    REQUIRE(QFile::remove(objectPath));
+
+    REQUIRE(writeTextFile(filePath, QByteArray("dirty\n")));
+
+    return {bytes, filePath, headSha};
+}
+
+// Drives one force checkout/reset/restore against a repo primed by
+// primeRepoForMissingLfsDownload and asserts the operation surfaced real LFS
+// download progress. `makeOperation` builds the hydration-triggering future
+// (it receives the fixture so restoreToCommit can reach the head sha). Shared
+// by the reset/checkout/restore progress cases, which differ only in that line.
+void requireOperationReportsLfsDownloadProgress(
+    const QString& trackedFileName,
+    const std::function<GitRepository::GitFuture(GitRepository&, const MissingLfsObjectFixture&)>& makeOperation)
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+
+    GitRepository repository;
+    const auto fixture = primeRepoForMissingLfsDownload(
+        repository, QDir(tempDir.path()), trackedFileName, account, lfsServer);
+
+    auto operationFuture = makeOperation(repository, fixture);
+    auto downloadStates = observeLfsDownloadProgress(operationFuture);
+    requireGitFutureSuccess(operationFuture);
+
+    // The operation had to hydrate the missing object over the network, so
+    // download-specific progress must have surfaced (not just the always-on
+    // "Hydrating LFS files" tick), and the working tree must hold the real bytes.
+    REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
+    requireLfsDownloadProgress(*downloadStates);
+    CHECK(readFileBytes(fixture.filePath) == fixture.bytes);
 }
 
 } // namespace
@@ -3093,6 +3190,30 @@ TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][r
     // not the always-on "Hydrating LFS files" tick that fires for any pointer file.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
     requireLfsDownloadProgress(*downloadStates);
+}
+
+TEST_CASE("Lfs reset reports LFS download progress", "[LFS][regression][P2][issue-545]") {
+    requireOperationReportsLfsDownloadProgress(
+        QStringLiteral("reset-progress.png"),
+        [](GitRepository& repository, const MissingLfsObjectFixture&) {
+            return repository.reset(QStringLiteral("HEAD"), GitRepository::ResetMode::Hard);
+        });
+}
+
+TEST_CASE("Lfs checkout reports LFS download progress", "[LFS][regression][P2][issue-545]") {
+    requireOperationReportsLfsDownloadProgress(
+        QStringLiteral("checkout-progress.png"),
+        [](GitRepository& repository, const MissingLfsObjectFixture&) {
+            return repository.checkout(QStringLiteral("HEAD"), GitRepository::CheckoutMode::Force);
+        });
+}
+
+TEST_CASE("Lfs restoreToCommit reports LFS download progress", "[LFS][regression][P2][issue-545]") {
+    requireOperationReportsLfsDownloadProgress(
+        QStringLiteral("restore-progress.png"),
+        [](GitRepository& repository, const MissingLfsObjectFixture& fixture) {
+            return repository.restoreToCommit(fixture.headSha);
+        });
 }
 
 TEST_CASE("Lfs hydration fetches multiple missing objects with a single batch request",
