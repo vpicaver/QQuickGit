@@ -14,7 +14,10 @@ using namespace SignalSpyChecker;
 #include <QDir>
 #include <QTemporaryDir>
 
-const int timeout = 30000;
+// 5 minutes: these tests clone the full cavewhere repo over the network, which
+// is large due to binary history bloat (see Cavewhere/cavewhere#632). Raised
+// from 30s so the clone finishes reliably until that history is slimmed down.
+const int timeout = 5 * 60 * 1000;
 
 using namespace QQuickGit;
 
