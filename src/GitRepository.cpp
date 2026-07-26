@@ -1099,9 +1099,8 @@ runLfsBatchRequests(const QString& operation,
                     const QString& remoteName = QString());
 
 // Progress sink shared by the LFS upload (push) and download (clone/fetch/pull) paths:
-// (human-readable text, completed objects, total objects). makeLfsHydrationProgress adapts a
-// QFutureInterface into one of these.
-using LfsHydrationProgress = std::function<void(const QString& text, int current, int total)>;
+// human-readable text, completed objects, total objects.
+using LfsTransferProgress = std::function<void(const QString& text, int current, int total)>;
 
 QString formatBytesForProgress(qint64 bytes)
 {
@@ -1178,7 +1177,7 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
                                              const QVector<LfsBatchClient::ObjectResponse>& objects,
                                              std::shared_ptr<LfsBatchClient> client,
                                              QObject* context,
-                                             const LfsHydrationProgress& progress)
+                                             const LfsTransferProgress& progress)
 {
     struct UploadTask {
         QString oid;
@@ -1341,7 +1340,7 @@ GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
                                              const QString& remoteName,
                                              QObject* context,
                                              const QString& httpsToken = QString(),
-                                             const LfsHydrationProgress& progress = {})
+                                             const LfsTransferProgress& progress = {})
 {
     auto planFuture = QtConcurrent::run([repoPath, refSpec, remoteName, httpsToken]() {
         return mtry([repoPath, refSpec, remoteName, httpsToken]() -> Monad::Result<LfsPushUploadPlan> {
@@ -1620,7 +1619,7 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
                                                const QVector<LfsBatchClient::ObjectResponse>& objects,
                                                std::shared_ptr<LfsBatchClient> client,
                                                QObject* context,
-                                               const LfsHydrationProgress& progress)
+                                               const LfsTransferProgress& progress)
 {
     QHash<QString, LfsBatchClient::ObjectResponse> responsesByOid;
     for (const auto& object : objects) {
@@ -1816,7 +1815,7 @@ runLfsBatchRequests(const QString& operation,
 
 GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
                                                  QObject* context,
-                                                 const LfsHydrationProgress& progress = {})
+                                                 const LfsTransferProgress& progress = {})
 {
     if (plan.pointerFiles.isEmpty()) {
         return AsyncFuture::completed(Monad::ResultBase());
@@ -1881,7 +1880,7 @@ QFuture<Monad::Result<LfsHydrationPlan>> prepareLfsHydrationPlan(const QDir& rep
 
 GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir,
                                                      QObject* context,
-                                                     const LfsHydrationProgress& progress = {})
+                                                     const LfsTransferProgress& progress = {})
 {
     auto prepareFuture = prepareLfsHydrationPlan(repositoryDir);
     return AsyncFuture::observe(prepareFuture)
@@ -1898,7 +1897,7 @@ GitRepository::GitFuture runLfsHydrationForDirectory(const QDir& repositoryDir,
 GitRepository::MergeFuture runMergeHydrationForDirectory(const Monad::Result<GitRepository::MergeResult>& mergeResult,
                                                          const QDir& repositoryDir,
                                                          QObject* context,
-                                                         const LfsHydrationProgress& progress = {})
+                                                         const LfsTransferProgress& progress = {})
 {
     if (mergeResult.hasError()) {
         return AsyncFuture::completed(mergeResult);
@@ -2121,7 +2120,7 @@ void setProgress(ProgressInterface* progressInterface, const ProgressState& prog
 //Builds the LFS-hydration progress callback shared by clone/fetch/pull/pullRebaseOrMerge.
 //The QFutureInterface is copied into the returned callback so it outlives the caller frame.
 template<typename ProgressInterface>
-LfsHydrationProgress makeLfsHydrationProgress(ProgressInterface progressInterface) {
+LfsTransferProgress makeLfsTransferProgress(ProgressInterface progressInterface) {
     return [progressInterface](const QString& text, int current, int total) mutable {
         const int safeTotal = std::max(1, total);
         const int safeCurrent = std::clamp(current, 0, safeTotal);
@@ -3072,7 +3071,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                     ensureLfsAttributes();
                     ensureStandardLfsFilterConfig(d->repo);
                 }
-                return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsHydrationProgress(progressInterface));
+                return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsTransferProgress(progressInterface));
             }).future();
     });
 }
@@ -3428,7 +3427,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
             auto fixRemote = fixUpRemote(remote);
             const GitCredentials credentials = d->m_credentials;   // snapshot on main thread
             auto prePushUploadFuture = runLfsPrePushUpload(path, fixRefSpec, fixRemote, this, credentials.httpsToken,
-                                                           makeLfsHydrationProgress(progressInterface));
+                                                           makeLfsTransferProgress(progressInterface));
 
             return AsyncFuture::observe(prePushUploadFuture)
                 .context(this, [=]() -> GitFuture {
@@ -3541,7 +3540,7 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                                  });
 
                              return runMergeHydrationForDirectory(mergeResult, d->mDirectory, this,
-                                                                  makeLfsHydrationProgress(progressInterface));
+                                                                  makeLfsTransferProgress(progressInterface));
                          }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -3628,7 +3627,7 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                     });
 
                     return runMergeHydrationForDirectory(pullResult, d->mDirectory, this,
-                                                         makeLfsHydrationProgress(progressInterface));
+                                                         makeLfsTransferProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -3689,7 +3688,7 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
 
                     d->reopenRepository();
 
-                    return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsHydrationProgress(progressInterface));
+                    return runLfsHydrationForDirectory(d->mDirectory, this, makeLfsTransferProgress(progressInterface));
                 }).future();
         });
 }
@@ -4607,7 +4606,7 @@ GitRepository::GitFuture GitRepository::checkout(const QString& refSpec, Checkou
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
                     return runLfsHydrationPipeline(prepareResult.value(), this,
-                                                   makeLfsHydrationProgress(progressInterface));
+                                                   makeLfsTransferProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -4670,7 +4669,7 @@ GitRepository::GitFuture GitRepository::reset(const QString& refSpec, ResetMode 
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
                     return runLfsHydrationPipeline(prepareResult.value(), this,
-                                                   makeLfsHydrationProgress(progressInterface));
+                                                   makeLfsTransferProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
@@ -4859,7 +4858,7 @@ GitRepository::GitFuture GitRepository::restoreToCommit(const QString& targetSha
                         return AsyncFuture::completed(ResultBase(prepareResult.errorMessage(), prepareResult.errorCode()));
                     }
                     return runLfsHydrationPipeline(prepareResult.value(), this,
-                                                   makeLfsHydrationProgress(progressInterface));
+                                                   makeLfsTransferProgress(progressInterface));
                 }).future();
         });
     emitRefsChangedOnSuccess(future);
