@@ -1084,6 +1084,11 @@ GitRepository::GitFuture asyncForEach(QVector<Item> items, QObject* context, Per
     return asyncPumpBounded(std::move(items), 1, context, std::move(perItem));
 }
 
+// Upper bound on LFS object transfers kept in flight at once, shared by the upload and download
+// paths. Matches git-lfs's default `lfs.concurrenttransfers`. The shared QNetworkAccessManager
+// still caps live connections per host, so this is a ceiling rather than a guarantee.
+constexpr int kDefaultLfsConcurrentTransfers = 8;
+
 // Defined below; declared here so the push-upload path can chunk batches the same way the download
 // path does (GitHub rejects batch requests with more than 100 objects).
 QFuture<Monad::Result<QVector<LfsBatchClient::ObjectResponse>>>
@@ -1189,7 +1194,7 @@ GitRepository::GitFuture runLfsUploadActions(const QString& gitDirPath,
             }).future();
     };
 
-    return asyncForEach(std::move(tasks), context, perTask);
+    return asyncPumpBounded(std::move(tasks), kDefaultLfsConcurrentTransfers, context, perTask);
 }
 
 GitRepository::GitFuture runLfsPrePushUpload(const QByteArray& repoPath,
@@ -1499,11 +1504,6 @@ struct DownloadAggregate {
     qint64 receivedBytes = 0;
     bool aborted = false;
 };
-
-// Upper bound on LFS object transfers kept in flight at once. Matches git-lfs's default
-// `lfs.concurrenttransfers`. The shared QNetworkAccessManager still caps live connections per host,
-// so this is a ceiling rather than a guarantee.
-constexpr int kDefaultLfsConcurrentTransfers = 8;
 
 // Drives the per-object downloads from a single batch response. The batch request is made once by
 // the caller; here we resolve each object's download action and stream up to

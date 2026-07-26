@@ -23,8 +23,9 @@ public:
     void setDownloadObject(const QString& oid, const QByteArray& bytes);
     void setExpectedUploadObject(const QString& oid, qint64 size);
 
-    // Delays each object download response so concurrent transfers overlap on the wire long enough
-    // to be observed via maxConcurrentObjectRequests(). 0 (default) responds synchronously.
+    // Delays each object download and upload response so concurrent transfers overlap on the wire
+    // long enough to be observed via maxConcurrentObjectRequests() / maxConcurrentUploadRequests().
+    // 0 (default) responds synchronously.
     void setObjectResponseDelayMs(int delayMs);
 
     int downloadBatchRequestCount() const;
@@ -32,6 +33,7 @@ public:
     int maxConcurrentObjectRequests() const;
     int uploadBatchRequestCount() const;
     int uploadRequestCount() const;
+    int maxConcurrentUploadRequests() const;
 
 private:
     void handleNewConnections();
@@ -50,6 +52,8 @@ private:
     int mMaxConcurrentObjectRequests = 0;
     int mUploadBatchRequestCount = 0;
     int mUploadRequestCount = 0;
+    int mInFlightUploadRequests = 0;
+    int mMaxConcurrentUploadRequests = 0;
 };
 
 #endif // LFS_SERVER_H

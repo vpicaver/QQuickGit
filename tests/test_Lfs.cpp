@@ -4040,6 +4040,79 @@ TEST_CASE("Lfs push uploads tracked objects before git push", "[LFS][regression]
     CHECK(lfsServer.uploadRequestCount() > 0);
 }
 
+TEST_CASE("Lfs push uploads objects in parallel", "[LFS][regression][P2]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    LfsServer lfsServer;
+    REQUIRE(lfsServer.start());
+    // Hold each upload response open briefly so the parallel uploads overlap on the wire long enough
+    // to be observed; the serial path would only ever have one PUT in flight. 40 ms mirrors the
+    // download-parallelism test's tuned overlap window — if this ever flakes on a loaded CI box,
+    // raise the delay rather than lowering the maxConcurrentUploadRequests() >= 2 threshold below.
+    lfsServer.setObjectResponseDelayMs(40);
+
+    const QString authorPath = QDir(tempDir.path()).filePath(QStringLiteral("author-push-parallel"));
+    const QString remotePath = QDir(tempDir.path()).filePath(QStringLiteral("remote-push-parallel.git"));
+    const QStringList trackedFileNames = {
+        QStringLiteral("u-a.png"), QStringLiteral("u-b.png"), QStringLiteral("u-c.png"),
+        QStringLiteral("u-d.png"), QStringLiteral("u-e.png"), QStringLiteral("u-f.png"),
+    };
+    // Distinct colors keep the oids distinct (identical bytes would dedupe to one object).
+    const QList<QColor> fileColors = {
+        Qt::green, Qt::blue, Qt::magenta, Qt::cyan, Qt::yellow, Qt::gray,
+    };
+    REQUIRE(fileColors.size() == trackedFileNames.size());
+
+    TestUtilities::initBareRepo(remotePath);
+
+    GitRepository author;
+    author.setDirectory(QDir(authorPath));
+    author.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    author.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    author.setAccount(&account);
+
+    for (int i = 0; i < trackedFileNames.size(); ++i) {
+        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(trackedFileNames.at(i)), fileColors.at(i));
+        REQUIRE(!bytes.isEmpty());
+    }
+    REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files"), QStringLiteral("parallel upload")));
+
+    git_repository* authorRepo = nullptr;
+    REQUIRE(git_repository_open(&authorRepo, authorPath.toLocal8Bit().constData()) == GIT_OK);
+    REQUIRE(authorRepo != nullptr);
+    std::unique_ptr<git_repository, decltype(&git_repository_free)> authorRepoHolder(authorRepo, &git_repository_free);
+
+    for (const QString& fileName : trackedFileNames) {
+        const QByteArray committedBlob = readBlobFromHead(authorRepo, fileName.toUtf8().constData());
+        REQUIRE(!committedBlob.isEmpty());
+        LfsPointer pointer;
+        REQUIRE(LfsPointer::parse(committedBlob, &pointer));
+        lfsServer.setExpectedUploadObject(pointer.oid, pointer.size);
+    }
+
+    REQUIRE(configureRemoteUrl(authorPath, QStringLiteral("origin"), QUrl::fromLocalFile(remotePath).toString()));
+    REQUIRE(setGitConfigString(authorPath, "lfs.url", lfsServer.endpoint()));
+
+    auto pushFuture = author.push();
+    REQUIRE(AsyncFuture::waitForFinished(pushFuture, 60 * 1000));
+    INFO("Push error:" << pushFuture.result().errorMessage().toStdString()
+         << "code:" << pushFuture.result().errorCode());
+    REQUIRE(!pushFuture.result().hasError());
+
+    // One batch request covers all objects (under the 100-object cap), and every tracked object is
+    // uploaded exactly once.
+    CHECK(lfsServer.uploadBatchRequestCount() == 1);
+    CHECK(lfsServer.uploadRequestCount() == static_cast<int>(trackedFileNames.size()));
+
+    // Uploads overlap: a serial upload loop would peak at exactly one PUT in flight.
+    CHECK(lfsServer.maxConcurrentUploadRequests() >= 2);
+}
+
 TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LFS][regression][P1]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());

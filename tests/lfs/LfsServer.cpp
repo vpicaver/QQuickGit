@@ -109,6 +109,11 @@ int LfsServer::uploadRequestCount() const
     return mUploadRequestCount;
 }
 
+int LfsServer::maxConcurrentUploadRequests() const
+{
+    return mMaxConcurrentUploadRequests;
+}
+
 void LfsServer::handleNewConnections()
 {
     while (mServer.hasPendingConnections()) {
@@ -247,7 +252,23 @@ bool LfsServer::handleRequest(QTcpSocket* socket, const QByteArray& request)
                 mUploadedOids.insert(oid);
             }
         }
-        respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));
+
+        mInFlightUploadRequests++;
+        mMaxConcurrentUploadRequests = std::max(mMaxConcurrentUploadRequests, mInFlightUploadRequests);
+
+        auto sendUploadResponse = [this, socket]() {
+            mInFlightUploadRequests--;
+            respond(socket, 200, QByteArray("application/json"), QByteArray("{}"));
+        };
+
+        // Mirror the download path: holding the response open lets several uploads overlap on the
+        // wire so the test can observe the parallel upload window via maxConcurrentUploadRequests().
+        // socket is the context object, so a disconnect cancels the pending response cleanly.
+        if (mObjectResponseDelayMs > 0) {
+            QTimer::singleShot(mObjectResponseDelayMs, socket, sendUploadResponse);
+        } else {
+            sendUploadResponse();
+        }
         return true;
     }
 
