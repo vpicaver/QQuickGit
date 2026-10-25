@@ -5021,3 +5021,102 @@ TEST_CASE("GitRepository fetch reports LFS hydration progress against GitHub SSH
     INFO("Observed progress texts:" << progressTexts.join(QStringLiteral(" | ")).toStdString());
     CHECK(sawLfsProgress);
 }
+
+namespace {
+
+struct CommitProgressCall {
+    int done = 0;
+    int total = 0;
+};
+
+// Asserts the commit progress calls count up by one from 1 to `expectedTotal`, each carrying the
+// same total.
+void requireCommitProgressSequence(const QList<CommitProgressCall>& calls, int expectedTotal)
+{
+    INFO("Observed " << calls.size() << " commit progress calls");
+    REQUIRE(calls.size() == expectedTotal);
+    for (int i = 0; i < calls.size(); ++i) {
+        CHECK(calls.at(i).total == expectedTotal);
+        CHECK(calls.at(i).done == i + 1);
+    }
+}
+
+} // namespace
+
+TEST_CASE("GitRepository commitAll reports progress per staged file", "[CommitProgress][issue-302]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("commit-progress"));
+
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("Commit Tester"));
+    account.setEmail(QStringLiteral("commit@test.invalid"));
+    repository.setAccount(&account);
+
+    const auto writeTextFile = [&](const QString& fileName, const QByteArray& contents) {
+        QFile file(QDir(repoPath).filePath(fileName));
+        REQUIRE(file.open(QFile::WriteOnly | QFile::Truncate));
+        REQUIRE(file.write(contents) == contents.size());
+    };
+
+    // Flush everything initRepository leaves behind so the measured commit sees only the three files.
+    writeTextFile(QStringLiteral("README.txt"), QByteArray("baseline\n"));
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Baseline"), QString()));
+
+    writeTextFile(QStringLiteral("a.txt"), QByteArray("a\n"));
+    writeTextFile(QStringLiteral("b.txt"), QByteArray("b\n"));
+    writeTextFile(QStringLiteral("c.txt"), QByteArray("c\n"));
+
+    QList<CommitProgressCall> calls;
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Three files"), QString(),
+                                         [&calls](int done, int total) {
+                                             calls.append(CommitProgressCall{done, total});
+                                         }));
+
+    requireCommitProgressSequence(calls, 3);
+}
+
+TEST_CASE("GitRepository commitAll counts the LFS pointer pass in its progress total",
+          "[CommitProgress][LFS][issue-302]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QString repoPath = QDir(tempDir.path()).filePath(QStringLiteral("commit-progress-lfs"));
+
+    GitRepository repository;
+    repository.setDirectory(QDir(repoPath));
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    Account account;
+    account.setName(QStringLiteral("Commit Tester"));
+    account.setEmail(QStringLiteral("commit@test.invalid"));
+    repository.setAccount(&account);
+
+    // Commit the managed .gitattributes first so the measured commit sees only the LFS files.
+    QFile readme(QDir(repoPath).filePath(QStringLiteral("README.txt")));
+    REQUIRE(readme.open(QFile::WriteOnly | QFile::Truncate));
+    REQUIRE(readme.write(QByteArray("baseline\n")) > 0);
+    readme.close();
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Baseline"), QString()));
+
+    const int lfsFileCount = 2;
+    for (int i = 0; i < lfsFileCount; ++i) {
+        const QString path = QDir(repoPath).filePath(QStringLiteral("scan-%1.png").arg(i));
+        REQUIRE(!createPngFile(path, QColor(0, i, 0)).isEmpty());
+    }
+
+    QList<CommitProgressCall> calls;
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Two LFS files"), QString(),
+                                         [&calls](int done, int total) {
+                                             calls.append(CommitProgressCall{done, total});
+                                         }));
+
+    // One call per staged entry plus one per file in the LFS pointer pass.
+    requireCommitProgressSequence(calls, lfsFileCount * 2);
+}

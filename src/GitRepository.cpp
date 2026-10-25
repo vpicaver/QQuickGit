@@ -253,11 +253,97 @@ int computeModifiedFileCount(git_repository* repo, const QString& workTreeRoot)
     return filteredStatusEntryCount(repo, workTreeRoot, list);
 }
 
+const char* statusEntryOldPath(const git_status_entry* entry)
+{
+    if (entry == nullptr) {
+        return nullptr;
+    }
+    if (entry->index_to_workdir != nullptr && entry->index_to_workdir->old_file.path != nullptr) {
+        return entry->index_to_workdir->old_file.path;
+    }
+    if (entry->head_to_index != nullptr && entry->head_to_index->old_file.path != nullptr) {
+        return entry->head_to_index->old_file.path;
+    }
+    return nullptr;
+}
+
+const char* statusEntryNewPath(const git_status_entry* entry)
+{
+    if (entry == nullptr) {
+        return nullptr;
+    }
+    if (entry->index_to_workdir != nullptr && entry->index_to_workdir->new_file.path != nullptr) {
+        return entry->index_to_workdir->new_file.path;
+    }
+    if (entry->head_to_index != nullptr && entry->head_to_index->new_file.path != nullptr) {
+        return entry->head_to_index->new_file.path;
+    }
+    return nullptr;
+}
+
+bool isStatusEntryDeletion(unsigned int status)
+{
+    return !(status & (GIT_STATUS_INDEX_RENAMED | GIT_STATUS_WT_RENAMED))
+        && (status & (GIT_STATUS_INDEX_DELETED | GIT_STATUS_WT_DELETED));
+}
+
+// A worktree file the commit's LFS pointer pass converts: present, a regular file, and LFS-eligible.
+bool isLfsPointerPassCandidate(const LfsStore& store, const QString& absolutePath)
+{
+    const QFileInfo info(absolutePath);
+    return info.exists() && !info.isDir() && store.isLfsEligible(absolutePath);
+}
+
+struct CommitEntryCounts {
+    int pending = 0;
+    int lfsPointerPass = 0;
+};
+
+// Counts in one pass over `list` the entries stageFilteredStatusEntries() will stage and, when
+// `store` is set, those of them the LFS pointer pass in commitAll() then visits, so commit
+// progress can announce its total up front without hashing hydrated LFS files again.
+CommitEntryCounts commitEntryCounts(git_repository* repo,
+                                    const QString& workTreeRoot,
+                                    git_status_list* list,
+                                    const LfsStore* store)
+{
+    CommitEntryCounts counts;
+    if (list == nullptr) {
+        return counts;
+    }
+
+    const QDir workDir(workTreeRoot);
+    const size_t entryCount = git_status_list_entrycount(list);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_status_entry* entry = git_status_byindex(list, i);
+        if (hydratedLfsFileMatchesIndexPointer(repo, workTreeRoot, entry)) {
+            continue;
+        }
+        ++counts.pending;
+
+        if (store == nullptr || entry == nullptr) {
+            continue;
+        }
+        if (entry->status == GIT_STATUS_CURRENT || isStatusEntryDeletion(entry->status)) {
+            continue;
+        }
+        const char* rawNewPath = statusEntryNewPath(entry);
+        if (rawNewPath == nullptr || *rawNewPath == '\0') {
+            continue;
+        }
+        if (isLfsPointerPassCandidate(*store, workDir.filePath(QString::fromUtf8(rawNewPath)))) {
+            ++counts.lfsPointerPass;
+        }
+    }
+    return counts;
+}
+
 int stageFilteredStatusEntries(git_repository* repo,
                                const QString& workTreeRoot,
                                git_index* index,
                                git_status_list* list,
-                               QSet<QString>* stagedPaths)
+                               QSet<QString>* stagedPaths,
+                               const std::function<void()>& entryStaged = {})
 {
     if (repo == nullptr || index == nullptr || list == nullptr) {
         return 0;
@@ -289,33 +375,14 @@ int stageFilteredStatusEntries(git_repository* repo,
         }
     };
 
-    auto oldPath = [](const git_status_entry* entry) -> const char* {
-        if (entry == nullptr) {
-            return nullptr;
-        }
-        if (entry->index_to_workdir != nullptr && entry->index_to_workdir->old_file.path != nullptr) {
-            return entry->index_to_workdir->old_file.path;
-        }
-        if (entry->head_to_index != nullptr && entry->head_to_index->old_file.path != nullptr) {
-            return entry->head_to_index->old_file.path;
-        }
-        return nullptr;
-    };
-
-    auto newPath = [](const git_status_entry* entry) -> const char* {
-        if (entry == nullptr) {
-            return nullptr;
-        }
-        if (entry->index_to_workdir != nullptr && entry->index_to_workdir->new_file.path != nullptr) {
-            return entry->index_to_workdir->new_file.path;
-        }
-        if (entry->head_to_index != nullptr && entry->head_to_index->new_file.path != nullptr) {
-            return entry->head_to_index->new_file.path;
-        }
-        return nullptr;
-    };
-
     int stagedCount = 0;
+    auto markStaged = [&stagedCount, &entryStaged]() {
+        ++stagedCount;
+        if (entryStaged) {
+            entryStaged();
+        }
+    };
+
     const size_t entryCount = git_status_list_entrycount(list);
     for (size_t i = 0; i < entryCount; ++i) {
         const git_status_entry* entry = git_status_byindex(list, i);
@@ -328,29 +395,22 @@ int stageFilteredStatusEntries(git_repository* repo,
             continue;
         }
 
+        if (isStatusEntryDeletion(status)) {
+            removePath(statusEntryOldPath(entry));
+            markStaged();
+            continue;
+        }
+
         if (status & (GIT_STATUS_INDEX_RENAMED | GIT_STATUS_WT_RENAMED)) {
-            removePath(oldPath(entry));
-            const char* rawNewPath = newPath(entry);
-            addPath(rawNewPath);
-            if (stagedPaths != nullptr && rawNewPath != nullptr) {
-                stagedPaths->insert(QString::fromUtf8(rawNewPath));
-            }
-            ++stagedCount;
-            continue;
+            removePath(statusEntryOldPath(entry));
         }
 
-        if (status & (GIT_STATUS_INDEX_DELETED | GIT_STATUS_WT_DELETED)) {
-            removePath(oldPath(entry));
-            ++stagedCount;
-            continue;
-        }
-
-        const char* rawNewPath = newPath(entry);
+        const char* rawNewPath = statusEntryNewPath(entry);
         addPath(rawNewPath);
         if (stagedPaths != nullptr && rawNewPath != nullptr) {
             stagedPaths->insert(QString::fromUtf8(rawNewPath));
         }
-        ++stagedCount;
+        markStaged();
     }
 
     return stagedCount;
@@ -1739,7 +1799,8 @@ void GitRepository::cleanUntracked()
 }
 
 void GitRepository::commitAll(const QString &subject,
-                              const QString &description)
+                              const QString &description,
+                              const CommitProgress& progress)
 {
     Q_ASSERT(account());
 
@@ -1757,11 +1818,21 @@ void GitRepository::commitAll(const QString &subject,
     statusOptions.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
     statusOptions.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
     check(git_status_list_new(&statusList, d->repo, &statusOptions));
-    const int pendingEntryCount = filteredStatusEntryCount(d->repo, d->mDirectory.absolutePath(), statusList);
-    if (pendingEntryCount <= 0) {
+    const CommitEntryCounts entryCounts =
+        commitEntryCounts(d->repo, d->mDirectory.absolutePath(), statusList, d->mLfsStore.get());
+    if (entryCounts.pending <= 0) {
         git_status_list_free(statusList);
         return;
     }
+
+    const int progressTotal = entryCounts.pending + entryCounts.lfsPointerPass;
+    int progressDone = 0;
+    auto reportProgress = [&progress, &progressDone, progressTotal]() {
+        if (progress) {
+            progressDone = std::min(progressDone + 1, progressTotal);
+            progress(progressDone, progressTotal);
+        }
+    };
 
     check(git_repository_index(&index, d->repo));
     QSet<QString> stagedPaths;
@@ -1770,7 +1841,8 @@ void GitRepository::commitAll(const QString &subject,
                                    d->mDirectory.absolutePath(),
                                    index,
                                    statusList,
-                                   &stagedPaths);
+                                   &stagedPaths,
+                                   reportProgress);
     git_status_list_free(statusList);
     statusList = nullptr;
     if (stagedEntryCount <= 0) {
@@ -1801,17 +1873,15 @@ void GitRepository::commitAll(const QString &subject,
     if (d->mLfsStore) {
         const QDir workDir = d->mDirectory;
         for (const QString& relativePath : std::as_const(stagedPaths)) {
+            const QString absolutePath = workDir.filePath(relativePath);
+            if (!isLfsPointerPassCandidate(*d->mLfsStore, absolutePath)) {
+                continue;
+            }
+            reportProgress();
+
             const QByteArray pathUtf8 = relativePath.toUtf8();
             const git_index_entry* existing = git_index_get_bypath(index, pathUtf8.constData(), 0);
             if (!existing || !existing->path) {
-                continue;
-            }
-
-            const QString absolutePath = workDir.filePath(relativePath);
-            if (!QFileInfo::exists(absolutePath) || QFileInfo(absolutePath).isDir()) {
-                continue;
-            }
-            if (!d->mLfsStore->isLfsEligible(absolutePath)) {
                 continue;
             }
 

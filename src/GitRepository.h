@@ -20,6 +20,7 @@ class GitRepositoryData;
 #include <QStringList>
 #include <QByteArray>
 #include <memory>
+#include <functional>
 
 namespace QQuickGit {
 class LfsStore;
@@ -148,8 +149,13 @@ public:
     Q_INVOKABLE void resetHard(const QString& refSpec);
     Q_INVOKABLE void cleanUntracked();
 
+    // Called synchronously on the calling thread while the repository lock is held;
+    // it must not call back into GitRepository.
+    using CommitProgress = std::function<void(int done, int total)>;
+
     Q_INVOKABLE void commitAll(const QString& subject,
-                               const QString& description);
+                               const QString& description,
+                               const CommitProgress& progress = {});
 
     Q_INVOKABLE GitRepository::GitFuture push(QString refSpec = QString(), QString remote = QString());
     Q_INVOKABLE GitRepository::MergeFuture pull(const QString& remote = QString());
