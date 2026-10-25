@@ -1689,9 +1689,9 @@ void GitRepository::checkStatus()
     if (d->repo) {
         int count = 0;
         {
-            // Hold the lock only for the git read, not across the signal that
-            // setModifiedFileCount emits — a slot may re-enter checkStatus()
-            // and deadlock on this non-recursive mutex (e.g. cwProjectSyncHealth).
+            // The lock covers only the git read and is released before
+            // setModifiedFileCount emits, because a connected slot may call
+            // back into this repository and the mutex is non-recursive.
             auto locker = d->lockRepo();
             count = computeModifiedFileCount(d->repo, d->mDirectory.absolutePath());
         }
