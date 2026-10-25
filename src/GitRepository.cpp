@@ -17,6 +17,7 @@
 #include "LfsHydrator.h"
 #include "Monad/Result.h"
 #include "ProgressState.h"
+#include "ProgressReporting.h"
 #include "Monad/Monad.h"
 
 //LibGit2 includes
@@ -1441,7 +1442,7 @@ QFuture<ResultBase> GitRepository::clone(const QUrl &url)
                         clone_opts.fetch_opts.callbacks.transfer_progress = GitRepositoryData::fetchProgress;
                         SshCallbackPayload callbackPayload;
                         callbackPayload.reportProgress = [progressInterface](const ProgressState& progress) mutable {
-                            setProgress(&progressInterface, progress);
+                            setFutureProgress(&progressInterface, progress);
                         };
                         callbackPayload.allowAgent = allowAgent;
                         callbackPayload.agentMaxAttempts = 1;
@@ -1946,7 +1947,7 @@ GitRepository::GitFuture GitRepository::push(QString refSpec, QString remote)
                             options.callbacks.push_transfer_progress = GitRepositoryData::transferProgress;
                             SshCallbackPayload callbackPayload;
                             callbackPayload.reportProgress = [progressInterface](const ProgressState& progress) mutable {
-                                setProgress(&progressInterface, progress);
+                                setFutureProgress(&progressInterface, progress);
                             };
                             callbackPayload.allowAgent = true;
                             callbackPayload.agentMaxAttempts = 1;
@@ -1990,12 +1991,12 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
                 d->mDirectory,
                 fixedRemote,
                 [progressInterface](const ProgressState& progress) mutable {
-                    setProgress(&progressInterface, progress);
+                    setFutureProgress(&progressInterface, progress);
                 },
                 d->m_credentials);
             AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
                 if(!fetchFuture.progressText().isEmpty()) {
-                    setProgress(&progressInterface, fetchFuture.progressText());
+                    setFutureProgress(&progressInterface, fetchFuture.progressText());
                 }
             });
             return AsyncFuture::observe(fetchFuture)
@@ -2020,7 +2021,7 @@ GitRepository::MergeFuture GitRepository::pull(const QString& remote)
 
                                          //remote branch exists
                                          if(remoteBranchExists(remoteBranch)) {
-                                             setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                                             setFutureProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
                                              return merge({remoteBranch});
                                          }
                                      }
@@ -2049,12 +2050,12 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                 d->mDirectory,
                 fixedRemote,
                 [progressInterface](const ProgressState& progress) mutable {
-                    setProgress(&progressInterface, progress);
+                    setFutureProgress(&progressInterface, progress);
                 },
                 d->m_credentials);
             AsyncFuture::observe(fetchFuture).onProgress([=]() mutable {
                 if(!fetchFuture.progressText().isEmpty()) {
-                    setProgress(&progressInterface, fetchFuture.progressText());
+                    setFutureProgress(&progressInterface, fetchFuture.progressText());
                 }
             });
 
@@ -2089,11 +2090,11 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
 
                         const auto counts = aheadBehindResult.value();
                         if (counts.ahead == 0 || counts.behind == 0) {
-                            setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                            setFutureProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
                             return merge({remoteBranch});
                         }
 
-                        setProgress(&progressInterface, ProgressState(QStringLiteral("Rebasing"), 0, 1));
+                        setFutureProgress(&progressInterface, ProgressState(QStringLiteral("Rebasing"), 0, 1));
                         // Apply phase: the rebase rewrites the worktree/index and
                         // smudges LFS files. Serialize against the status worker;
                         // released before the merge() fallback, which self-locks.
@@ -2107,7 +2108,7 @@ GitRepository::MergeFuture GitRepository::pullRebaseOrMerge(const QString& remot
                         }
 
                         if (rebaseResult.value() == MergeResult::MergeConflicts) {
-                            setProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
+                            setFutureProgress(&progressInterface, ProgressState(QStringLiteral("Merging"), 0, 1));
                             return merge({remoteBranch});
                         }
 
@@ -2130,7 +2131,7 @@ GitRepository::GitFuture GitRepository::pullPush(const QString &refSpec, const Q
             .context(this, [=]() ->GitFuture
                      {
                          AsyncFuture::observe(pullFuture).onProgress([=]() mutable {
-                             setProgress(&progressInterface, pullFuture.progressText());
+                             setFutureProgress(&progressInterface, pullFuture.progressText());
                          });
 
                          return mbind(pullFuture, [=](const Result<MergeResult>& mergeResult) -> GitFuture {
@@ -2141,7 +2142,7 @@ GitRepository::GitFuture GitRepository::pullPush(const QString &refSpec, const Q
                              auto pushFuture = push(refSpec, remote);
 
                              AsyncFuture::observe(pushFuture).onProgress([=]() mutable {
-                                 setProgress(&progressInterface, pushFuture.progressText());
+                                 setFutureProgress(&progressInterface, pushFuture.progressText());
                              });
 
                              return pushFuture;
@@ -2163,7 +2164,7 @@ GitRepository::GitFuture GitRepository::fetch(const QString& remote)
                 d->mDirectory,
                 fixUpRemote(remote),
                 [progressInterface](const ProgressState& progress) mutable {
-                    setProgress(&progressInterface, progress);
+                    setFutureProgress(&progressInterface, progress);
                 },
                 d->m_credentials);
 

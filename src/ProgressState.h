@@ -30,21 +30,6 @@ private:
 
 };
 
-template<typename ProgressInterface>
-void setProgress(ProgressInterface* progressInterface, const QString& text) {
-    if(!text.isEmpty()) {
-        //We have to increment the progress by one to signal that the text changes
-        progressInterface->setProgressValueAndText(progressInterface->progressValue()+1, text);
-    }
-}
-
-template<typename ProgressInterface>
-void setProgress(ProgressInterface* progressInterface, const ProgressState& progress) {
-    //We have to increment the progress by one to signal that the text changes
-    progressInterface->setProgressRange(0, progress.total());
-    setProgress(progressInterface, progress.toJsonString());
-}
-
 };
 
 #endif // PROGRESSSTATE_H

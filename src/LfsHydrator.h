@@ -4,6 +4,7 @@
 //QQuickGit
 #include "GitRepository.h"
 #include "ProgressState.h"
+#include "ProgressReporting.h"
 #include "LfsFilter.h"
 #include "LfsStore.h"
 #include "LfsBatchClient.h"
@@ -78,10 +79,10 @@ LfsTransferProgress makeLfsTransferProgress(ProgressInterface progressInterface)
     return [progressInterface](const QString& text, int current, int total) mutable {
         const int safeTotal = std::max(1, total);
         const int safeCurrent = std::clamp(current, 0, safeTotal);
-        setProgress(&progressInterface,
-                    ProgressState(text,
-                                  static_cast<size_t>(safeCurrent),
-                                  static_cast<size_t>(safeTotal)));
+        setFutureProgress(&progressInterface,
+                          ProgressState(text,
+                                        static_cast<size_t>(safeCurrent),
+                                        static_cast<size_t>(safeTotal)));
     };
 }
 
