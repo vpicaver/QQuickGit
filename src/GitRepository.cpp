@@ -243,11 +243,17 @@ int computeModifiedFileCount(git_repository* repo, const QString& workTreeRoot)
 
     git_status_options opt = GIT_STATUS_OPTIONS_INIT;
     opt.show  = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-    opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+    opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS
+                | GIT_STATUS_OPT_UPDATE_INDEX;
 
     git_status_list* list = nullptr;
     if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
-        return 0;
+        // The index may be unwritable (read-only .git, or index.lock held by another git).
+        // The handle keeps the refreshed stat data in memory, so the retry reuses it.
+        opt.flags &= ~GIT_STATUS_OPT_UPDATE_INDEX;
+        if (git_status_list_new(&list, repo, &opt) != GIT_OK) {
+            return 0;
+        }
     }
     auto listGuard = qScopeGuard([list]() { git_status_list_free(list); });
     return filteredStatusEntryCount(repo, workTreeRoot, list);

@@ -9,9 +9,11 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QSignalSpy>
+#include <QScopeGuard>
 
 //libgit2
 #include "git2.h"
+#include "git2/sys/diff.h"
 
 //Catch includes
 #include <catch2/catch_test_macros.hpp>
@@ -26,6 +28,23 @@ static void waitForAsyncStatusAfterCommit(QQuickGit::GitRepository& repo)
         QCoreApplication::processEvents();
     }
     repo.checkStatus();
+}
+
+using RepositoryHandle = std::unique_ptr<git_repository, decltype(&git_repository_free)>;
+using IndexHandle = std::unique_ptr<git_index, decltype(&git_index_free)>;
+
+static RepositoryHandle openRepository(const QDir& repoDir)
+{
+    git_repository* repo = nullptr;
+    REQUIRE(git_repository_open(&repo, repoDir.absolutePath().toLocal8Bit().constData()) == GIT_OK);
+    return RepositoryHandle(repo, &git_repository_free);
+}
+
+static IndexHandle openIndex(git_repository* repo)
+{
+    git_index* index = nullptr;
+    REQUIRE(git_repository_index(&index, repo) == GIT_OK);
+    return IndexHandle(index, &git_index_free);
 }
 
 TestUtilities::TestUtilities()
@@ -186,4 +205,55 @@ void TestUtilities::initBareRepo(const QString& path)
     REQUIRE(git_repository_init_ext(&repo, path.toLocal8Bit().constData(), &opts) == GIT_OK);
     REQUIRE(repo != nullptr);
     git_repository_free(repo);
+}
+
+TestUtilities::IndexEntryTime TestUtilities::indexEntryModificationTime(const QDir& repoDir, const QString& path)
+{
+    const auto repo = openRepository(repoDir);
+    const auto index = openIndex(repo.get());
+
+    const git_index_entry* entry = git_index_get_bypath(index.get(), path.toUtf8().constData(), 0);
+    REQUIRE(entry != nullptr);
+
+    return {entry->mtime.seconds, entry->mtime.nanoseconds};
+}
+
+QDateTime TestUtilities::pastWholeSecond()
+{
+    constexpr qint64 kSecondsInPast = 3600;
+    const qint64 nowSeconds = QDateTime::currentSecsSinceEpoch();
+    return QDateTime::fromSecsSinceEpoch(nowSeconds - kSecondsInPast);
+}
+
+void TestUtilities::setTrackedFilesModificationTime(const QDir& repoDir, const QDateTime& time)
+{
+    const auto repo = openRepository(repoDir);
+    const auto index = openIndex(repo.get());
+
+    const size_t entryCount = git_index_entrycount(index.get());
+    REQUIRE(entryCount > 0);
+    for (size_t i = 0; i < entryCount; ++i) {
+        const git_index_entry* entry = git_index_get_byindex(index.get(), i);
+        REQUIRE(entry != nullptr);
+        QFile file(repoDir.filePath(QString::fromUtf8(entry->path)));
+        REQUIRE(file.open(QFile::ReadWrite));
+        REQUIRE(file.setFileTime(time, QFileDevice::FileModificationTime));
+    }
+}
+
+size_t TestUtilities::statusOidCalculations(const QDir& repoDir)
+{
+    const auto repo = openRepository(repoDir);
+
+    git_status_options opt = GIT_STATUS_OPTIONS_INIT;
+    opt.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opt.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+
+    git_status_list* list = nullptr;
+    REQUIRE(git_status_list_new(&list, repo.get(), &opt) == GIT_OK);
+    auto listGuard = qScopeGuard([list]() { git_status_list_free(list); });
+
+    git_diff_perfdata perf = GIT_DIFF_PERFDATA_INIT;
+    REQUIRE(git_status_list_get_perfdata(&perf, list) == GIT_OK);
+    return perf.oid_calculations;
 }

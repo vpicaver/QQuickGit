@@ -21,9 +21,12 @@
 #include <QUuid>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QScopeGuard>
 
 //Std includes
 #include <iostream>
+#include <filesystem>
+#include <chrono>
 
 //Async include
 #include "asyncfuture.h"
@@ -1926,6 +1929,97 @@ TEST_CASE("GitRepository checkStatusAsync returns accurate file count", "[GitRep
         REQUIRE(AsyncFuture::waitForFinished(future, 5000));
 
         CHECK(repo.modifiedFileCount() == syncCount);
+    }
+}
+
+TEST_CASE("GitRepository status refreshes the index stat cache", "[GitRepository]")
+{
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+    const QDir repoDir(tempDir.path());
+
+    GitRepository repo;
+    repo.setDirectory(repoDir);
+    repo.initRepository();
+
+    TestUtilities::createFileAndCommit(repo, "file1.txt", "hello", "Initial commit");
+
+    const QDateTime pastTime = TestUtilities::pastWholeSecond();
+
+    SECTION("checkStatus writes the refreshed stat data")
+    {
+        TestUtilities::setTrackedFilesModificationTime(repoDir, pastTime);
+
+        repo.checkStatus();
+        CHECK(repo.modifiedFileCount() == 0);
+
+        const auto entryTime = TestUtilities::indexEntryModificationTime(repoDir, QStringLiteral("file1.txt"));
+        CHECK(entryTime.seconds == pastTime.toSecsSinceEpoch());
+        CHECK(entryTime.nanoseconds == 0);
+
+        CHECK(TestUtilities::statusOidCalculations(repoDir) == 0);
+    }
+
+    SECTION("checkStatusAsync writes the refreshed stat data for the main-thread handle")
+    {
+        TestUtilities::setTrackedFilesModificationTime(repoDir, pastTime);
+
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == false);
+        CHECK(repo.modifiedFileCount() == 0);
+
+        const auto entryTime = TestUtilities::indexEntryModificationTime(repoDir, QStringLiteral("file1.txt"));
+        CHECK(entryTime.seconds == pastTime.toSecsSinceEpoch());
+        CHECK(entryTime.nanoseconds == 0);
+        CHECK(TestUtilities::statusOidCalculations(repoDir) == 0);
+
+        const std::filesystem::path indexPath = repoDir.filePath(QStringLiteral(".git/index")).toStdString();
+        const auto indexWriteNanoseconds = [&indexPath]() {
+            const auto sinceEpoch = std::filesystem::last_write_time(indexPath).time_since_epoch();
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(sinceEpoch).count();
+        };
+        const auto indexWriteTime = indexWriteNanoseconds();
+
+        repo.checkStatus();
+        CHECK(repo.modifiedFileCount() == 0);
+        CHECK(indexWriteNanoseconds() == indexWriteTime);
+    }
+
+    SECTION("A read-only .git directory still reports the modified count")
+    {
+        TestUtilities::createFileAndCommit(repo, "file2.txt", "world", "Second commit");
+        TestUtilities::setTrackedFilesModificationTime(repoDir, pastTime);
+
+        QFile modified(repoDir.filePath(QStringLiteral("file2.txt")));
+        REQUIRE(modified.open(QFile::WriteOnly | QFile::Truncate | QFile::Text));
+        modified.write("WORLD");
+        modified.close();
+
+        const QString gitDirPath = repoDir.filePath(QStringLiteral(".git"));
+        const QFile::Permissions originalPermissions = QFile::permissions(gitDirPath);
+        REQUIRE(QFile::setPermissions(gitDirPath,
+                                      QFile::ReadOwner | QFile::ExeOwner
+                                          | QFile::ReadGroup | QFile::ExeGroup
+                                          | QFile::ReadOther | QFile::ExeOther));
+        auto permissionGuard = qScopeGuard([gitDirPath, originalPermissions]() {
+            QFile::setPermissions(gitDirPath, originalPermissions);
+        });
+
+        QFile probe(QDir(gitDirPath).filePath(QStringLiteral("write-probe")));
+        if (probe.open(QFile::WriteOnly)) {
+            probe.close();
+            probe.remove();
+            SKIP("The .git directory stays writable for this user");
+        }
+
+        repo.checkStatus();
+        CHECK(repo.modifiedFileCount() == 1);
+
+        auto future = repo.checkStatusAsync();
+        REQUIRE(AsyncFuture::waitForFinished(future, 5000));
+        CHECK(future.result() == true);
+        CHECK(repo.modifiedFileCount() == 1);
     }
 }
 

@@ -32,6 +32,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QSignalSpy>
 #include <algorithm>
 #include <functional>
 #include <memory>
@@ -1448,6 +1449,44 @@ TEST_CASE("Lfs commit via GitRepository stores pointer and checkout restores PNG
     CHECK(repository.modifiedFileCount() == 0);
 
     git_repository_free(repo);
+}
+
+TEST_CASE("Lfs status refreshes the index stat cache for an unchanged LFS file", "[LFS]") {
+    QTemporaryDir tempDir;
+    REQUIRE(tempDir.isValid());
+
+    const QDir repoDir(tempDir.path());
+    GitRepository repository;
+    repository.setDirectory(repoDir);
+    repository.setLfsPolicy(makeCustomPolicy(QStringLiteral("qquickgit-test")));
+    repository.initRepository();
+
+    const QString imageFileName = QStringLiteral("red.png");
+    REQUIRE(!createPngFile(repoDir.filePath(imageFileName), Qt::red).isEmpty());
+
+    Account account;
+    account.setName(QStringLiteral("LFS Tester"));
+    account.setEmail(QStringLiteral("lfs@test.invalid"));
+    repository.setAccount(&account);
+
+    repository.checkStatus();
+    REQUIRE(repository.modifiedFileCount() > 0);
+
+    QSignalSpy statusSpy(&repository, &GitRepository::modifiedFileCountChanged);
+    REQUIRE_NOTHROW(repository.commitAll(QStringLiteral("Add png"), QStringLiteral("LFS test")));
+    REQUIRE(statusSpy.wait(5000));
+
+    const QDateTime pastTime = TestUtilities::pastWholeSecond();
+    TestUtilities::setTrackedFilesModificationTime(repoDir, pastTime);
+
+    repository.checkStatus();
+    CHECK(repository.modifiedFileCount() == 0);
+
+    const auto entryTime = TestUtilities::indexEntryModificationTime(repoDir, imageFileName);
+    CHECK(entryTime.seconds == pastTime.toSecsSinceEpoch());
+    CHECK(entryTime.nanoseconds == 0);
+
+    CHECK(TestUtilities::statusOidCalculations(repoDir) == 0);
 }
 
 TEST_CASE("Lfs commits keep working tree PNG for multiple commits", "[LFS]") {

@@ -6,6 +6,7 @@
 #include <QString>
 #include <QModelIndex>
 #include <QHash>
+#include <QDateTime>
 
 namespace QQuickGit { class GitRepository; }
 
@@ -27,6 +28,21 @@ public:
                                     const QString& message);
     static QString getHeadSha(const QDir& dir);
     static void initBareRepo(const QString& path);
+
+    struct IndexEntryTime {
+        qint64 seconds = -1;
+        qint64 nanoseconds = -1;
+    };
+
+    // Reads through a freshly opened repository so the result is what is on disk.
+    static IndexEntryTime indexEntryModificationTime(const QDir& repoDir, const QString& path);
+
+    // A whole second an hour in the past, so the index stamp never makes it racy.
+    static QDateTime pastWholeSecond();
+    static void setTrackedFilesModificationTime(const QDir& repoDir, const QDateTime& time);
+
+    // Number of entries libgit2 hashes in a status walk that leaves the index as is.
+    static size_t statusOidCalculations(const QDir& repoDir);
 };
 
 std::ostream& operator<<(std::ostream& os, const QVariantMap& map);
