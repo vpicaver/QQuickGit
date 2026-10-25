@@ -1124,7 +1124,7 @@ GitRepository::GitFuture runLfsDownloadActions(const LfsHydrationPlan& plan,
             }
             if (progress) {
                 const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
-                progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+                progress(QStringLiteral("Downloading files"), pointerFileCount, pointerFileCount);
             }
             return AsyncFuture::completed(hydratePointerFiles(plan));
         }).future();
@@ -1359,12 +1359,12 @@ GitRepository::GitFuture runLfsHydrationPipeline(const LfsHydrationPlan& plan,
 
     const int pointerFileCount = static_cast<int>(plan.pointerFiles.size());
     if (progress) {
-        progress(QStringLiteral("Hydrating LFS files"), 0, std::max(1, pointerFileCount));
+        progress(QStringLiteral("Downloading files"), 0, std::max(1, pointerFileCount));
     }
 
     if (plan.missingPointers.isEmpty()) {
         if (progress) {
-            progress(QStringLiteral("Hydrating LFS files"), pointerFileCount, pointerFileCount);
+            progress(QStringLiteral("Downloading files"), pointerFileCount, pointerFileCount);
         }
         return AsyncFuture::completed(hydratePointerFiles(plan));
     }

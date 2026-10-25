@@ -1799,7 +1799,7 @@ TEST_CASE("Lfs hydration skips pointer blobs missing from working tree", "[LFS][
     bool sawLfsHydrationProgress = false;
     for (const QString& text : std::as_const(progressTexts)) {
         if (text.contains(QStringLiteral("Downloading LFS"))
-            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            || text.contains(QStringLiteral("Downloading files"))) {
             sawLfsHydrationProgress = true;
             break;
         }
@@ -1889,7 +1889,7 @@ TEST_CASE("Lfs fetch restores missing object for hydrated tracked file", "[LFS][
     bool sawLfsProgress = false;
     for (const QString& text : std::as_const(progressTexts)) {
         if (text.contains(QStringLiteral("Downloading LFS"))
-            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            || text.contains(QStringLiteral("Downloading files"))) {
             sawLfsProgress = true;
             break;
         }
@@ -2754,7 +2754,7 @@ TEST_CASE("Lfs policy configured before clone remains active for subsequent comm
     CHECK(!pointer.oid.isEmpty());
 }
 
-TEST_CASE("Lfs pull fast-forward hydrates from local object store", "[LFS][regression][P2]") {
+TEST_CASE("Lfs pull fast-forward hydrates from local object store", "[LFS][regression][P2][ProgressReporting]") {
     QTemporaryDir tempDir;
     REQUIRE(tempDir.isValid());
 
@@ -2803,6 +2803,12 @@ TEST_CASE("Lfs pull fast-forward hydrates from local object store", "[LFS][regre
          << "code:" << pullFuture.result().errorCode());
     REQUIRE(!pullFuture.result().hasError());
     CHECK(pullFuture.result().value().state() == GitRepository::MergeResult::FastForward);
+
+    const ProgressState finalProgress = ProgressState::fromJson(pullFuture.progressText());
+    INFO("Final progress text:" << finalProgress.text().toStdString());
+    CHECK(finalProgress.text() == QStringLiteral("Downloading files"));
+    CHECK(finalProgress.current() == 1);
+    CHECK(finalProgress.total() == 1);
 
     const QString consumerFilePath = QDir(consumerPath).filePath(trackedFileName);
     const QByteArray workingBytes = readFileBytes(consumerFilePath);
@@ -2970,7 +2976,7 @@ LfsPointer primeConsumerForMissingLfsDownload(GitRepository& author,
 
 // Attaches an LFS-transfer progress collector to `operationFuture` and returns
 // the list it fills. Only updates whose text contains `filterText` are kept, so
-// the always-on "Hydrating LFS files" tick (emitted for any pointer file even
+// the always-on "Downloading files" tick (emitted for any pointer file even
 // when nothing is transferred) and the general push transfer ticks can't
 // masquerade as LFS transfer progress. Pass "Uploading LFS objects" for the push
 // path; the default matches the download (clone/fetch/pull/checkout) paths. The
@@ -3107,7 +3113,7 @@ void requireOperationReportsLfsDownloadProgress(
 
     // The operation had to hydrate the missing object over the network, so
     // download-specific progress must have surfaced (not just the always-on
-    // "Hydrating LFS files" tick), and the working tree must hold the real bytes.
+    // "Downloading files" tick), and the working tree must hold the real bytes.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
     requireLfsTransferProgress(*downloadStates);
     CHECK(readFileBytes(fixture.filePath) == fixture.bytes);
@@ -3145,7 +3151,7 @@ TEST_CASE("Lfs pull fast-forward reports LFS download progress", "[LFS][regressi
 
     // The missing object must actually have been downloaded, so download progress
     // must have surfaced for it — the download-specific text, not the always-on
-    // "Hydrating LFS files" tick that fires for any pointer file.
+    // "Downloading files" tick that fires for any pointer file.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
     requireLfsTransferProgress(*downloadStates);
 }
@@ -3195,7 +3201,7 @@ TEST_CASE("Lfs pullRebaseOrMerge rebase reports LFS download progress", "[LFS][r
 
     // The rebase must have hydrated the missing object over the network, so
     // download progress must have surfaced for it — the download-specific text,
-    // not the always-on "Hydrating LFS files" tick that fires for any pointer file.
+    // not the always-on "Downloading files" tick that fires for any pointer file.
     REQUIRE(lfsServer.downloadObjectRequestCount() > 0);
     requireLfsTransferProgress(*downloadStates);
 }
@@ -4137,8 +4143,8 @@ TEST_CASE("Lfs push surfaces aggregate upload progress", "[LFS][regression][P2]"
         QStringLiteral("p-a.png"), QStringLiteral("p-b.png"), QStringLiteral("p-c.png"),
         QStringLiteral("p-d.png"),
     };
-    const QList<QColor> fileColors = {Qt::green, Qt::blue, Qt::magenta, Qt::cyan};
-    REQUIRE(fileColors.size() == trackedFileNames.size());
+    // Large enough that Qt reports intermediate uploadProgress against the local server.
+    constexpr qsizetype kUploadFileBytes = 512 * 1024;
 
     TestUtilities::initBareRepo(remotePath);
 
@@ -4153,8 +4159,8 @@ TEST_CASE("Lfs push surfaces aggregate upload progress", "[LFS][regression][P2]"
     author.setAccount(&account);
 
     for (int i = 0; i < trackedFileNames.size(); ++i) {
-        const QByteArray bytes = createPngFile(QDir(authorPath).filePath(trackedFileNames.at(i)), fileColors.at(i));
-        REQUIRE(!bytes.isEmpty());
+        const QByteArray bytes(kUploadFileBytes, static_cast<char>('a' + i));
+        REQUIRE(writeTextFile(QDir(authorPath).filePath(trackedFileNames.at(i)), bytes));
     }
     REQUIRE_NOTHROW(author.commitAll(QStringLiteral("Add LFS files"), QStringLiteral("upload progress")));
 
@@ -4182,7 +4188,17 @@ TEST_CASE("Lfs push surfaces aggregate upload progress", "[LFS][regression][P2]"
          << "code:" << pushFuture.result().errorCode());
     REQUIRE(!pushFuture.result().hasError());
 
-    requireLfsTransferProgress(*uploadStates, static_cast<size_t>(trackedFileNames.size()));
+    const int fileCount = static_cast<int>(trackedFileNames.size());
+    requireLfsTransferProgress(*uploadStates, static_cast<size_t>(fileCount));
+
+    // Object completions alone yield at most fileCount + 1 distinct states (the initial 0/N report
+    // plus one per object); anything beyond that comes from per-byte uploadProgress forwarding.
+    QSet<QString> distinctUploadTexts;
+    for (const ProgressState& state : std::as_const(*uploadStates)) {
+        distinctUploadTexts.insert(state.text());
+    }
+    INFO("Observed " << distinctUploadTexts.size() << " distinct LFS upload progress texts");
+    CHECK(distinctUploadTexts.size() > fileCount + 1);
 }
 
 TEST_CASE("Lfs push of new branch excludes remote-reachable LFS ancestors", "[LFS][regression][P1]") {
@@ -4945,7 +4961,7 @@ TEST_CASE("GitRepository clone reports LFS hydration progress against GitHub SSH
     bool sawLfsProgress = false;
     for (const QString& text : std::as_const(progressTexts)) {
         if (text.contains(QStringLiteral("Downloading LFS objects"))
-            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            || text.contains(QStringLiteral("Downloading files"))) {
             sawLfsProgress = true;
             break;
         }
@@ -5013,7 +5029,7 @@ TEST_CASE("GitRepository fetch reports LFS hydration progress against GitHub SSH
     bool sawLfsProgress = false;
     for (const QString& text : std::as_const(progressTexts)) {
         if (text.contains(QStringLiteral("Downloading LFS objects"))
-            || text.contains(QStringLiteral("Hydrating LFS files"))) {
+            || text.contains(QStringLiteral("Downloading files"))) {
             sawLfsProgress = true;
             break;
         }

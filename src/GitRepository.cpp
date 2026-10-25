@@ -857,7 +857,7 @@ public:
 
         auto reportProgress = progressFromPayload(payload);
         if(reportProgress) {
-            auto progress = ProgressState(QStringLiteral("Transfering ... ") + bytesToString(bytes),
+            auto progress = ProgressState(QStringLiteral("Transferring ... ") + bytesToString(bytes),
                                           current,
                                           total);
             reportProgress(progress);
